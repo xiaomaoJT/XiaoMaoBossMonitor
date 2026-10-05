@@ -51,6 +51,8 @@ const SLOT_NORM = { detector: 'unit', face: 'scrfd', faceemb: 'arcface', pose: '
 /* ==================== 运行时与会话 ==================== */
 let ort = null
 let backend = ''
+/** 调用方是否允许用 WebGPU（用户在设置里关掉时为 false） */
+let preferGpu = true
 /** slot → { key, session, size, inputName, outputs } */
 const slots = {}
 
@@ -67,9 +69,13 @@ async function loadOrt() {
   return ort
 }
 
-/** 有 WebGPU 就优先用它（走 GPU，几乎不占 CPU） */
+/** 有 WebGPU 就优先用它（走 GPU，几乎不占 CPU）；也允许调用方强制只用 WASM */
 async function detectBackend() {
   if (backend) return backend
+  if (preferGpu === false) {
+    backend = 'wasm'
+    return backend
+  }
   try {
     if (self.navigator && self.navigator.gpu) {
       const adapter = await self.navigator.gpu.requestAdapter()
@@ -182,13 +188,59 @@ function toTensor(rgba, size, normName) {
   return f32
 }
 
-async function runSlot(slot, rgba, size) {
+/**
+ * 是不是「wasm 陷阱」类错误。
+ *
+ * `Uncaught RuntimeError: memory access out of bounds` 是 WebAssembly 的 trap，
+ * 在 Windows 上跑 WebGPU 后端（jsep）时比较常见：GPU 驱动 / 浏览器版本组合一旦
+ * 不被支持，症状不是普通 JS 异常，而是整个推理线程抛 RuntimeError。
+ * 这类错误可以自动降级处理；别的错误照常上抛，避免掩盖真问题。
+ */
+function isTrap(e) {
+  const msg = String((e && e.message) || e || '')
+  return /memory access out of bounds|RuntimeError|unreachable|out of bounds|abort/i.test(msg)
+}
+
+/** 释放所有会话（降级后必须重建，否则拿到的还是 WebGPU 会话） */
+async function releaseAll() {
+  for (const k of Object.keys(slots)) {
+    const s = slots[k]
+    if (s && s.session) {
+      try {
+        await s.session.release()
+      } catch (e) {
+        /* 忽略 */
+      }
+    }
+    slots[k] = null
+  }
+}
+
+async function runSlotOnce(slot, rgba, size) {
   const st = slots[slot]
   if (!st || !st.session) throw new Error(`槽位 ${slot} 未就绪`)
   const f32 = toTensor(rgba, size, SLOT_NORM[slot])
   const tensor = new ort.Tensor('float32', f32, [1, 3, size, size])
   const out = await st.session.run({ [st.inputName]: tensor })
   return st.outputs.map((n) => out[n])
+}
+
+/**
+ * 跑一次推理。
+ * 命中 wasm trap（多半来自 WebGPU）时：全局降级成 WASM、丢掉所有会话重建，
+ * 然后**重试一次**。这样「Windows + 特定驱动」这类环境下只是慢一点，
+ * 不会整个 AI 线程崩掉、界面从此再没有人形框。
+ */
+async function runSlot(slot, rgba, size) {
+  try {
+    return await runSlotOnce(slot, rgba, size)
+  } catch (e) {
+    if (!isTrap(e) || backend !== 'webgpu') throw e
+    backend = 'wasm'
+    await releaseAll()
+    self.postMessage({ type: 'downgrade', reason: 'WebGPU 推理异常，已自动切到 WASM' })
+    return await runSlotOnce(slot, rgba, size)
+  }
 }
 
 /* ==================== 通用后处理 ==================== */
@@ -412,6 +464,11 @@ self.onmessage = async (ev) => {
   const msg = ev.data || {}
 
   if (msg.type === 'init') {
+    // 调用方可以在设置里强制「只用 WASM」（默认允许 WebGPU）
+    if (typeof msg.preferGpu === 'boolean' && msg.preferGpu !== preferGpu) {
+      preferGpu = msg.preferGpu
+      backend = '' // 让下次 detectBackend 重新判定
+    }
     const t0 = Date.now()
     try {
       const st = await ensureSession(msg.slot, msg.model, msg.size || 640)

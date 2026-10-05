@@ -33,12 +33,14 @@
     "server": "node server/headless-monitor.mjs",
     "server:status": "curl -s http://127.0.0.1:8787/api/status",
     "win:deploy": "node scripts/make-win-deploy.mjs",
-    "win:deploy:zip": "node scripts/make-win-deploy.mjs --zip"
+    "win:deploy:zip": "node scripts/make-win-deploy.mjs --zip",
+    "ffmpeg:fetch": "node server/ffmpeg-fetch-cli.mjs"
   },
   "dependencies": {
     "@capacitor/app": "^8.1.1",
     "@capacitor/core": "^8.5.2",
     "@capacitor/ios": "^8.5.2",
+    "adm-zip": "^0.6.1",
     "better-sqlite3": "^13.0.3",
     "ffmpeg-static": "^5.3.0",
     "jpeg-js": "^0.4.4",

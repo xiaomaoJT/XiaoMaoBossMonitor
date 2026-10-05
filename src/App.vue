@@ -116,6 +116,7 @@
     />
 
     <EventPanel
+      ref="eventPanelRef"
       :open="eventPanelOpen"
       :events="events"
       :load-shot="loadEventShot"
@@ -411,6 +412,12 @@ function migrateCountInterval(opts) {
 
 const settingsOpen = ref(false)
 const eventPanelOpen = ref(false)
+/**
+ * 事件面板组件引用。
+ * 面板一直挂着（只是内部 v-if 控制显隐），所以点右上角通知时可以直接调它的
+ * openDetail() 打开详情弹窗 —— 弹窗 Teleport 到 body，不需要先展开面板。
+ */
+const eventPanelRef = ref(null)
 const zoomIndex = ref(null)
 const toast = ref('')
 const statusMap = reactive({})
@@ -1688,12 +1695,25 @@ async function exportEvents() {
  * 定位到某个事件对应的画面：不放大，只把该画面高亮闪烁 3 秒。
  * 画面如果被关闭了，先恢复显示。
  */
+/**
+ * 定位到某个通道 —— 右上角通知、事件列表点「定位」都走这里。
+ * 现在还会顺手打开该事件��详情弹窗（用户点通知的意图通常就是「看清这条」）。
+ */
 function focusEvent(ev) {
   if (!ev || !ev.id) return
   const id = ev.id
 
   if (hiddenIds.value.includes(id)) {
     hiddenIds.value = hiddenIds.value.filter((x) => x !== id)
+  }
+
+  /*
+   * 用事件库里的完整记录而不是通知项本身：通知项只有缩略图，
+   * 而完整记录带 shotInStore，详情弹窗才能去 IndexedDB 取高清原图。
+   */
+  const rec = (ev.key && events.value.find((e) => e.key === ev.key)) || ev
+  if (rec && rec.key && eventPanelRef.value && typeof eventPanelRef.value.openDetail === 'function') {
+    eventPanelRef.value.openDetail(rec)
   }
 
   nextTick(() => {

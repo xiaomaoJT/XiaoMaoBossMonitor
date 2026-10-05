@@ -506,6 +506,15 @@ async function openDetail(ev) {
   await ensureShot(ev)
 }
 
+/**
+ * 暴露给父组件调用。
+ *
+ * 详情弹窗与截图看板都是 Teleport 到 body 的，**不受面板本身开合影响** ——
+ * 所以右上角通知弹窗点一下就能直接开详情，不必先把事件面板拉出来。
+ * 外部只该用这一个入口，省得自己去动 detail / cachedShot 那套内部状态。
+ */
+defineExpose({ openDetail })
+
 /** 优先用原尺寸留档图，没有则退回小缩略图 */
 function srcOf(ev) {
   if (!ev) return ''

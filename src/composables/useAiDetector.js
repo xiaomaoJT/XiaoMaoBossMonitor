@@ -65,6 +65,29 @@ const readyKey = {}
 /** slot → 失败冷却截止时间（避免每个分析周期都重试加载一个永远失败的模型） */
 const failedUntil = {}
 
+/**
+ * 是否允许用 WebGPU 加速（设置里可关）。
+ *
+ * Windows 上部分显卡 / 驱动组合会让 WebGPU 后端抛
+ * `Uncaught RuntimeError: memory access out of bounds` —— 那是 WebAssembly 的 trap，
+ * 一旦发生整个推理线程就死了，界面从此再没有人形框。
+ * Worker 内已有「trap → 自动降级 WASM 并重建会话」的兜底，
+ * 但如果连 WASM 也扛不住（内存实在不够），关掉这个开关能彻底绕开 GPU 路径。
+ */
+let gpuPref = true
+
+/** 设置页开关：切换后重置「已就绪」缓存，下次加载按新偏好建会话 */
+export function setGpuPref(v) {
+  const next = v !== false
+  if (next === gpuPref) return
+  gpuPref = next
+  for (const k of Object.keys(readyKey)) delete readyKey[k]
+}
+
+export function getGpuPref() {
+  return gpuPref
+}
+
 function ensureWorker() {
   if (worker) return worker
   worker = new Worker(new URL('../workers/aiWorker.js', import.meta.url), { type: 'module' })
@@ -88,6 +111,21 @@ function ensureWorker() {
         delete initMap[slot]
         it.resolve(m)
       }
+      return
+    }
+
+    if (m.type === 'downgrade') {
+      // WebGPU 跑挂了（Windows 上偶发 wasm trap），Worker 已自动切到 WASM 并重建会话。
+      // 这里必须清掉「已就绪」缓存，否则主线程以为模型还在线、永远不再发 init。
+      for (const k of Object.keys(readyKey)) delete readyKey[k]
+      for (const k of Object.keys(initMap)) {
+        const it = initMap[k]
+        delete initMap[k]
+        // 重新加载：让它按新后端建会话
+        loadModel(k, it.file, it.size).catch(() => {})
+      }
+      aiBackend.value = 'wasm'
+      aiSlotBackend.value = {}
       return
     }
 
@@ -122,7 +160,14 @@ function ensureWorker() {
 
   worker.onerror = (e) => {
     aiState.value = 'error'
-    aiError.value = (e && e.message) || '推理线程异常'
+    const raw = (e && e.message) || '推理线程异常'
+    // wasm trap 在这里只会显示成一句 RuntimeError，对用户毫无指导意义
+    aiError.value = /memory access out of bounds|RuntimeError|out of bounds/i.test(raw)
+      ? '推理线程崩溃（GPU 加速在该设备上不兼容）。可在「设置 → 检测识别」里关掉 WebGPU 加速，已自动改用 CPU。'
+      : raw
+    // 线程已死：下一次调用会重建 worker，但要清掉「已就绪」缓存才会真的重新 init
+    for (const k of Object.keys(readyKey)) delete readyKey[k]
+    for (const k of Object.keys(failedUntil)) delete failedUntil[k]
   }
 
   return worker
@@ -158,8 +203,8 @@ export function loadModel(slot, file, size) {
     reject = rej
   })
   // 包一层：把 reject 也变成「不抛出」的 resolve，调用方统一用 .catch 兜底
-  initMap[slot] = { key, promise, resolve, reject }
-  ensureWorker().postMessage({ type: 'init', slot, model: name, size: side })
+  initMap[slot] = { key, promise, resolve, reject, file: name, size: side }
+  ensureWorker().postMessage({ type: 'init', slot, model: name, size: side, preferGpu: gpuPref })
   return promise
 }
 

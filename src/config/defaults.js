@@ -199,6 +199,14 @@ export const HIDDEN_OPTIONS = {
   aiScore: 0.5,
   /** 人形识别间隔（毫秒） */
   aiIntervalMs: 5000,
+  /**
+   * 是否允许用 WebGPU（显卡）加速推理，默认开。
+   * ⚠️ 个别 Windows 显卡 / 驱动组合会让 WebGPU 后端抛
+   * `Uncaught RuntimeError: memory access out of bounds`（WebAssembly trap，
+   * 一旦发生整个推理线程死掉、人形框全没了）。出现这种就关掉，走 CPU 推理。
+   * Worker 侧还有「trap → 自动降级 WASM」的兜底，但这里关掉更彻底。
+   */
+  aiGpu: true,
 
   /* ---------------- AI 扩展分析 ----------------
    * ⚠️ 这里是「总闸」。打开之后还要看通道级的分流开关（每个通道的 cam.aiExt）：
@@ -306,7 +314,14 @@ export const HIDDEN_OPTIONS = {
     /** 服务地址，如 http://10.0.0.12:8787（手机端要填 Mac 的局域网 IP） */
     url: '',
     /** 轮询间隔（毫秒） */
-    pollMs: 4000
+    pollMs: 4000,
+    /**
+     * 后端 ffmpeg 可执行文件路径（可空 = 用 npm 自带的 ffmpeg-static）。
+     * ⚠️ 自带的是 6.0，**解不了 H.265 的「增强型 FLV」**（codecId=0 + FourCC hvc1），
+     * 表现为各通道一直「拉流失败」；需要 7 以上（实测 9 正常）。
+     * 走 options 一起同步过去，后端重启后生效。
+     */
+    ffmpegPath: ''
   },
 
   /* ---------------- 报警记录 ---------------- */

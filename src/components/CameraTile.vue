@@ -310,7 +310,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { FrameSampler } from '../composables/frameSampler'
 import { ensureJessibuca, isJessibucaReady } from '../composables/useJessibuca'
 import { compareFrames, sensitivityToThreshold } from '../composables/useMotion'
-import { aiState, detectPersons, loadModel, loadPersonModel } from '../composables/useAiDetector'
+import { aiState, detectPersons, loadModel, loadPersonModel, setGpuPref } from '../composables/useAiDetector'
 import { activeFeatures, camExtOn, useAiExtras } from '../composables/useAiExtras'
 
 const props = defineProps({
@@ -916,6 +916,9 @@ function startAnalysis() {
     analysisTimer = setInterval(tickMotion, Math.round(1000 / fps))
   }
   if (props.options.aiEnabled && props.cam.ai) {
+    // 每次建会话前把「允不允许用 GPU」同步给检测器：Windows 上 WebGPU 可能直接
+    // 把推理线程炸掉（wasm trap），配置里关掉后这里就传 false，强制走 WASM。
+    setGpuPref(props.options.aiGpu)
     loadPersonModel(props.options.aiModel).catch(() => {})
     /*
      * 扩展模型提前加载：等第一次分析时再加载，那一次就拿不到结果了。
@@ -1671,7 +1674,7 @@ watch(
 )
 
 watch(
-  () => [props.options.aiEnabled, props.cam.ai, props.options.aiIntervalMs, props.options.aiModel, props.options.aiInputSize],
+  () => [props.options.aiEnabled, props.cam.ai, props.options.aiIntervalMs, props.options.aiModel, props.options.aiInputSize, props.options.aiGpu],
   () => {
     if (props.options.aiInputSize !== undefined) aiSampler = null
     if (status.value === 'playing') startAnalysis()

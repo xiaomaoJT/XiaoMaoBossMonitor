@@ -56,17 +56,28 @@ export function normalizeWeComWebhook(raw) {
   return v
 }
 
-function buildTarget(cfg) {
+export function buildTarget(cfg) {
   const url = normalizeWeComWebhook(cfg && cfg.webhook)
   if (!url) return ''
+  const u = new URL(url)
+  /*
+   * 只改写官方域名。非官方地址（自建反向代理 / 私有部署 / 本地假服务做自检）
+   * 必须原样使用 —— 早先这里无条件换成 WECOM_ORIGIN，把自建 webhook 直接打到了
+   * 官方去（表现为 errcode 93000 invalid webhook url，很难查）。
+   */
+  if (!/(^|\.)weixin\.qq\.com$/i.test(u.hostname)) return url
   const base = wecomBase(cfg)
   if (/^https?:\/\//i.test(base)) {
     // 把官方域名换成代理基地址（保留 pathname + query）
-    const u = new URL(url)
     return `${base}${u.pathname}${u.search}`
   }
+  /*
+   * Node（后端常驻检测服务）里没有 location：同源前缀会拼成相对路径，
+   * fetch 直接报「Failed to parse URL from /wecom-bot/…」。Node 没有 CORS 限制，
+   * 官方地址原样发出去即可。
+   */
   const origin = typeof location !== 'undefined' ? location.origin : ''
-  const u = new URL(url)
+  if (!origin || origin === 'null') return url
   return `${origin}${base}${u.pathname}${u.search}`
 }
 

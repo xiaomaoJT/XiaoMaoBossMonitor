@@ -116,7 +116,15 @@ export function toProxyUrl(fullUrl, cfg) {
     if (!/(^|\.)dingtalk\.com$/i.test(u.hostname)) return fullUrl
     const base = dingTalkBase(cfg)
     if (/^https?:\/\//i.test(base)) return `${base}${u.pathname}${u.search}`
+    /*
+     * 浏览器里用同源前缀转发（vite dev / Electron / 便携版 serve-static / 后端 8787 都各有一份）。
+     * Node（后端常驻检测服务）里没有 location —— 硬拼出来的是相对路径，
+     * fetch 会直接抛「Failed to parse URL from /dingtalk-robot/robot/send?…」。
+     * Node 侧不存在 CORS 限制，所以这里直接回到官方域名发请求，
+     * 这也正是「关掉页面、只留后端」时该走的路径。
+     */
     const origin = typeof location !== 'undefined' ? location.origin : ''
+    if (!origin || origin === 'null') return fullUrl
     return `${origin}${base}${u.pathname}${u.search}`
   } catch (e) {
     return fullUrl

@@ -708,6 +708,18 @@
             </span>
           </div>
 
+          <label class="opt" v-if="opts.aiEnabled">
+            <span>
+              <strong>GPU 加速（WebGPU）</strong>
+              <em>
+                开着走显卡推理，几乎不占 CPU。个别 Windows 显卡 / 驱动组合会让它报
+                <b>memory access out of bounds</b>（推理线程直接崩、人形框全没）——
+                遇到这种就关掉，改用 CPU 推理，慢一点但稳定。
+              </em>
+            </span>
+            <span class="switch" :class="{ on: opts.aiGpu }" @click="toggleAiGpu"></span>
+          </label>
+
           <div class="opt col" v-if="opts.aiEnabled">
             <span>
               <strong>人形置信度阈值</strong>
@@ -1124,6 +1136,22 @@
                 @change="opts.backend.url = $event.target.value.trim()"
               />
             </div>
+            <div class="opt col">
+              <span>
+                <strong>ffmpeg 路径（可选）</strong>
+                <em>
+                  后端解码用 ffmpeg。市面平台的 H.265 常用「增强型 FLV」，
+                  npm 自带的 6.0 <b>解不了</b>（表现为各路「拉流失败」），需要 7 以上。
+                  装好后填这里（或直接放进系统 PATH），重启后端服务生效。
+                </em>
+              </span>
+              <input
+                class="field wide"
+                v-model.trim="opts.backend.ffmpegPath"
+                spellcheck="false"
+                placeholder="留空 = 用 npm 自带版本（仅支持普通 H.264 FLV）"
+              />
+            </div>
             <div class="opt">
               <span>
                 <strong>配置同步</strong>
@@ -1202,6 +1230,13 @@
                   <b :class="backendStatus.ai && backendStatus.ai.pose ? 'ok-text' : 'err-text'">姿态</b>
                 </span>
                 <span>人脸库 {{ backendStatus.faces || 0 }} 人</span>
+                <span>
+                  ffmpeg
+                  <b :class="backendStatus.ffmpegTooOld ? 'err-text' : 'ok-text'">
+                    {{ backendStatus.ffmpeg || '未知' }}{{ backendStatus.ffmpegVersion ? ' · ' + backendStatus.ffmpegVersion : '' }}
+                  </b>
+                  <em v-if="backendStatus.ffmpegTooOld">（需 7 以上才能解 H.265 增强型 FLV）</em>
+                </span>
                 <span>
                   推送：
                   <b :class="backendStatus.push && backendStatus.push.ding ? 'ok-text' : 'err-text'">钉钉</b>
@@ -2198,7 +2233,8 @@ import {
   aiModel,
   aiState,
   loadPersonModel,
-  releaseModel
+  releaseModel,
+  setGpuPref
 } from '../composables/useAiDetector'
 import { FIELD_KEYS, buildAlarmMessage, fieldLabel, normalizeDingTalk, sendDingTalk } from '../composables/useDingTalk'
 import {
@@ -2954,6 +2990,21 @@ function toggleAi() {
     loadPersonModel(opts.aiModel).catch(() => {})
   } else {
     releaseModel()
+  }
+}
+
+/**
+ * 切换 GPU 加速。
+ * 关键点：WebGPU 的 wasm trap 是「线程级」故障，只清 readyKey 不够 ——
+ * 必须把旧会话真的释放掉，Worker 才会按新偏好重建 WASM 会话。
+ */
+function toggleAiGpu() {
+  opts.aiGpu = !opts.aiGpu
+  setGpuPref(opts.aiGpu)
+  if (opts.aiEnabled) {
+    // 先全量释放，再按当前偏好重新加载
+    releaseModel()
+    loadPersonModel(opts.aiModel).catch(() => {})
   }
 }
 

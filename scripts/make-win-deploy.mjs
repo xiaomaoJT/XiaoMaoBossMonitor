@@ -61,8 +61,15 @@ if (!hasModules && !has('skip-modules')) {
 
 /* ---------------- 1. 复制清单 ---------------- */
 
-/** 拷贝时跳过 .DS_Store —— 几百个文件的目录里它纯占体积 */
-const FILTER = (src) => path.basename(src) !== '.DS_Store'
+/** 拷贝时跳过 .DS_Store 与自动下载的 ffmpeg 缓存 —— 后者是**按平台**的二进制，
+ *  在 mac 上打包时带过去的是 Mach-O，Windows 根本用不了（还会白占 80MB）。
+ *  目标机首次启动会自己下载对应平台的那一份。 */
+const FILTER = (src) => {
+  const base = path.basename(src)
+  if (base === '.DS_Store') return false
+  if (base === '.cache' && path.basename(path.dirname(src)) === 'server') return false
+  return true
+}
 
 function copyInto(rel) {
   const from = path.join(PROJECT, rel)
@@ -166,6 +173,14 @@ const readme = `BossMonitor · Windows 部署包
   推送由后端发，页面关掉、浏览器关掉都照发。
   钉钉 / 企业微信 / Telegram 在设置页填 webhook 即可。
   注意：后端模式下前端不再自己发，所以「代理」相关报错可以忽略。
+
+【首次运行会自动下载 ffmpeg（几十 MB，只需一次）】
+  npm 自带的 ffmpeg 是 6.0，解不了 H.265 的「增强型 FLV」（这类平台的 ws-flv
+  绝大多数都是这个形态，症状是所有通道「拉流失败」，而页面里却能正常播放）。
+  服务启动时发现版本太旧会自动下载新版并缓存到 server/.cache/ffmpeg/，
+  之后一直复用；部署包不携带它（各平台二进制不通用），所以目标机需要联网一次。
+  想跳过：设环境变量 BOSSMONITOR_FFMPEG_OFFLINE=1（只查缓存与手动指定）。
+  想手动指定：设置 →「检测识别」→「后端检测服务」→「ffmpeg 路径」。
 
 【数据在哪】
   server/data/monitor.db   事件库 + 人脸库（SQLite，备份直接拷这个文件）
