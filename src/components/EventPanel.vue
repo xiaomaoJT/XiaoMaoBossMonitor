@@ -63,6 +63,12 @@
 
         <span class="spacer"></span>
 
+        <!-- 选中「通道状态」时，顺手把「这类消息要不要推送」的入口摆出来：
+             它的配置藏在设置 →「状态巡检」页，光靠记忆很难找得到。 -->
+        <button v-if="filter === 'system'" class="btn small" @click="emit('open-status-config')">
+          配置异常推送
+        </button>
+
         <div class="range-wrap">
           <button class="range-btn" :class="{ on: range !== 'today' || hours.length }" @click.stop="rangeOpen = !rangeOpen">
             <svg viewBox="0 0 24 24" width="13" height="13">
@@ -459,7 +465,9 @@ const emit = defineEmits([
   'focus',
   'mark-read',
   'mark-read-from',
-  'mark-all-read'
+  'mark-all-read',
+  /** 「配置异常推送」→ 让父组件打开设置并切到「状态巡检」页 */
+  'open-status-config'
 ])
 
 const preview = ref(null)
@@ -600,14 +608,17 @@ function startOfTodayTs() {
   return d.getTime()
 }
 
-/** 今日报警数（不含「恢复」这类系统消息，只算真正的报警） */
+/** 通道状态消息（断线 / 恢复）：不算报警、不占未读角标，只在「通道状态」标签里看 */
+const isSystemEvent = (ev) => ev && (ev.type === 'offline' || ev.type === 'online')
+
+/** 今日报警数（不含通道状态这类系统消息，只算真正的报警） */
 const todayCount = computed(() => {
   const t0 = startOfTodayTs()
-  return props.events.filter((e) => e.time >= t0 && e.type !== 'online').length
+  return props.events.filter((e) => e.time >= t0 && !isSystemEvent(e)).length
 })
 
-const unreadCount = computed(() => props.events.filter((e) => !e.read).length)
-const readCount = computed(() => props.events.length - unreadCount.value)
+const unreadCount = computed(() => props.events.filter((e) => !e.read && !isSystemEvent(e)).length)
+const readCount = computed(() => props.events.filter((e) => e.read || isSystemEvent(e)).length)
 
 /* ==================== 时间筛选 ==================== */
 
@@ -744,8 +755,13 @@ const filteredEvents = computed(() =>
 )
 
 function matches(ev, key) {
-  if (key === 'all') return true
-  if (key === 'system') return ev.type === 'offline' || ev.type === 'online'
+  /*
+   * 「全部」刻意**不含**通道状态消息（offline / online）。
+   * 这类是机器自己产生的状态流水（断线、重连），不是需要人处理的事件 ——
+   * 混进来会让报警列表被恢复通知刷屏、角标长期亮着。改在「通道状态」标签里单独看。
+   */
+  if (key === 'all') return !isSystemEvent(ev)
+  if (key === 'system') return isSystemEvent(ev)
   // 区域一类里有走入 / 走出 / 徘徊三种事件
   if (key === 'zone') return ev.type === 'enter' || ev.type === 'exit' || ev.type === 'loiter'
   return ev.type === key

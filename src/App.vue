@@ -10,6 +10,7 @@
       :masked="masked"
       :today-count="todayCount"
       :last-event="lastEventText"
+      :backend="backendActive"
       @reconnect-all="reconnectAll"
       @pause-all="pauseAll"
       @resume-all="resumeAll"
@@ -94,6 +95,7 @@
 
     <SettingsDrawer
       v-if="settingsOpen"
+      :open-tab="settingsTab"
       :cameras="cameras"
       :options="options"
       :hidden-ids="hiddenIds"
@@ -128,6 +130,7 @@
       @mark-read="markEventRead"
       @mark-read-from="markEventReadFrom"
       @mark-all-read="markAllEventsRead"
+      @open-status-config="openStatusConfig"
     />
 
     <NotifyStack :items="notifies" :life="NOTIFY_LIFE" @focus="focusEvent" @dismiss="dismissNotify" />
@@ -411,6 +414,8 @@ function migrateCountInterval(opts) {
 }
 
 const settingsOpen = ref(false)
+/** 打开设置时希望停留的页签（空 = 上次停留的那页） */
+const settingsTab = ref('')
 const eventPanelOpen = ref(false)
 /**
  * 事件面板组件引用。
@@ -429,8 +434,15 @@ const flashId = ref('')
 const LOCATE_MS = 3000
 
 const events = ref([])
-/** 未读数量直接从记录里算，不再单独维护一个计数器（避免和持久化的已读状态对不上） */
-const unreadCount = computed(() => events.value.filter((e) => !e.read).length)
+/**
+ * 未读数量直接从记录里算，不再单独维护一个计数器（避免和持久化的已读状态对不上）。
+ *
+ * ⚠️ 刻意**不含**通道状态消息（offline / online）：它们是机器自己产生的状态流水，
+ * 不是「需要人处理的事件」。混进未读红点会让角标长期亮着、点进去却全是恢复通知。
+ * 这类消息在事件面板的「通道状态」标签里单独看。
+ */
+const isSystemEvent = (e) => e && (e.type === 'offline' || e.type === 'online')
+const unreadCount = computed(() => events.value.filter((e) => !e.read && !isSystemEvent(e)).length)
 const readCount = computed(() => events.value.filter((e) => !!e.read).length)
 /** 当前保留的历史事件总数（受「报警记录保留条数」上限约束） */
 const historyCount = computed(() => events.value.length)
@@ -542,7 +554,8 @@ async function loadEventShot(key) {
 const todayCount = computed(() => {
   const start = new Date()
   start.setHours(0, 0, 0, 0)
-  return events.value.filter((e) => e.time >= start.getTime() && e.type !== 'online').length
+  // 今日报警数：同样排除通道状态消息（offline / online），口径与「全部」标签一致
+  return events.value.filter((e) => e.time >= start.getTime() && !isSystemEvent(e)).length
 })
 const lastEventAt = computed(() => (events.value.length ? events.value[0].time : 0))
 const lastEventText = computed(() => {
@@ -1606,6 +1619,17 @@ function stopFlashTitle() {
 
 function toggleEventPanel() {
   eventPanelOpen.value = !eventPanelOpen.value
+}
+
+/**
+ * 「通道状态」标签 → 「配置异常推送」：直接把人送到设置里的「状态巡检」页。
+ * 那组开关（异常要不要推、恢复要不要推、多久重提醒、三个渠道各自收不收）
+ * 是整个设置里最容易被漏掉的一处，藏在第三个页签里。
+ */
+function openStatusConfig() {
+  settingsTab.value = 'status'
+  settingsOpen.value = true
+  eventPanelOpen.value = false
 }
 
 function clearEvents() {

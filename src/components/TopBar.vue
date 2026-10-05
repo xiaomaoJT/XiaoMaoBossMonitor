@@ -13,7 +13,17 @@
         <img class="logo-img" :src="LOGO_SRC" alt="BossMonitor" draggable="false" />
       </div>
       <div class="titles">
-        <h1>BossMonitor</h1>
+        <h1>
+          BossMonitor
+          <!--
+            当前工作模式：一眼看出「检测/推送在哪台机器上跑」。
+            排查问题时非常关键 —— 同样的界面，开着与关着后端，
+            事件来源、AI 是否本机算、推送由谁发，全都不一样。
+          -->
+          <em class="mode-chip" :class="backend ? 'on' : 'off'" :title="modeTitle">
+            {{ backend ? '后端模式' : '前端模式' }}
+          </em>
+        </h1>
         <p>
           <span class="ok">{{ online }}</span> / {{ total }} 路在线
           <template v-if="hiddenCount">
@@ -121,7 +131,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const props = defineProps({
   layouts: { type: Array, required: true },
@@ -132,8 +142,17 @@ const props = defineProps({
   unread: { type: Number, default: 0 },
   masked: { type: Boolean, default: false },
   todayCount: { type: Number, default: 0 },
-  lastEvent: { type: String, default: '暂无事件' }
+  lastEvent: { type: String, default: '暂无事件' },
+  /** 是否开着后端检测（true = 检测与推送都由常驻设备做，本机只负责看画面） */
+  backend: { type: Boolean, default: false }
 })
+
+/** 模式徽标的悬浮说明：把两种模式各自的行为讲清楚，免得看图猜 */
+const modeTitle = computed(() =>
+  props.backend
+    ? '后端模式：人形 / 人脸 / 区域检测与推送都在常驻设备上跑，本机页面只播放画面、不做 AI'
+    : '前端模式：检测与推送都由这个页面完成，页面关掉就没有监测'
+)
 
 const emit = defineEmits([
   'reconnect-all',
@@ -221,6 +240,35 @@ onBeforeUnmount(() => clearInterval(timer))
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.4px;
+}
+
+/*
+ * 模式徽标：紧跟品牌名，一眼看清「检测和推送是谁在干」。
+ * 后端模式用蓝色（那是常驻设备在负责），前端模式用中性灰（就是这台机器自己）。
+ */
+.mode-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0;
+  vertical-align: 2px;
+  cursor: default;
+}
+
+.mode-chip.on {
+  color: #b6dcff;
+  background: rgba(56, 138, 221, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(133, 183, 235, 0.45);
+}
+
+.mode-chip.off {
+  color: var(--text-2);
+  background: rgba(136, 135, 128, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(136, 135, 128, 0.32);
 }
 
 .titles p {

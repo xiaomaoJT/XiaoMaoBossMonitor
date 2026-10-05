@@ -129,6 +129,18 @@
                 spellcheck="false"
                 placeholder="子码流地址（选填）· 网格默认拉它，放大时自动切主码流"
               />
+              <!--
+                后端专用流地址（选填）：浏览器只能播 ws/wss-flv，后端却能直接吃
+                rtsp:// 或 https://…live.mp4（实测这类平台的 rtsp:554 与 https mp4 都通）。
+                走这些协议由 ffmpeg 原生拉取，不必先经 WebSocket 转一道，多路并发时更稳。
+                留空 = 后端与页面共用上面那个地址。
+              -->
+              <input
+                class="field url-sub"
+                v-model.trim="cam.urlBackend"
+                spellcheck="false"
+                placeholder="后端流地址（选填）· 可填 rtsp:// 或 https://…live.mp4，留空 = 与上面相同"
+              />
               <div class="cam-tags">
                 <button
                   class="tag mini master"
@@ -2213,7 +2225,7 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { BRAND, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, HIDDEN_PASSCODE } from '../config/defaults'
+import { BRAND, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, DEFAULT_BACKEND_URL, HIDDEN_PASSCODE } from '../config/defaults'
 import { resetPushStats } from '../composables/usePushStats'
 import {
   backendState,
@@ -2285,7 +2297,9 @@ const props = defineProps({
   /** 是否跑在 Capacitor 原生壳里（iOS App 为 true），决定「自动」主题档是否展示 */
   native: { type: Boolean, default: false },
   /** 报警事件列表，「关于系统」页要用它统计条数与未读数 */
-  events: { type: Array, default: () => [] }
+  events: { type: Array, default: () => [] },
+  /** 打开抽屉时希望落在哪一页（如 'status' = 状态巡检）；不传则用上次停留的页 */
+  openTab: { type: String, default: '' }
 })
 
 const emit = defineEmits(['close', 'save', 'reset', 'patrol', 'update:layoutKey', 'reset-free', 'update-cameras', 'update-theme', 'update-keepawake', 'force-exit', 'watch-sync', 'backend-sync'])
@@ -2507,6 +2521,20 @@ const tab = ref('cams')
 watch(tab, (t) => {
   if (t === 'alert') refreshWatch()
 })
+
+/*
+ * 允许外部把抽屉直接切到某一页。
+ * 场景：事件面板「通道状态」标签里点「配置异常推送」——
+ * 那组开关（是否推异常、要不要推恢复、多久重提醒、三个渠道各自收不收）
+ * 藏在「状态巡检」页里，靠用户自己翻页签找到它的概率很低。
+ */
+watch(
+  () => props.openTab,
+  (t) => {
+    if (t) tab.value = t
+  },
+  { immediate: true }
+)
 const currentTab = computed(() => TABS.find((t) => t.key === tab.value) || TABS[0])
 const currentLayoutLabel = computed(() => {
   const hit = props.layouts.find((l) => l.key === props.layoutKey)
@@ -2562,6 +2590,11 @@ const backendTesting = ref(false)
 function toggleBackend() {
   if (!opts.backend) opts.backend = { ..._DEFAULTS.backend }
   opts.backend.enabled = !opts.backend.enabled
+  // 刚打开时地址多半是空的（老配置里没有这个字段）→ 直接填上那台常驻设备的地址，
+  // 省得用户还要去翻 IP。填错了也还能手动改。
+  if (opts.backend.enabled && !String(opts.backend.url || '').trim()) {
+    opts.backend.url = DEFAULT_BACKEND_URL
+  }
   // 打开瞬间主动探测一次，让状态文本立刻有反馈
   if (opts.backend.enabled && opts.backend.url) onBackendTest()
 }

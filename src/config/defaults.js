@@ -48,6 +48,16 @@ function makeCamera(preset) {
      * 点开放大单路时才切主码流；留空 = 永远拉主码流（老配置无感）。
      */
     urlSub: '',
+    /**
+     * 后端专用流地址（可空）。
+     *
+     * 浏览器只能播 ws/wss-flv，后端却可以直接吃 **rtsp://** 或 **https://…live.mp4**
+     * 这类地址（实测该平台 rtsp:554 与 https mp4 都可用）。走这些协议时
+     * ffmpeg 原生拉流，不必把字节流先接进 WebSocket 再转一道 ——
+     * 多路并发时更稳、也更省 CPU。
+     * 留空 = 后端与页面用同一个地址（wss 走桥接）。
+     */
+    urlBackend: '',
     /** 是否参与运动检测 */
     motion: preset.motion,
     /** 是否对该通道做人形识别（较吃 CPU） */
@@ -95,6 +105,13 @@ export const DEFAULT_CAMERAS = []
 
 /** 播放器解码器路径（相对页面地址，decoder.wasm 必须与它同目录） */
 export const DECODER_PATH = './js/decoder.js'
+
+/**
+ * 后端检测服务（headless）的默认地址。
+ * 那台 Windows 机器在局域网里的固定地址 —— 开启后端模式时自动填入，
+ * 省得每次都要翻出 IP 再手敲一遍（手敲最容易错的就是端口）。
+ */
+export const DEFAULT_BACKEND_URL = 'http://10.0.0.12:8787'
 
 /** 布局预设 */
 export const LAYOUTS = [
@@ -310,9 +327,13 @@ export const HIDDEN_OPTIONS = {
    * 关闭后：一切回到原来的纯前端链路，两边互不影响。
    */
   backend: {
+    /**
+     * 开关默认**关** —— 默认还是纯前端链路（检测与推送都在这个页面里跑）。
+     * 需要值守时再打开，打开的瞬间会自动填入下面这个地址。
+     */
     enabled: false,
-    /** 服务地址，如 http://10.0.0.12:8787（手机端要填 Mac 的局域网 IP） */
-    url: '',
+    /** 常驻设备的局域网地址：开启后端模式时若地址为空，自动填它 */
+    url: DEFAULT_BACKEND_URL,
     /** 轮询间隔（毫秒） */
     pollMs: 4000,
     /**
@@ -635,6 +656,13 @@ export const DEFAULT_OPTIONS = (() => {
   o.statusAlerts.notifyRecover = false
   o.patrol.enabled = false
 
+  /*
+   * 后端检测服务：初始化配置是「什么都不知道」的空白状态，默认保持关闭
+   * （默认链路 = 纯前端）。地址仍然预填着 —— 用户一打开开关就能连上，
+   * 不需要先去把 IP 抄一遍。
+   */
+  o.backend.enabled = false
+
   /* ---- 播放策略：回到中立默认（初始化没有通道，开机不自动播任何画面） ---- */
   o.maxDecode = 4
   o.autoPlayCount = 1
@@ -760,6 +788,8 @@ export function normalizeCameraChannels(cam) {
   if (cam.push === undefined) cam.push = true
   // 子码流是后加的字段，老存档里没有 → 补成空串（= 永远拉主码流，行为不变）
   if (typeof cam.urlSub !== 'string') cam.urlSub = ''
+  // 后端专用流地址同样是后加的，老存档补空串（= 与页面共用同一个地址）
+  if (typeof cam.urlBackend !== 'string') cam.urlBackend = ''
   // 区域规则是后加的字段，老存档里没有
   if (!Array.isArray(cam.zones)) cam.zones = []
   // 附加能力（人脸 / 姿态 / 区域）也是后加的字段，老存档里没有 → 默认全部参与

@@ -629,9 +629,16 @@ async function createPlayer() {
     useWCS: !!props.options.useHardDecode,
     autoWasm: true,
     debug: false,
-    timeout: 10,
-    loadingTimeout: 10,
-    heartTimeout: 10,
+    /*
+     * 超时不能太短。H.265 在多数机器上是 WASM 软解（useHardDecode 只对 H.264 生效），
+     * 多路 3200×1800 同时解时，某一帧晚几秒到是常事 —— 原来统一给 10 秒，
+     * 于是「解码跟得上就正常、跟不上就判心跳超时然后重连」，表现成
+     * 「基本只有一路能看，几秒就提示重连」，而机器其实只是忙不过来。
+     * 放宽到 20 秒：慢机器上仍能自己恢复，闲机器上不影响。
+     */
+    timeout: 20,
+    loadingTimeout: 20,
+    heartTimeout: 20,
     loadingTimeoutReplay: true,
     loadingTimeoutReplayTimes: -1,
     heartTimeoutReplay: true,
