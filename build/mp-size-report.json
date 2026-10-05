@@ -1,0 +1,71 @@
+{
+  "generatedAt": "2026-10-02T00:48:56.337Z",
+  "appid": "touristappid",
+  "h5Url": null,
+  "pages": [
+    "pages/index/index",
+    "pages/guide/guide"
+  ],
+  "miniprogram": {
+    "path": "miniprogram",
+    "fileCount": 15,
+    "mainPackageBytes": 9055,
+    "mainPackageLimitBytes": 2097152,
+    "totalPackageLimitBytes": 20971520,
+    "topFiles": [
+      {
+        "file": "pages/guide/guide.wxml",
+        "size": 1812
+      },
+      {
+        "file": "pages/index/index.js",
+        "size": 1422
+      },
+      {
+        "file": "utils/config.js",
+        "size": 1111
+      },
+      {
+        "file": "project.config.json",
+        "size": 987
+      },
+      {
+        "file": "pages/guide/guide.js",
+        "size": 857
+      },
+      {
+        "file": "pages/index/index.wxml",
+        "size": 609
+      },
+      {
+        "file": "app.wxss",
+        "size": 583
+      },
+      {
+        "file": "app.js",
+        "size": 470
+      },
+      {
+        "file": "app.json",
+        "size": 385
+      },
+      {
+        "file": "project.private.config.json",
+        "size": 298
+      }
+    ]
+  },
+  "h5Dist": {
+    "total": 115184153,
+    "ai": 112476361,
+    "js": 1781219,
+    "assets": 484259,
+    "other": 442314
+  },
+  "warnings": [
+    "appid 仍是 touristappid（游客模式）：真机预览/上传前要在 project.config.json 里换成自己的 AppID",
+    "H5_URL 未配置：编译/上传可通过，但真机会进入配置引导页",
+    "H5 里 public/ai 有 107.27 MB（AI 模型）：必须部署在 CDN/静态托管，不能也不需要放进小程序包"
+  ],
+  "problems": []
+}

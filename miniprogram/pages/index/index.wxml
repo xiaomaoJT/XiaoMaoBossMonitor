@@ -1,0 +1,17 @@
+<web-view
+  wx:if="{{ready && !failed}}"
+  src="{{url}}"
+  bindload="onWebviewLoad"
+  binderror="onWebviewError"
+  bindmessage="onMessage"
+></web-view>
+
+<view wx:elif="{{failed}}" class="card">
+  <view class="card-title">网页加载失败</view>
+  <view class="muted">{{errorMsg}}</view>
+  <view class="muted" style="margin-top:16rpx;">
+    常见原因：域名未在小程序后台配置为「业务域名」、证书无效、或 H5 服务未上线。
+  </view>
+  <button class="btn" bindtap="onRetry">重新加载</button>
+  <button class="btn-ghost" bindtap="onGuide">查看配置说明</button>
+</view>

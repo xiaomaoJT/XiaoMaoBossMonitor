@@ -1,0 +1,39 @@
+{
+  "compileType": "miniprogram",
+  "libVersion": "3.8.10",
+  "appid": "touristappid",
+  "projectname": "monitor-wall",
+  "description": "BossMonitor 视频监控多路实时预览大屏（web-view 容器壳）",
+  "packOptions": {
+    "ignore": [
+      { "type": "file", "value": ".DS_Store" },
+      { "type": "folder", "value": ".git" },
+      { "type": "file", "value": "*.md" }
+    ],
+    "include": []
+  },
+  "setting": {
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true,
+    "urlCheck": true,
+    "coverView": true,
+    "lazyloadPlaceholderEnable": false,
+    "autoAudits": false,
+    "uglifyFileName": false,
+    "uploadWithSourceMap": false,
+    "packNpmManually": false,
+    "packNpmRelationList": [],
+    "minifyWXSS": true,
+    "minifyWXML": true,
+    "showES6CompileOption": false,
+    "ignoreUploadUnusedFiles": true,
+    "babelSetting": {
+      "ignore": [],
+      "disablePlugins": [],
+      "outputPath": ""
+    }
+  },
+  "condition": {}
+}

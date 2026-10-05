@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- data-theme="liquid"：液态风格是默认主题，预置属性避免 JS 加载前首帧跳变 -->
+<html lang="zh-CN" data-theme="liquid">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- 移动端：铺满刘海屏 + 禁止双击缩放（画面控件需要精确点击） -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#07090f" />
+    <meta name="color-scheme" content="dark" />
+    <!-- iOS：作为独立 App（Capacitor / 加入主屏幕）时全屏运行 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BossMonitor" />
+    <meta name="format-detection" content="telephone=no" />
+    <!-- 圆角版 favicon（由 logo.gif 第一帧离线生成，四角透明），直角原图在标签页里太生硬 -->
+    <link rel="icon" type="image/png" href="./logo/favicon.png" />
+    <title>BossMonitor · 7 路实时预览</title>
+    <!-- Jessibuca 播放器（H.264 / H.265 wasm 软解，支持 ws-flv） -->
+    <!--
+      defer + preload：这脚本 469KB，以前同步加载会把 HTML 解析和 App 挂载
+      一起卡住（弱网首屏就是一片白）。现在它异步加载，App 立刻挂载，
+      真正要播画面时才在 CameraTile 里等它就绪（见 composables/useJessibuca.js）。
+    -->
+    <link rel="preload" as="script" href="./js/jessibuca.js" />
+    <script src="./js/jessibuca.js" defer></script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

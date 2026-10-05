@@ -1,0 +1,473 @@
+:root {
+  /* —— 液态风格（默认）：面板半透明，玻璃感由文件末尾的 chrome 强化段补齐 —— */
+  --bg: #07090f;
+  --bg-deep: rgba(5, 9, 15, 0.72);
+  --panel: rgba(17, 24, 36, 0.72);
+  --panel-deep: rgba(11, 17, 26, 0.68);
+  --panel-2: rgba(30, 40, 58, 0.6);
+  --panel-3: rgba(44, 58, 82, 0.55);
+  --line: rgba(148, 176, 217, 0.16);
+  --line-soft: rgba(148, 176, 217, 0.1);
+  --line-strong: rgba(160, 190, 230, 0.28);
+  --text: #e8eef8;
+  --text-bright: #f4f8ff;
+  --text-soft: #c6d3e6;
+  --text-dim: #8b9ab3;
+  --text-dim-2: #5d6b83;
+  --accent: #2f8bff;
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent-text: #7db6ff;
+  --accent-text-strong: #a9cdff;
+  --cyan: #00c8ff;
+  --purple: #8c78ff;
+  --ok: #2fd07a;
+  --ok-text: #8ce6b4;
+  --warn: #ffb020;
+  --warn-text: #ffd27a;
+  --err: #ff4d5e;
+  --err-text: #ff9aa5;
+  --tint: #ffffff;
+  --field-bg: rgba(255, 255, 255, 0.06);
+  --switch-bg: rgba(255, 255, 255, 0.12);
+  --scrollbar: rgba(255, 255, 255, 0.18);
+  --radius: 10px;
+  --topbar-h: 58px;
+  /* 刘海屏 / 灵动岛安全区，移动端用 env() 覆盖 */
+  --safe-top: 0px;
+  --safe-bottom: 0px;
+  --safe-left: 0px;
+  --safe-right: 0px;
+  color-scheme: dark;
+}
+
+/*
+ * ==================================================================
+ *                        主题（外观风格）
+ * ==================================================================
+ * 「液态风格」就是上面 :root 的默认值（半透明面板 + 玻璃 chrome），老配置里的
+ * 'default' 会被 App.vue 映射成 liquid。切换由 App.vue 往 <html> 上挂
+ * data-theme 实现，组件里一律只认变量。
+ *
+ * 注意 color-mix 的用法：组件代码里凡是「带透明度的主题色」都写成
+ *   color-mix(in srgb, var(--accent) 40%, transparent)
+ * 这样换主题时透明度不变、底色自动跟着走。
+ */
+
+/* ---------- 暗黑风格：去蓝调的中性炭黑 ---------- */
+:root[data-theme='dark'] {
+  --bg: #000000;
+  --bg-deep: #000000;
+  --panel: #0d0d11;
+  --panel-deep: #0a0a0d;
+  --panel-2: #16161c;
+  --panel-3: #1f1f27;
+  --line: #272730;
+  --line-soft: #1d1d24;
+  --line-strong: #363641;
+  --text: #f1f2f5;
+  --text-bright: #ffffff;
+  --text-soft: #d7d9e0;
+  --text-dim: #9a9da8;
+  --text-dim-2: #6c6f7a;
+  --accent: #3b8dff;
+  --accent-soft: rgba(59, 141, 255, 0.16);
+  --accent-text: #82b7ff;
+  --accent-text-strong: #aecfff;
+  --ok-text: #90e8bb;
+  --warn-text: #ffd57f;
+  --err-text: #ffa2ab;
+  --tint: #ffffff;
+  --field-bg: #0a0a0d;
+  --switch-bg: #2a2a33;
+  --scrollbar: #33333d;
+  color-scheme: dark;
+}
+
+/* ---------- 亮色风格 ---------- */
+:root[data-theme='light'] {
+  --bg: #eef1f6;
+  --bg-deep: #e2e7ef;
+  --panel: #ffffff;
+  --panel-deep: #f3f6fa;
+  --panel-2: #e9edf4;
+  --panel-3: #dbe3ee;
+  --line: #d2dbe7;
+  --line-soft: #dee5ee;
+  --line-strong: #b7c4d6;
+  --text: #1c2634;
+  --text-bright: #0f1824;
+  --text-soft: #39485c;
+  --text-dim: #5d6d82;
+  --text-dim-2: #8b98ab;
+  --accent: #1f6fe0;
+  --accent-soft: rgba(31, 111, 224, 0.12);
+  --accent-text: #1a5fc4;
+  --accent-text-strong: #14509f;
+  --cyan: #0891b2;
+  --purple: #7050e0;
+  --ok: #16a34a;
+  --ok-text: #15803d;
+  --warn: #d97706;
+  --warn-text: #b45309;
+  --err: #dc2626;
+  --err-text: #c02636;
+  /* 亮色下「白色叠加」要翻成深色叠加，否则 hover 高亮全部隐形 */
+  --tint: #16283f;
+  --field-bg: #f7f9fc;
+  --switch-bg: #ccd6e3;
+  --scrollbar: #c2ccd9;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+/* 用 dvh 让移动端浏览器地址栏收起/展开时高度不跳变 */
+@supports (height: 100dvh) {
+  html,
+  body,
+  #app {
+    height: 100dvh;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue',
+    Arial, sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  /* 移动端：去掉点击高亮、禁止下拉刷新 / 橡皮筋滚动 */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- 通用控件 ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  font-size: 13px;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+  background: var(--panel-3);
+}
+
+.btn.primary {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent-text);
+}
+
+.btn.primary:hover {
+  color: var(--accent-text-strong);
+  border-color: color-mix(in srgb, var(--accent) 80%, transparent);
+}
+
+.btn.danger:hover {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 50%, transparent);
+}
+
+.btn.small {
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.field {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--field-bg);
+  border: 1px solid var(--line);
+  outline: none;
+  font-size: 13px;
+}
+
+.field:focus {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--switch-bg);
+  transition: background 0.18s ease;
+  flex: 0 0 auto;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: all 0.18s ease;
+}
+
+.switch.on {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.switch.on::after {
+  left: 21px;
+  background: var(--accent);
+}
+
+/* ---------- 自定义摆放时禁用选中，避免拖动时选到文字 ---------- */
+body.free-dragging,
+body.free-dragging * {
+  user-select: none !important;
+  cursor: grabbing !important;
+  /* 触屏拖动时不要触发页面滚动 */
+  touch-action: none !important;
+}
+
+/* ================================================================== */
+/*            移动端 / 触屏适配（手机、iPad、iOS App 内）              */
+/* ================================================================== */
+
+/* 刘海屏安全区 */
+@supports (padding: env(safe-area-inset-bottom)) {
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+  }
+}
+
+/* 触屏设备：控件放大到手指可点（≥40px），输入框字号 ≥16px 避免 iOS 聚焦自动放大 */
+@media (pointer: coarse) {
+  body {
+    font-size: 15px;
+  }
+
+  .btn {
+    height: 40px;
+    padding: 0 13px;
+    font-size: 14px;
+    border-radius: 10px;
+  }
+
+  .btn.small {
+    height: 32px;
+    padding: 0 11px;
+    font-size: 13px;
+  }
+
+  .field {
+    height: 42px;
+    font-size: 16px;
+  }
+
+  select.field {
+    font-size: 15px;
+  }
+
+  .switch {
+    width: 46px;
+    height: 26px;
+    border-radius: 13px;
+  }
+
+  .switch::after {
+    width: 20px;
+    height: 20px;
+    top: 3px;
+    left: 3px;
+  }
+
+  .switch.on::after {
+    left: 23px;
+  }
+}
+
+/* 窄屏：隐藏滚动条，视觉更干净 */
+@media (max-width: 900px) {
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+/* 竖屏手机（最关键的形态）：顶部工具栏两行、场景留白收紧 */
+@media (max-width: 640px) {
+  :root {
+    --topbar-h: 96px;
+    --radius: 8px;
+  }
+}
+
+/* 横屏手机 / 小平板 */
+@media (min-width: 641px) and (max-width: 900px) {
+  :root {
+    --topbar-h: 64px;
+  }
+}
+
+/* 移动端禁止长按弹出系统菜单（画面里长按要用于拖拽） */
+@media (pointer: coarse) {
+  .tile,
+  .tile * {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* ================================================================== */
+/*          液态风格（默认）：玻璃质感 chrome 强化                      */
+/* ================================================================== */
+/*
+ * 上面的 :root 变量负责「色」（半透明面板），这一段负责「玻璃」：
+ *   - 背景铺几团彩色光晕，让毛玻璃有东西可以折射，否则 blur 出来只是一片灰
+ *   - 顶栏 / 抽屉 / 事件面板 / 按钮 / 输入框挂真实的 backdrop-filter
+ *   - 细描边 + 顶部内高光，模拟玻璃边缘的折射亮线
+ * 选择器统一带 html[data-theme='liquid'] 前缀：scoped 样式是 (0,2,0)，
+ * 这里是 (0,2,1)，稳定压过组件里的同类规则，不用关心打包后的 CSS 顺序。
+ * 暗黑 / 亮色主题不挂 liquid 属性，这一段对它们完全不生效。
+ */
+
+/* 背景色晕：玻璃的「折射源」 */
+html[data-theme='liquid'] body {
+  background:
+    radial-gradient(1100px 620px at 82% -12%, rgba(47, 139, 255, 0.18), transparent 62%),
+    radial-gradient(900px 560px at -12% 108%, rgba(0, 200, 255, 0.12), transparent 62%),
+    radial-gradient(760px 480px at 55% 122%, rgba(140, 120, 255, 0.1), transparent 65%),
+    var(--bg);
+}
+
+/* 顶栏：悬浮玻璃条 */
+html[data-theme='liquid'] .topbar {
+  background: linear-gradient(180deg, rgba(24, 33, 49, 0.66), rgba(13, 19, 30, 0.6));
+  -webkit-backdrop-filter: blur(24px) saturate(1.8);
+  backdrop-filter: blur(24px) saturate(1.8);
+  border-bottom-color: rgba(160, 190, 230, 0.14);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+/* 按钮：小玻璃块 */
+html[data-theme='liquid'] .btn {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  backdrop-filter: blur(16px) saturate(1.6);
+  border-color: rgba(175, 200, 235, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.03),
+    0 4px 14px rgba(0, 0, 0, 0.22);
+}
+
+html[data-theme='liquid'] .btn:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.17), rgba(255, 255, 255, 0.08));
+  border-color: rgba(190, 212, 245, 0.3);
+}
+
+html[data-theme='liquid'] .btn.primary {
+  background: linear-gradient(180deg, rgba(47, 139, 255, 0.34), rgba(47, 139, 255, 0.18));
+  border-color: rgba(47, 139, 255, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 4px 18px rgba(47, 139, 255, 0.25);
+}
+
+/* 输入框 / 开关轨道：贴着玻璃走 */
+html[data-theme='liquid'] .field {
+  background: rgba(255, 255, 255, 0.06);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+/* 设置抽屉：大块毛玻璃（遮罩也加一层薄 blur，抽屉像浮在虚化的页面上） */
+html[data-theme='liquid'] .mask {
+  background: rgba(4, 7, 12, 0.5);
+  -webkit-backdrop-filter: blur(10px) saturate(1.4);
+  backdrop-filter: blur(10px) saturate(1.4);
+}
+
+html[data-theme='liquid'] .drawer {
+  background: linear-gradient(180deg, rgba(20, 28, 42, 0.82), rgba(11, 16, 25, 0.86));
+  -webkit-backdrop-filter: blur(30px) saturate(1.7);
+  backdrop-filter: blur(30px) saturate(1.7);
+  border-left-color: rgba(160, 190, 230, 0.14);
+  box-shadow: -30px 0 80px rgba(0, 0, 0, 0.5);
+}
+
+/* 事件面板：同抽屉的玻璃语言 */
+html[data-theme='liquid'] .event-panel {
+  background: linear-gradient(180deg, rgba(20, 28, 42, 0.86), rgba(11, 16, 25, 0.88));
+  -webkit-backdrop-filter: blur(30px) saturate(1.7);
+  backdrop-filter: blur(30px) saturate(1.7);
+  border-color: rgba(160, 190, 230, 0.14);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+/* 画面格：玻璃边框 + 投影，视频本身保持不动 */
+html[data-theme='liquid'] .tile {
+  border-color: rgba(160, 190, 230, 0.14);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+/* 弹出的小浮层也跟上玻璃语言 */
+html[data-theme='liquid'] .range-pop,
+html[data-theme='liquid'] .notify {
+  -webkit-backdrop-filter: blur(24px) saturate(1.7);
+  backdrop-filter: blur(24px) saturate(1.7);
+}

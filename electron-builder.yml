@@ -1,0 +1,72 @@
+appId: com.mao.bossmonitor
+productName: BossMonitor
+copyright: Copyright © 2026
+
+directories:
+  output: release
+  buildResources: build
+
+# 只把「运行期真正需要的东西」打进包：编译产物 + 主进程 + package.json
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+
+asar: true
+
+mac:
+  category: public.app-category.video
+  icon: build/icon.icns
+  darkModeSupport: true
+  # 本地自用不签名（否则需要 Apple 开发者证书）；要分发请去掉这两行并配置签名
+  identity: null
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  extendInfo:
+    CFBundleDisplayName: BossMonitor
+    NSHighResolutionCapable: true
+    # 允许连内网 IP 摄像头 / WebSocket 流
+    NSAppTransportSecurity:
+      NSAllowsArbitraryLoads: true
+
+dmg:
+  title: ${productName} ${version}
+  contents:
+    - x: 140
+      y: 200
+      type: file
+    - x: 400
+      y: 200
+      type: link
+      path: /Applications
+
+# ---------------------------------------------------------------------------
+# Windows 桌面端（换到 Windows 电脑上跑同一套时用它）
+#   npm run electron:build:win        → release/BossMonitor-*-win-portable.exe
+#   npm run electron:build:win:dir    → release/win-unpacked/（免安装目录）
+#   注意：这个包**只含大屏前端**，人脸/人形/姿态检测仍然跑在 server/ 的 Node 进程里，
+#   所以 Win 机上要同时跑 `npm run server`（或把这个服务装成开机自启）。
+# ---------------------------------------------------------------------------
+win:
+  # 没有现成的 build/icon.ico，这里就不指定图标（electron-builder 会用默认图标）；
+  # 想换成项目图标的话，用 python 把 build/icon.png 转成 .ico 再补上 icon: build/icon.ico
+  target:
+    - target: portable
+      arch:
+        - x64
+    # nsis 安装器：在 macOS 上打它需要 wine，在 Windows 上原生支持、最省事
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}-win.${ext}
+  # 本地自用不签名 —— EV 代码签名证书几千元/年。未签名包首次运行可能被 SmartScreen
+  # 拦一下（选「更多信息 → 仍要运行」即可），装过一次就不再拦。
+  legalTrademarks: BossMonitor
+  requestedExecutionLevel: asInvoker
+  fileAssociations: []

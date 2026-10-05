@@ -1,0 +1,761 @@
+/**
+ * 配置分成两层，互不污染：
+ *
+ *   1. 初始化配置（DEFAULT_*）——「空白」。打开就是一块空大屏：没有任何通道、
+ *      没有推送凭据、AI 附加能力全关，一切都由用户自己配。
+ *      底部的「恢复初始化」就是回到这一份。
+ *
+ *   2. 内置隐藏配置（HIDDEN_*）——完整的一份（7 路真实通道 + 推送凭据 + 摆放坐标）。
+ *      只在「配置方案 → 加载内置配置」输入访问密码后载入，不会混进初始化配置里。
+ */
+
+const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
+const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
+
+/**
+ * 内置隐藏配置的通道预置（真实名称 / 检测开关 / 摆放坐标）。
+ * 仅在「配置方案 → 加载内置配置」输入密码后载入，不出现在初始默认值里。
+ * 数组顺序 = 大屏里的默认排列顺序；
+ * rect 是「自定义摆放」布局下的百分比坐标（0~100，相对大屏可视区）。
+ */
+const HIDDEN_CAMERA_PRESET = [
+  { id: 'cam-1', name: '大门外', motion: true, ai: true, blind: true, push: true, rect: { x: 1.29, y: 0.62, w: 31.29, h: 31.75 } },
+  { id: 'cam-4', name: '电梯', motion: true, ai: true, blind: true, push: true, rect: { x: 1, y: 34, w: 32, h: 32 } },
+  { id: 'cam-6', name: '大门内', motion: true, ai: true, blind: true, push: true, rect: { x: 67, y: 34, w: 32, h: 32 } },
+  { id: 'cam-3', name: '厕所', motion: false, ai: false, blind: false, push: false, rect: { x: 34, y: 1, w: 32, h: 32 } },
+  { id: 'cam-2', name: '通道1', motion: false, ai: false, blind: false, push: false, rect: { x: 67, y: 1, w: 32, h: 32 } },
+  { id: 'cam-7', name: '通道2', motion: false, ai: false, blind: false, push: false, rect: { x: 1, y: 67, w: 32, h: 32 } },
+  { id: 'cam-5', name: '楼梯', motion: false, ai: false, blind: false, push: false, rect: { x: 34, y: 34, w: 32, h: 32 } }
+]
+
+/**
+ * 内置隐藏配置里「默认不显示」的通道：厕所 / 通道1 / 通道2 / 楼梯。
+ * 载入内置配置后大屏只留 大门外 / 电梯 / 大门内 三路在跑，
+ * 其余四路仍留在通道列表里（设置 → 监控通道 里把「显示」打开即可恢复）。
+ */
+export const HIDDEN_HIDDEN_IDS = ['cam-3', 'cam-2', 'cam-7', 'cam-5']
+
+/** 由预置项生成一路完整通道配置（拉流地址按 cam-N 的 N 拼 01~07） */
+function makeCamera(preset) {
+  const index = Number(String(preset.id).replace('cam-', ''))
+  return {
+    id: preset.id,
+    name: preset.name,
+    url: `${BASE}${String(index).padStart(2, '0')}${TAIL}`,
+    /**
+     * 子码流地址（可空）。
+     * 网格里多路同看时拉子码流（分辨率低、软解压力小一个量级），
+     * 点开放大单路时才切主码流；留空 = 永远拉主码流（老配置无感）。
+     */
+    urlSub: '',
+    /** 是否参与运动检测 */
+    motion: preset.motion,
+    /** 是否对该通道做人形识别（较吃 CPU） */
+    ai: preset.ai,
+    /**
+     * 人形识别之上的「附加能力」，这一路是否参与（默认全部参与）。
+     *
+     * ⚠️ 这里只是通道级的分流开关，真正的总闸在「检测识别」页的全局开关里：
+     *    全局开着 + 这里不是 false → 这一路才跑。
+     *    所以把不看人脸的通道关掉，就能把算力集中在真正要看的几路上。
+     *   face 人脸识别 / pose 人形姿态 / zone 区域规则（进出 · 徘徊 · 计数）
+     */
+    aiExt: {
+      face: preset.face !== false,
+      pose: preset.pose !== false,
+      zone: preset.zone !== false
+    },
+    /** 检测区域（归一化坐标 0~1），null 表示全画面 */
+    roi: null,
+    /** 盲视模式：隐藏画面（省渲染开销），但保持解码与检测运行 */
+    blind: preset.blind,
+    /** 是否把该通道的报警推送到钉钉 / 企业微信 / Telegram（总开关） */
+    push: preset.push,
+    /** 该通道分别推送到哪些渠道（总开关打开时生效；false = 这个渠道不推这一路） */
+    channels: { ding: true, wecom: true, tg: true },
+    /**
+     * 自定义摆放坐标（百分比 0~100，相对大屏可视区）
+     * 仅在「自定义摆放」布局下生效，null 表示尚未排布（会自动套用默认网格）
+     */
+    rect: preset.rect ? { ...preset.rect } : null,
+    /** 检测区域列表（区域进出 / 徘徊检测用），空 = 不启用区域规则 */
+    zones: []
+  }
+}
+
+/** 内置隐藏配置的通道列表（与 HIDDEN_OPTIONS 配套） */
+export const HIDDEN_CAMERAS = HIDDEN_CAMERA_PRESET.map(makeCamera)
+
+/**
+ * 初始默认通道：**空的**。
+ * 初始化配置是空白的 —— 打开就是一块空大屏，通道全部由用户自己「+ 新增一路」添加。
+ * 那份完整的 7 路预置不在这里，在 HIDDEN_CAMERAS 里，靠密码载入。
+ */
+export const DEFAULT_CAMERAS = []
+
+/** 播放器解码器路径（相对页面地址，decoder.wasm 必须与它同目录） */
+export const DECODER_PATH = './js/decoder.js'
+
+/** 布局预设 */
+export const LAYOUTS = [
+  { key: 'auto', label: '自动铺满', cols: 'auto' },
+  { key: '1', label: '单画面', cols: 1 },
+  { key: '2', label: '2 × 2', cols: 2 },
+  { key: '3', label: '3 × 3', cols: 3 },
+  { key: '4', label: '4 × 4', cols: 4 },
+  { key: 'focus', label: '1 大 + N 小' },
+  { key: 'free', label: '自定义摆放' }
+]
+
+/**
+ * 内置隐藏配置（完整版）。
+ * ⚠️ 它会被打进前端构建产物（JS 包）里，密码只是 UI 层面的门槛，
+ * 不是加密——拿到安装包的人理论上可以解包提取。适合"不让界面上直接看到"，
+ * 不适合防有心人逆向。
+ */
+export const HIDDEN_OPTIONS = {
+  /** 是否解码音频（枪机一般无音轨，关闭可降低 CPU 占用） */
+  hasAudio: false,
+  /** 优先使用 MSE / WebCodecs 硬件解码（仅 H.264 有效，H.265 会自动回退 wasm） */
+  useHardDecode: false,
+  /** 是否在画面上显示码率 / 帧率 */
+  showStats: true,
+
+  /* ---------------- 性能保护 ---------------- */
+  /**
+   * 同时解码的路数上限。H.265 走 WASM 软解非常吃 CPU，
+   * 3200×1800 主码流同时解 7 路会把 CPU 打满导致页面卡死。
+   * 超出上限的画面进入「省流模式」（显示占位，点击可加载）。
+   * 设为 0 表示不限制（机器配置好可关闭）。
+   */
+  maxDecode: 3,
+  /**
+   * 打开页面时自动解码的路数（按画面顺序取前 N 路）。
+   * 0 = 全部手动点击播放；1 = 只自动播放第一路（默认）。
+   * 其余画面显示「省流模式 · 点击播放」。
+   */
+  autoPlayCount: 1,
+  /**
+   * 自定义「同时播放通道」：手动指定哪几路开机即播。
+   * 非空时优先于 autoPlayCount（只播列在这里的通道，仍受 maxDecode 上限约束）；
+   * 留空则按「打开时自动播放」的前 N 路规则。数组顺序 = 播放优先级。
+   */
+  autoPlayIds: ['cam-1', 'cam-4', 'cam-6'],
+  /**
+   * 点播互斥：点击某一路播放时，自动关闭其它正在播放的画面。
+   * 关闭后则按「同时解码路数上限」最多并行播放。
+   */
+  exclusivePlay: false,
+  /** 互斥点播时保留钉钉监听通道（推荐，避免监听/推送中断） */
+  keepWatchedOnPlay: true,
+
+  /* ---------------- 屏幕常亮 ----------------
+   * 值守大屏的核心诉求：人不去碰键鼠时，系统默认几分钟就自动息屏，
+   * 画面直接黑掉。默认**开**，开关抛在设置「播放性能」页由用户手动控制。
+   *
+   * 三端落地方式不同（自动挑选，见 src/composables/useWakeLock.js）：
+   *   Electron → 主进程 powerSaveBlocker('prevent-display-sleep')，最小化也有效
+   *   iOS 壳  → 原生插件 UIApplication.isIdleTimerDisabled
+   *   Web/H5  → navigator.wakeLock('screen')，页面隐藏会被浏览器强制释放、回前台自动重申请
+   */
+  keepAwake: true,
+
+  /* ---------------- 智能分析 ---------------- */
+  /** 运动检测总开关 */
+  analysisEnabled: true,
+  /** 灵敏度 1~10（越大越容易触发） */
+  sensitivity: 5,
+  /**
+   * 画面变动「档次」：变动面积占画面的比例达到该百分比，才算一次有效异常
+   * （低于它的抖动直接忽略，不发通知也不推送）。与灵敏度取「较大者」生效。
+   *   0.3 极轻微 / 1 轻微 / 2.5 一般 / 5 明显 / 10 剧烈
+   *
+   * ⚠️ 降开销的关键旋钮：门槛提高 = 触发次数下降。
+   * 每触发一次报警都要走「原图截图 → 补拍完整人形 → 多渠道路推送」这条重链路，
+   * 所以把水桶线从「轻微」抬到「一般」是性价比最高的一刀——省的是整条链路，不是单点。
+   * 灵敏度 5 换算出来是 1.92%，低于这里的 2.5%，因此实际以本档位为准。
+   */
+  motionMinPercent: 2.5,
+  /** 每路每秒采样分析的帧数（画面变动是持续开销，降一档整体省约三分之一） */
+  sampleFps: 2,
+  /** 同一通道两次报警的最小间隔（秒）：翻倍可直接砍掉一半的报警链路 */
+  cooldownSec: 20,
+  /** 需要连续多少帧判定为移动才报警（抗噪） */
+  confirmFrames: 3,
+  /** 报警时声音提示 */
+  alarmSound: false,
+  /** 在画面上常显检测区域框 */
+  showRoi: false,
+  /** 人形识别总开关（模型已在项目本地，无需联网下载） */
+  aiEnabled: true,
+  /**
+   * 人形识别模型（本地 /ai/models/*.onnx）：
+   * yolo11n 最快最省 / yolo11s 均衡（默认）/ yolo11m 最准
+   */
+  aiModel: 'yolo11s',
+  /** 人形识别用的采样帧宽度（越大越准，也越吃性能，640 与模型输入匹配） */
+  aiInputSize: 640,
+  /** 人形置信度阈值 */
+  aiScore: 0.5,
+  /** 人形识别间隔（毫秒） */
+  aiIntervalMs: 5000,
+
+  /* ---------------- AI 扩展分析 ----------------
+   * ⚠️ 这里是「总闸」。打开之后还要看通道级的分流开关（每个通道的 cam.aiExt）：
+   *    全局开 + 该通道 aiExt 不是 false → 这一路才真的跑。
+   *    只盯 1~2 路时，把其余通道的附加能力关掉，省下的算力非常可观。
+   *
+   * 内置（隐藏）配置里的取法：人脸开、区域进出与徘徊开、人员计数开（只统计不推送）、姿态关。
+   * 姿态（YOLOv8n-pose）是这几项里最贵的，而且落到 WASM 回退时会吃满单核，所以留关。
+   * 初始化配置里这些会被「洗」成全关（见下面的 DEFAULT_OPTIONS）。
+   */
+  /**
+   * 人脸识别。
+   * 成本：SCRFD 人脸检测 19ms（WebGPU）/ 76ms（WASM），
+   *       MobileFaceNet 特征提取 39ms —— 后者在 WebGPU 下建不了会话，只能跑 WASM。
+   * 优化：只在检出人形的帧上跑；同一个人的脸 6 秒内只提一次特征（靠轨迹去重）。
+   */
+  face: {
+    enabled: true,
+    /** 人脸检测置信度阈值 */
+    score: 0.5,
+    /** 判定为同一个人的余弦相似度阈值（越高越严格） */
+    matchThreshold: 0.38,
+    /** 人脸库容量上限 */
+    libMax: 50,
+    /** 同一个人的两次人脸事件最小间隔（秒） */
+    cooldownSec: 30,
+    /** 同一个人的脸多少秒内不重复提特征（省算力） */
+    dedupeSec: 10,
+    /** 识别到已录入的人 → 记事件并推送 */
+    eventOnKnown: true,
+    /** 检测到未录入的人脸 → 也记事件（默认关，避免刷屏） */
+    eventOnUnknown: false,
+    /** 把没录入的人脸暂存起来，方便在设置里一键录入 */
+    collectUnknown: true,
+    /** 画面上画人脸框 */
+    drawBox: true
+  },
+  /**
+   * 人形姿态（YOLOv8n-pose，17 关键点）。
+   * 成本：48ms（WebGPU）/ 365ms（WASM），每帧最多处理 maxPersons 个人。
+   * ⚠️ WASM 回退下非常吃 CPU，iOS 上建议保持关闭。
+   */
+  pose: {
+    enabled: false,
+    score: 0.4,
+    /**
+     * 每帧最多对几个人做姿态（面积大的优先）。
+     * 姿态是「一人一次前向」，1 个人和 2 个人就是两倍开销 —— 默认只算最靠近镜头的那一个。
+     */
+    maxPersons: 1,
+    /** 要上报的基础动作（没勾的动作仍然会算，只是不产生事件） */
+    actions: { fall: true, handUp: false, crouch: false, stand: false }
+  },
+  /**
+   * 区域规则：走出 / 走入区域、徘徊、人员计数。
+   * 这三项都不需要额外模型，靠人形检测 + 轻量跟踪（零成本）实现，
+   * 所以即使不开人脸 / 姿态也能用。
+   * 区域本身画在每个通道的 zones 上（默认空 = 不启用区域规则）。
+   */
+  zone: {
+    /** 上报「走入区域」 */
+    enterAlarm: true,
+    /** 上报「走出区域」 */
+    exitAlarm: false,
+    /** 上报「徘徊」 */
+    loiterAlarm: true,
+    /** 徘徊判定时长（秒）：在区域内停留超过它才可能判定为徘徊 */
+    loiterSec: 20,
+    /** 徘徊判定范围（归一化）：这段时间内脚点移动范围小于它才算「原地徘徊」 */
+    loiterRadius: 0.08,
+    /** 人员计数：统计 + 在画面上显示 + 定期推送（用户要求默认就要推） */
+    countEnabled: true,
+    /** current 当前人数 / total 累计人次 / both 两者 */
+    countMode: 'current',
+    /**
+     * 计数是否定期推送到渠道。
+     *
+     * ⚠️ 这是**第一层**开关；第二层在各渠道的「推送哪些事件 → 人员计数」。
+     * 两层都开才会真的推，任一层关掉都只是"统计但不推"。
+     * 曾经默认关（怕刷屏），用户明确要求打开 —— 想静音时改这里或渠道分组即可。
+     */
+    countPush: true,
+    /**
+     * 计数推送间隔（秒）。默认 **4 小时**。
+     *
+     * 为什么从 60 秒改成 14400：这是一条**定时播报**而不是"报警" ——
+     * 画面里 0 个人它也会照推（历史行为），60 秒一条意味着一夜之间几百条
+     * 「人员计数 · 大门外」推送，用户根本没法把真正的报警从里面捞出来。
+     * 4 小时一次把它还原成"定时汇报"的本意；想更密可以在设置里改
+     * （10 分钟 ~ 24 小时可选）。已装的老配置会在启动时一次性迁移（见 App.vue）。
+     */
+    countIntervalSec: 14400,
+    /** 在画面上显示当前人数 */
+    showOnScreen: true
+  },
+
+  /* ---------------- 后端检测服务（headless，手动开关，默认关） ---------------- */
+  /**
+   * 开启后：各通道停止本地 AI 人形检测（省解码/推理算力），改为轮询
+   * server/headless-monitor.mjs 提供的 HTTP API 拉事件并合入事件流。
+   * 关闭后：一切回到原来的纯前端链路，两边互不影响。
+   */
+  backend: {
+    enabled: false,
+    /** 服务地址，如 http://10.0.0.12:8787（手机端要填 Mac 的局域网 IP） */
+    url: '',
+    /** 轮询间隔（毫秒） */
+    pollMs: 4000
+  },
+
+  /* ---------------- 报警记录 ---------------- */
+  /**
+   * 报警记录最多保留多少条（含截图），超出后循环删除最旧的。
+   * 记录与截图存在 IndexedDB 里，几百 MB 配额，200 条原图毫无压力。
+   */
+  maxEvents: 200,
+
+  /* ---------------- 监控状态异常推送（全局，三个渠道共用调度） ---------------- */
+  statusAlerts: {
+    /** 被监听的通道出现异常（拉流失败 / 停止重试）时推送 */
+    enabled: true,
+    /** 恢复正常时也推送一条 */
+    notifyRecover: true,
+    /** 持续异常时的重复提醒间隔（分钟），0 = 只提醒一次 */
+    repeatMinutes: 10
+  },
+
+  /* ---------------- 定时状态巡检（全局，三个渠道共用调度） ---------------- */
+  patrol: {
+    enabled: true,
+    /** 巡检推送间隔（分钟） */
+    intervalMinutes: 30,
+    /** 只在存在异常时才推送 */
+    onlyWhenAbnormal: false,
+    /** 报告里是否包含非监听通道 */
+    includeAll: true
+  },
+
+  /* ---------------- 报警提醒方式 ---------------- */
+  alert: {
+    /** 左上角弹出的简要通知卡片（10 秒自动消失） */
+    topNotify: true,
+    /**
+     * 事件截图留档宽度（像素）。
+     * 直接从播放器原生分辨率的画布截取（例如 3200 宽），所以细节清晰；
+     * 列表里的小缩略图另外单独生成，不受这里影响。
+     * 0 = 原图（视频原始分辨率，最清晰，推荐）。
+     */
+    shotWidth: 0,
+    /** 浏览器桌面通知（需要授权，切到别的窗口也能看到） */
+    desktopNotify: true,
+    /** 报警时闪烁页面标题（标签栏一眼可见） */
+    flashTitle: true,
+    /** 报警时自动把该画面放大到全屏铺满，方便立刻看清是谁 */
+    autoZoom: false,
+    /** 人形报警声音与移动报警区分开 */
+    distinctSound: true,
+    /**
+     * 报警后补拍并补推一张「完整人形」原图：
+     * 先按最快检测到的结果立刻推报警，再在几秒内挑一张人形最完整的高清帧补推，
+     * 并把事件记录里的截图换成这张（详情/大图也是完整人形）。需该通道开启人形识别。
+     */
+    extraPersonShot: true
+  },
+
+  /* ---------------- 隐私遮罩 ---------------- */
+  mask: {
+    /** 解锁密码，留空表示点击屏幕即可恢复 */
+    password: '',
+    /** 无操作多少分钟后自动遮罩（0 = 关闭自动遮罩） */
+    autoMaskMinutes: 0,
+    /** 遮罩期间是否保持播放（关闭可省资源，但恢复需要重新拉流） */
+    keepPlaying: true
+  },
+
+  /* ---------------- 钉钉报警推送 ---------------- */
+  dingtalk: {
+    /** 是否启用推送 */
+    enabled: true,
+    /** 群机器人 Webhook（完整地址） */
+    webhook:
+      'https://***REMOVED-ding_hook***',
+    /** 加签密钥（安全设置=加签时填写，留空表示使用关键词或 IP 白名单） */
+    secret: '***REMOVED-ding_secret***',
+    /** 走本地代理（推荐，规避浏览器跨域限制） */
+    useProxy: true,
+    /**
+     * 自定义代理基地址，留空 = 自动判断：
+     *   浏览器/桌面端 → /dingtalk-robot（同源代理）
+     *   iOS/Android 原生壳 → https://oapi.dingtalk.com（走原生网络栈）
+     * 部署到服务器且没配反向代理时，可以填自建的云函数地址，例如
+     *   https://your-domain.com/api/dingtalk
+     */
+    proxyBase: '',
+
+    /** 需要推送的通道 id 列表，默认只推第一个 */
+    cameras: ['cam-1'],
+
+    /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
+    events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
+    /** 画面移动的变动幅度低于该百分比时不推送（0 = 不限制） */
+    minRatioPercent: 0,
+
+    /* ---- 频率限制（钉钉机器人硬限制 20 条/分钟） ---- */
+    /** 同一通道两次推送的最小间隔（秒） */
+    minIntervalSec: 30,
+    /** 全局两次推送的最小间隔（秒） */
+    globalMinIntervalSec: 3,
+    /** 每分钟最多推送条数（上限 20） */
+    rateLimitPerMin: 18,
+    /** 超过每分钟上限时：merge 合并成一条汇总 / drop 直接丢弃 */
+    overflowMode: 'merge',
+
+    /* ---- 静默时段 ---- */
+    quietEnabled: false,
+    quietStart: '22:00',
+    quietEnd: '07:00',
+
+    /* ---- 消息内容 ---- */
+    /** markdown 或 text */
+    msgType: 'markdown',
+    /** 消息标题前缀（同时可作为钉钉「自定义关键词」） */
+    titlePrefix: '【监控报警】',
+    /** 推送内容包含哪些字段 */
+    fields: {
+      camera: true,
+      cameraId: false,
+      time: true,
+      type: true,
+      ratio: true,
+      confidence: true,
+      resolution: true,
+      bitrate: true,
+      url: false,
+      roi: true,
+      seq: true,
+      screenshot: true
+    },
+
+    /* ---- 事件原图 ----
+     * 默认不传图片，而是在消息末尾附一条 Telegram 原图链接（点开去 TG 看原图）。
+     * 需要钉钉里直接看到图时，才改成上传图床 / 自建接口：
+     *   tg        只带 Telegram 原图链接（推荐：零额外开销，不传图）
+     *             —— 优先指到本次那条 TG 消息；本次没推 TG 则退回群链接
+     *   litterbox 上传到零配置图床后直接嵌图，国内可直连（最长 72 小时有效）
+     *   upload    上传到自建接口后嵌图（需接口返回公网 URL）
+     *   none      既不带图也不带链接（截图仍保存在本地事件面板）
+     */
+    screenshotMode: 'tg',
+    /** litterbox 图床的文件有效期：1h / 12h / 24h / 72h */
+    imageHostTtl: '72h',
+    uploadUrl: '',
+    uploadField: 'file',
+
+    /* ---- 监控状态异常推送 ---- */
+    statusAlerts: {
+      /** 被监听的通道出现异常（拉流失败 / 停止重试）时推送 */
+      enabled: true,
+      /** 恢复正常时也推送一条 */
+      notifyRecover: true,
+      /** 持续异常时的重复提醒间隔（分钟），0 = 只提醒一次 */
+      repeatMinutes: 10
+    },
+
+    /* ---- 定时状态巡检 ---- */
+    patrol: {
+      enabled: true,
+      /** 巡检推送间隔（分钟） */
+      intervalMinutes: 30,
+      /** 只在存在异常时才推送 */
+      onlyWhenAbnormal: false,
+      /** 报告里是否包含非监听通道 */
+      includeAll: true
+    },
+
+    /* ---- @ 设置 ---- */
+    atAll: false,
+    /** 手机号，多个用英文逗号分隔 */
+    atMobiles: ''
+  },
+
+  /* ---------------- Telegram 推送（图片走这里） ---------------- */
+  telegram: {
+    /**
+     * 是否启用 Telegram 推送。
+     * 钉钉自定义机器人的 markdown 图片必须是公网可访问的 http(s) 地址，
+     * 而 Telegram Bot 支持直接上传文件（multipart），所以报警截图统一由 Telegram 发送。
+     * 钉钉与 Telegram 可同时开启，事件会同时推送到两边。
+     */
+    enabled: true,
+    /** 机器人 Token（@BotFather 里获取，形如 123456789:AA....） */
+    token: '***REMOVED-tg_token***',
+    /**
+     * 目标会话 ID：群组 / 频道 / 私聊。
+     * 超级群与频道的 id 必须带 -100 前缀（例如 1234567890 → -1001234567890）。
+     */
+    chatId: '-1001234567890',
+    /**
+     * 群 / 频道的公开用户名（就是 t.me 链接里那一段，例如 my_monitor_group）。
+     * 填了它才能生成 https://t.me/my_monitor_group/<消息ID> 这种手机点开就能跳转的链接；
+     * 留空则退回 t.me/c/<内部ID>/<消息ID>（这种只有装过 TG 且已入群才能打开）。
+     */
+    groupUsername: 'my_monitor_group',
+    /** 图片发送方式：photo = 聊天里直接预览（TG 会压缩）；document = 原始文件，不压缩 */
+    sendMode: 'photo',
+    /** 事件有截图时一并发送图片 */
+    withPhoto: true,
+    /** 静默发送（收到但不响铃、不弹通知） */
+    silent: false,
+    /** 报警截图是否也作为文件再发一份原图（想看无损原图时开启） */
+    alsoSendOriginal: false,
+
+    /* ---- 需要推送的通道 id 列表 ---- */
+    cameras: ['cam-1'],
+    /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
+    events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
+
+    /* ---- 这个渠道是否接收「监控异常」与「定时巡检」通知 ---- */
+    statusAlerts: { enabled: true },
+    patrol: { enabled: true }
+  },
+
+  /* ---------------- 企业微信推送（群机器人 Webhook） ---------------- */
+  wecom: {
+    /** 是否启用企业微信推送（可和钉钉 / Telegram 同时开启） */
+    enabled: true,
+    /**
+     * 群机器人 Webhook 完整地址，形如
+     *   https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=693a91f6-7xxx-4bc4-97a0-0ec2sifa5aaa
+     * 只填 key 那一串也行，代码会自动补全前缀。
+     */
+    webhook:
+      'https://***REMOVED-wecom_hook***',
+    /**
+     * 自定义代理基地址，留空 = 自动判断（与钉钉同理）：
+     *   浏览器/桌面端 → /wecom-bot（同源代理）
+     *   iOS/Android 原生壳 → https://qyapi.weixin.qq.com（原生网络栈）
+     */
+    proxyBase: '',
+
+    /** 需要推送的通道 id 列表 */
+    cameras: ['cam-1'],
+    /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
+    events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
+    /** 画面移动的变动幅度低于该百分比时不推送（0 = 不限制） */
+    minRatioPercent: 0,
+
+    /* ---- 频率限制（企业微信群机器人同样是 20 条/分钟） ---- */
+    minIntervalSec: 30,
+    globalMinIntervalSec: 3,
+    rateLimitPerMin: 18,
+    overflowMode: 'merge',
+
+    /* ---- 静默时段 ---- */
+    quietEnabled: false,
+    quietStart: '22:00',
+    quietEnd: '07:00',
+
+    /* ---- 消息内容 ---- */
+    /** text 或 markdown */
+    msgType: 'markdown',
+    /** 消息标题前缀（可兼作企业微信机器人的关键词过滤） */
+    titlePrefix: '【监控报警】',
+    /** 推送内容包含哪些字段 */
+    fields: {
+      camera: true,
+      cameraId: false,
+      time: true,
+      type: true,
+      ratio: true,
+      confidence: true,
+      resolution: true,
+      bitrate: true,
+      url: false,
+      roi: true,
+      seq: true,
+      screenshot: true
+    },
+
+    /* ---- 报警截图 ----
+     * 企业微信的 image 消息直接收 base64 + md5，不需要公网图床，是最省事的方式。
+     *   image      随报警消息直接发一张截图（最大 2MB，超限自动压缩）—— 推荐
+     *   tg         文字消息里附一条 Telegram 原图链接（本次没推 TG 则给群链接）
+     *   litterbox  上传到零配置图床后在文字消息里附链接（国内可直连）
+     *   none       既不带图也不带链接
+     */
+    screenshotMode: 'image',
+    /** litterbox 图床的文件有效期：1h / 12h / 24h / 72h */
+    imageHostTtl: '72h',
+
+    /* ---- 这个渠道是否接收「监控异常」与「定时巡检」通知 ---- */
+    statusAlerts: { enabled: true },
+    patrol: { enabled: true },
+
+    /* ---- 提醒（企业微信 text 消息的 mentioned_list） ---- */
+    atAll: false,
+    /** 成员手机号，多个用英文逗号分隔 */
+    atMobiles: ''
+  }
+}
+
+/**
+ * 初始化默认配置：在隐藏配置的基础上「洗」出一份**空白**配置。
+ *
+ * 洗掉的是所有「个人化」的东西：推送凭据、绑定的通道、AI 附加能力总闸、播放策略。
+ * 留下的都是产品级的中性参数（变动档位、采样帧率、事件保留条数……），
+ * 那些是"可用性默认"而不是"个人数据"，所以跟着隐藏配置一起演进。
+ *
+ * ⚠️ 通道列表不在这里 —— 走 DEFAULT_CAMERAS（空数组）。
+ */
+export const DEFAULT_OPTIONS = (() => {
+  const o = JSON.parse(JSON.stringify(HIDDEN_OPTIONS))
+
+  /* ---- 外观主题：liquid = 液态风格（玻璃质感）；dark / light / auto 见设置「外观」 ---- */
+  o.theme = 'liquid'
+
+  /* ---- 巡检 / 异常推送：初始化的空白配置里全部默认关闭，别一上来就打扰用户 ---- */
+  o.statusAlerts.enabled = false
+  o.statusAlerts.notifyRecover = false
+  o.patrol.enabled = false
+
+  /* ---- 播放策略：回到中立默认（初始化没有通道，开机不自动播任何画面） ---- */
+  o.maxDecode = 4
+  o.autoPlayCount = 1
+  o.autoPlayIds = []
+  o.exclusivePlay = true
+  /*
+   * 后台时暂停画面：默认**关**。
+   * 监控大屏的核心价值是「人不在屏幕前也在记录」—— 暂停解码等于连运动检测、
+   * AI 识别、报警推送一起停了。这个开关是给笔记本 / 手机等在意耗电的
+   * 场景准备的，由用户自己在「播放性能」里决定开不开。
+   */
+  o.pauseWhenHidden = false
+
+  /*
+   * 屏幕常亮：初始化配置里也保持**开**。
+   * 它不属于"个人化数据"，而是监控大屏的产品级默认 ——
+   * 刚装好、还没配通道时，用户第一件事就是盯着屏幕调试，
+   * 这时候屏幕自己黑掉非常影响体验。用户在设置里可以随时关掉。
+   */
+  o.keepAwake = true
+
+  /* ---- AI 附加能力：总闸全关，用不用由用户自己决定 ---- */
+  /*
+   * aiEnabled 是「人形检测」总闸。它原本在 HIDDEN_OPTIONS 里是开的，
+   * 而这里只洗了 face / pose / zone —— 结果「恢复初始化」之后首屏照样去拉
+   * 默认模型（yolo11n 10MB，选 large 则 36MB）。空白配置就该是克制的：
+   * 没配摄像头、没开推送，自然也不该先替用户下模型。
+   */
+  o.aiEnabled = false
+  o.face.enabled = false
+  o.pose.enabled = false
+  o.zone.countEnabled = false
+  /*
+   * 「定期推送人数」也归零。
+   * 设置页那句说明写的就是「默认关，避免刷屏」，但默认值一直是 true ——
+   * 文案和行为对不上。初始化既然是"什么都没有"，这条定时播报也不该预先打开；
+   * 用户真想定时收到人数播报时，自己在「检测识别 → 区域」里打开即可。
+   */
+  o.zone.countPush = false
+
+  /* ---- 三个推送渠道：关闭 + 凭据清空 + 解绑通道 ---- */
+  const wipe = (ch, keys) => {
+    ch.enabled = false
+    keys.forEach((k) => (ch[k] = ''))
+    ch.cameras = []
+    /*
+     * 渠道级的「异常通知 / 巡检报告」子开关也一并归零。
+     * 不归零会留下一个刺眼的不一致：全局 statusAlerts / patrol 已经关掉了（见上），
+     * 但三个渠道的对应子开关还是 true —— 界面上就会出现
+     * 「正文写着未启用、页签徽标却亮着 on」的自相矛盾。
+     * 空白配置就该是彻底关干净的。
+     */
+    if (ch.statusAlerts) ch.statusAlerts.enabled = false
+    if (ch.patrol) ch.patrol.enabled = false
+  }
+  wipe(o.dingtalk, ['webhook', 'secret'])
+  wipe(o.telegram, ['token', 'chatId', 'groupUsername'])
+  wipe(o.wecom, ['webhook'])
+
+  return o
+})()
+
+/** 「加载内置配置」的访问密码 */
+export const HIDDEN_PASSCODE = '***REMOVED-passcode***'
+
+/**
+ * 深拷贝一份内置隐藏配置（通道 + 通道可见性 + 配置）。
+ * 载入后大屏只留 HIDDEN_HIDDEN_IDS 之外的三路，其余四路在通道列表里但默认不显示。
+ */
+export function cloneHiddenConfig() {
+  return {
+    cameras: JSON.parse(JSON.stringify(HIDDEN_CAMERAS)),
+    options: JSON.parse(JSON.stringify(HIDDEN_OPTIONS)),
+    hiddenIds: [...HIDDEN_HIDDEN_IDS]
+  }
+}
+
+/**
+ * 深拷贝一份「初始化配置」——空白的那个。
+ * 「恢复初始化」用的就是它：0 路通道 + 空白 options + 无隐藏记录。
+ */
+export function cloneInitConfig() {
+  return {
+    cameras: cloneDefaultCameras(),
+    options: cloneDefaultOptions(),
+    hiddenIds: []
+  }
+}
+
+/** 品牌信息（顶栏 / 关于页 / 桌面端 / 移动端共用） */
+export const BRAND = {
+  name: 'XiaoMao',
+  fullName: 'BossMonitor',
+  slogan: '7 路实时预览 · AI 人形识别 · 多端推送',
+  logo: './logo/logo.png',
+  version: '1.0.0'
+}
+
+export const STORAGE_KEY = 'monitor-wall-config-v1'
+
+/** 深拷贝一份默认配置，避免多处共享同一个对象引用 */
+export function cloneDefaultOptions() {
+  return JSON.parse(JSON.stringify(DEFAULT_OPTIONS))
+}
+
+/** 深拷贝一份默认摄像头列表 */
+export function cloneDefaultCameras() {
+  return DEFAULT_CAMERAS.map((c) => ({
+    ...c,
+    roi: c.roi ? { ...c.roi } : null,
+    rect: c.rect ? { ...c.rect } : null,
+    channels: { ...c.channels },
+    aiExt: { ...c.aiExt },
+    zones: (c.zones || []).map((z) => ({ ...z, rect: { ...z.rect } }))
+  }))
+}
+
+/** 补齐历史配置里缺失的通道级推送开关，避免旧存档读进来是 undefined */
+export function normalizeCameraChannels(cam) {
+  if (!cam || typeof cam !== 'object') return cam
+  const src = cam.channels && typeof cam.channels === 'object' ? cam.channels : {}
+  cam.channels = { ding: src.ding !== false, wecom: src.wecom !== false, tg: src.tg !== false }
+  if (cam.push === undefined) cam.push = true
+  // 子码流是后加的字段，老存档里没有 → 补成空串（= 永远拉主码流，行为不变）
+  if (typeof cam.urlSub !== 'string') cam.urlSub = ''
+  // 区域规则是后加的字段，老存档里没有
+  if (!Array.isArray(cam.zones)) cam.zones = []
+  // 附加能力（人脸 / 姿态 / 区域）也是后加的字段，老存档里没有 → 默认全部参与
+  const ext = cam.aiExt && typeof cam.aiExt === 'object' ? cam.aiExt : {}
+  cam.aiExt = {
+    face: ext.face !== false,
+    pose: ext.pose !== false,
+    zone: ext.zone !== false
+  }
+  return cam
+}
+
+/** 新建摄像头时使用的默认地址模板 */
+export const URL_TEMPLATE = `${BASE}01${TAIL}`

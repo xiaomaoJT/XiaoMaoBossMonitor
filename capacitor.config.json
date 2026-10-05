@@ -1,0 +1,16 @@
+{
+  "appId": "com.mao.monitorwall",
+  "appName": "BossMonitor",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "never",
+    "preferredContentMode": "mobile",
+    "backgroundColor": "#0b0f14",
+    "scrollEnabled": false
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

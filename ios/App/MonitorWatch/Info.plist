@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>BossMonitor</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- watchOS 独立 App（单 target，不是老的 WatchKit extension 结构） -->
+	<key>WKApplication</key>
+	<true/>
+	<!-- 与手机端配对：必须等于 iPhone App 的 bundle id，否则两边的 WCSession 不互通 -->
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>com.mao.monitorwall</string>
+	<!-- 手机 App 没装 / 没联网时也能单独打开看缓存 -->
+	<key>WKRunsIndependentlyOfCompanionApp</key>
+	<false/>
+	<!-- 事件文本里有中文与 emoji，需要正确声明本地化 -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh_CN</string>
+		<string>en</string>
+	</array>
+</dict>
+</plist>

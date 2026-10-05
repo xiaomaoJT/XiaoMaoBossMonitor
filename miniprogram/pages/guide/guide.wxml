@@ -1,0 +1,33 @@
+<view class="card">
+  <view class="card-title">{{isNoConfig ? '尚未配置大屏地址' : '无法打开监控大屏'}}</view>
+  <view class="muted" wx:if="{{isNoConfig}}">
+    本小程序是 BossMonitor 的容器壳，需要先把 H5 版部署到 HTTPS 域名，再把地址写进
+    miniprogram/utils/config.js 的 H5_URL。
+  </view>
+  <view class="muted" wx:else>
+    大屏页面加载失败。请确认：域名已配置为业务域名、HTTPS 证书有效、H5 服务可访问。
+  </view>
+</view>
+
+<view class="card">
+  <view class="card-title">上线前三步</view>
+  <view class="muted">1. npm run build 产出 H5，部署到 HTTPS 静态托管（含 public/js、public/logo）。</view>
+  <view class="muted" style="margin-top:8rpx;">2. 小程序后台配置「业务域名」（下载校验文件放到站点根目录），视频流的 wss:// 加到「socket 合法域名」。</view>
+  <view class="muted" style="margin-top:8rpx;">3. 把地址填进 miniprogram/utils/config.js 的 H5_URL，重新上传。</view>
+  <view class="muted" style="margin-top:16rpx;">
+    提示：public/ai 下的 AI 模型约 107MB，走 CDN 单独部署即可，不要也不需要放进小程序包
+    （小程序总包上限 20MB）。
+  </view>
+</view>
+
+<view class="card">
+  <view class="card-title">主体与域名要求</view>
+  <view class="muted">
+    web-view 仅对「非个人主体」小程序开放；个人主体小程序无法使用 web-view。
+    域名需 ICP 备案并支持 HTTPS。若需要彻底摆脱 web-view（纯原生小程序），需要按页面重写，
+    体积也必须按主包 2MB / 总包 20MB 拆分包。
+  </view>
+</view>
+
+<button class="btn" bindtap="onCopySnippet">复制配置说明</button>
+<button class="btn-ghost" bindtap="onReload">重新尝试进入大屏</button>
