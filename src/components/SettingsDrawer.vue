@@ -1291,6 +1291,14 @@
             <span class="switch" :class="{ on: opts.dingtalk.useProxy }" @click="opts.dingtalk.useProxy = !opts.dingtalk.useProxy"></span>
           </label>
 
+          <div class="opt" v-if="opts.dingtalk.useProxy">
+            <span>
+              <strong>代理地址</strong>
+              <em>留空 = 用当前页面的同源前缀，后端服务（8787）已内置转发，正常不用填；Electron 桌面端这种 file:// 打开的填 http://127.0.0.1:8787</em>
+            </span>
+            <input class="field" v-model.trim="opts.dingtalk.proxyBase" spellcheck="false" placeholder="留空 = 同源" />
+          </div>
+
           <div class="opt col">
             <span>
               <strong>推送哪些事件</strong>
