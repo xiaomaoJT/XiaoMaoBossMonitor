@@ -253,3 +253,70 @@ export function removePendingFace(id) {
 export function clearPendingFaces() {
   pendingFaces.value = []
 }
+
+/* ==================== 后端待录入队列（headless 模式） ====================
+ *
+ * ⚠️ 为什么需要这一份：开了「后端检测服务」后，**跑检测的是后端**，
+ * 它抓到未录入的人脸写进**自己的 SQLite**（GET /api/pending-faces）；
+ * 而上面那个 pendingFaces 只是前端自己检测时的内存暂存，后端模式下永远是空的。
+ * 结果就是「抓到的人脸进不了人脸库」—— 设置页里「待录入」列表一直空白，
+ * 压根没东西可点「录入」。
+ *
+ * 这里把后端队列取回来单独存一份（带 fromBackend 标记），
+ * 由设置页在录入 / 忽略后回后端删掉对应那条。
+ */
+export const backendPendingFaces = ref([])
+
+function normBackendPending(base, list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((f) => f && f.id)
+    .map((f) => ({
+      id: `b${f.id}`, // 加前缀，避免与前端内存队列的数字 id 撞号
+      backendId: Number(f.id),
+      vector: f.vector, // 后端返回的就是普通数组，addFace 直接收
+      thumb: f.thumb || '',
+      at: Number(f.at) || Date.now(),
+      camId: f.camId || '',
+      camName: f.camName || '',
+      hits: 1,
+      fromBackend: true
+    }))
+}
+
+/** 拉一次后端待录入队列 */
+export async function loadBackendPendingFaces(url) {
+  const base = String(url || '').replace(/\/+$/, '')
+  if (!base) {
+    backendPendingFaces.value = []
+    return []
+  }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 8000)
+    let res
+    try {
+      res = await fetch(`${base}/api/pending-faces?limit=50`, { signal: ctrl.signal })
+    } finally {
+      clearTimeout(t)
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    backendPendingFaces.value = normBackendPending(base, data && data.faces)
+    return backendPendingFaces.value
+  } catch (e) {
+    backendPendingFaces.value = []
+    return []
+  }
+}
+
+/** 从后端队列里删掉一条（录入或忽略之后调用，否则刷新又冒出来） */
+export async function dropBackendPendingFace(url, backendId) {
+  const base = String(url || '').replace(/\/+$/, '')
+  backendPendingFaces.value = backendPendingFaces.value.filter((f) => f.backendId !== Number(backendId))
+  if (!base) return
+  try {
+    await fetch(`${base}/api/pending-face?id=${encodeURIComponent(backendId)}`)
+  } catch (e) {
+    /* 删不掉也只是下次又出现，不影响已录入的人脸 */
+  }
+}

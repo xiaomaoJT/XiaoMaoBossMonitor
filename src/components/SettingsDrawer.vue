@@ -1287,21 +1287,25 @@
               </div>
             </div>
 
-            <!-- 待录入 -->
-            <div class="opt col" v-if="pendingFaces.length">
+            <!-- 待录入（前端 / 后端检测到的都会列进来） -->
+            <div class="opt col" v-if="allPendingFaces.length">
               <span>
-                <strong>待录入人脸（{{ pendingFaces.length }}）</strong>
+                <strong>待录入人脸（{{ allPendingFaces.length }}）</strong>
                 <em>点「录入」建档并自动编号，之后可以在人脸库里改名</em>
               </span>
               <div class="face-grid">
-                <div class="face-card pending" v-for="pf in pendingFaces" :key="pf.id">
+                <div class="face-card pending" v-for="pf in allPendingFaces" :key="pf.id">
                   <img :src="pf.thumb" alt="待录入人脸" />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <div class="face-acts">
                     <button class="mini-btn" @click="doAddPending(pf)">录入</button>
-                    <button class="mini-btn ghost" @click="removePendingFace(pf.id)">忽略</button>
+                    <button class="mini-btn ghost" @click="doIgnorePending(pf)">忽略</button>
                   </div>
                 </div>
+              </div>
+              <div class="face-acts" v-if="faceBackendOn">
+                <button class="mini-btn ghost" @click="refreshBackendPending">刷新待录入</button>
+                <span class="muted">来自后端检测服务</span>
               </div>
             </div>
 
@@ -2667,9 +2671,12 @@ import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
 import { camExtOn } from '../composables/useAiExtras'
 import {
   addFace,
+  backendPendingFaces,
   clearFaces,
   deleteFace,
+  dropBackendPendingFace,
   faces as faceLib,
+  loadBackendPendingFaces,
   pendingFaces,
   refreshFaces,
   removePendingFace,
@@ -3480,6 +3487,32 @@ function formatCountdown(ts) {
   return `${(m / 60).toFixed(1)} 小时后`
 }
 
+/* ---------- 待录入人脸（后端链路） ----------
+ * ⚠️ 这三个声明必须排在下面那个 immediate watcher 之前 ——
+ * watcher 带 immediate:true 会在 setup 期间同步执行回调，
+ * 引用到后面才初始化的 const 会直接抛 TDZ 错误（faceBackendOn before initialization）。 */
+
+/** 后端检测服务是否接管（决定待录入人脸从哪来） */
+const faceBackendOn = computed(() => !!(opts.backend && opts.backend.enabled && opts.backend.url))
+
+/**
+ * 「待录入」列表 = 前端自己检测到的 + 后端检测到的。
+ *
+ * 两种模式下来源不同，但**必须都显示**，否则会出现「抓到了人脸却没进库」：
+ *   - 纯前端链路 → 前端检测写进内存队列（pendingFaces）
+ *   - 后端链路   → 后端检测写进它自己的 SQLite（backendPendingFaces）
+ * 之前只读前端那份，后端模式下永远是空的。
+ */
+const allPendingFaces = computed(() =>
+  faceBackendOn.value ? [...backendPendingFaces.value, ...pendingFaces.value] : [...pendingFaces.value]
+)
+
+/** 拉一次后端待录入队列（后端模式下人脸是在服务端抓的） */
+async function refreshBackendPending() {
+  if (!faceBackendOn.value) return
+  await loadBackendPendingFaces(opts.backend.url)
+}
+
 /**
  * 抽屉一打开（或后端刚连上）就把状态哨兵快照拉回来。
  * 后端模式下掉线监控与定时巡检都在服务端，用户打开设置最想看的就是
@@ -3489,6 +3522,9 @@ watch(
   () => [backendState.value, opts.backend && opts.backend.enabled],
   () => {
     if (backendState.value === 'polling' && !backendWatchdog.value) refreshBackendWatchdog(opts)
+    // 后端模式下未录入人脸是在服务端抓的，进「检测识别」页就把待录入队列拉回来，
+    // 否则用户看到的是空列表，以为「抓到的脸没进库」
+    if (faceBackendOn.value) refreshBackendPending()
   },
   { immediate: true }
 )
@@ -3604,8 +3640,19 @@ const faceRenameText = ref('')
 
 async function doAddPending(pf) {
   const res = await addFace(pf.vector, pf.thumb, '', Number(opts.face.libMax) || 50)
-  if (res.ok) removePendingFace(pf.id)
-  else window.alert(res.reason || '录入失败')
+  if (!res.ok) {
+    window.alert(res.reason || '录入失败')
+    return
+  }
+  // 录入成功：前端队列移除；后端队列要回服务端删掉，否则刷新又冒出来。
+  // 人脸库同步后端不用手动触发 —— App.vue 里盯着 faceList 变化会自动补发一份配置。
+  if (pf.fromBackend) await dropBackendPendingFace(opts.backend.url, pf.backendId)
+  else removePendingFace(pf.id)
+}
+
+function doIgnorePending(pf) {
+  if (pf.fromBackend) dropBackendPendingFace(opts.backend.url, pf.backendId)
+  else removePendingFace(pf.id)
 }
 
 async function doDeleteFace(f) {
@@ -5289,6 +5336,50 @@ function loadHidden() {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/*
+ * 通用 chip 按钮（临时静默的「静默渠道 / 常用时长」等都用它）。
+ *
+ * ⚠️ 之前只写了 `.ch-pick .chip`（定时静默那几个渠道），
+ * 而 `.chip` / `.chip.sm` / `.chip.on` 的样式定义在 CameraTile.vue 与
+ * EventPanel.vue 里 —— 那两个是**别的 scoped 组件**，样式不会作用到本组件。
+ * 结果「临时静默 → 静默渠道」那几个 chip 完全没有样式：没有边框、没有胶囊形状，
+ * 点一下 `on` 类也**没有任何视觉变化**，看上去就像"点不动"。
+ * 这里补一份本组件自己的 chip 样式（含 .on 选中态），与 .ch-pick 保持一致。
+ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text);
+}
+
+/* 选中态：静默渠道 / 常用时长靠它给出"已选"的反馈 */
+.chip.on {
+  color: var(--accent-text-strong);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.chip.sm {
+  padding: 4px 11px;
+  font-size: 12px;
 }
 
 .ch-pick .chip {
