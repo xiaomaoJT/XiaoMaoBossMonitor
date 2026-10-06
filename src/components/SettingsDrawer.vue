@@ -750,9 +750,9 @@
               <div class="slot-list">
                 <div class="slot-row" v-for="(s, i) in slotsOf" :key="i">
                   <span class="slot-idx">{{ i + 1 }}</span>
-                  <input class="field mini" type="time" v-model="s.start" @click="openPicker" />
+                  <input class="field mini" type="time" v-model="s.start" @mousedown="openPicker" />
                   <span class="tilde">~</span>
-                  <input class="field mini" type="time" v-model="s.end" @click="openPicker" />
+                  <input class="field mini" type="time" v-model="s.end" @mousedown="openPicker" />
                   <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
                   <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
                   <button
@@ -860,7 +860,7 @@
               </div>
 
               <div class="temp-until" v-else>
-                <input class="field" type="datetime-local" v-model="tempUntilLocal" @click="openPicker" />
+                <input class="field" type="datetime-local" v-model="tempUntilLocal" @mousedown="openPicker" />
                 <button class="btn tiny" @click="tempUntilLocal = tomorrowMorning">明天早上 08:00</button>
                 <button class="btn tiny" @click="tempUntilLocal = tonightMidnight">今晚 24:00</button>
               </div>
@@ -1856,9 +1856,9 @@
               <em>该时间段内只本地报警</em>
             </span>
             <div class="test-row">
-              <input class="field mini" type="time" v-model="dt.quietStart" />
+              <input class="field mini" type="time" v-model="dt.quietStart" @mousedown="openPicker" />
               <span class="unit">至</span>
-              <input class="field mini" type="time" v-model="dt.quietEnd" />
+              <input class="field mini" type="time" v-model="dt.quietEnd" @mousedown="openPicker" />
             </div>
           </div>
 
@@ -3150,17 +3150,35 @@ const slotsOf = computed(() =>
 
 /**
  * 点时间输入框任意位置都弹出原生选择器（桌面端默认只有小箭头能点开，
- * 监控大屏触屏上特别「点不灵敏」）。showPicker 在受控点击时调用，
- * 个别浏览器不支持或元素不可交互会抛错，安静吞掉即可。
+ * 监控大屏触屏上特别「点不灵敏」）。
+ *
+ * ⚠️ 必须挂在 **mousedown** 而不是 click：
+ *   浏览器自己会在 mousedown 的默认动作里弹选择器，而 click 是 mouseup 之后才触发的。
+ *   在 click 里再调 showPicker()，等于和浏览器「已经弹了一半」的原生流程撞车 ——
+ *   要么抛 InvalidStateError 被吞掉、要么等原生流程自己收尾，表现为「点完很久才弹」。
+ *   在 mousedown 里 preventDefault() 接管默认行为，再自己 showPicker()，才是即时的。
+ *   （mousedown 上 preventDefault 会连带阻止自动聚焦，所以要手动 focus 一下。）
  */
 function openPicker(e) {
   const el = e && e.target
-  if (el && typeof el.showPicker === 'function') {
-    try {
-      el.showPicker()
-    } catch (_) {
-      /* 忽略：不支持或被浏览器策略拦截时退回普通聚焦 */
-    }
+  if (!el || typeof el.showPicker !== 'function') return
+  // 同一次按压只弹一次：mousedown 之后再补一道 click 兜底（部分浏览器只派发 click）
+  if (el.__pickerOpened) return
+  try {
+    e.preventDefault()
+  } catch (_) {
+    /* 忽略 */
+  }
+  el.focus()
+  el.__pickerOpened = true
+  // 下一个手势再允许弹（用 setTimeout 0 避开本次按压后续派发的事件）
+  setTimeout(() => {
+    el.__pickerOpened = false
+  }, 0)
+  try {
+    el.showPicker()
+  } catch (_) {
+    /* 不支持 / 被策略拦截时退回普通聚焦，用户点小箭头仍可选 */
   }
 }
 

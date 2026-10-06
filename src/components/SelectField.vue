@@ -133,6 +133,13 @@ function measure() {
 function onDocDown(e) {
   // 点在触发按钮自己身上时交给 @click 的 toggle 处理，别在这里抢先关掉
   if (root.value && root.value.contains(e.target)) return
+  /*
+   * ⚠️ 弹层是 Teleport 到 body 的，**不在 root 里面**。
+   *    这里必须单独判一次 pop：否则在选项上按下鼠标时，这个捕获阶段的监听
+   *    会先判定「点在组件外」→ closePop()，Vue 在 microtask 里把弹层从 DOM 摘掉，
+   *    随后的 click 事件根本落不到 .sf-item 上，表现为「下拉弹出来但点不动」。
+   */
+  if (pop.value && pop.value.contains(e.target)) return
   closePop()
 }
 
