@@ -118,6 +118,7 @@
       @watch-sync="onWatchSync"
       @backend-sync="onBackendSyncNow"
       @flush-silent="onFlushSilent"
+      @test-pre-silent="onTestPreSilence"
       @restart-system="onRestartSystem"
       @start-temp-silent="onStartTempSilent"
       @end-temp-silent="onEndTempSilent"
@@ -1486,7 +1487,9 @@ function onZoneClear({ id }) {
 /* ==================== 报警事件 ==================== */
 const push = useAlertPush(options, {
   onState: (key, state, error) => markPush(key, state, error),
-  notify: (msg) => showToast(msg)
+  notify: (msg) => showToast(msg),
+  // 后端模式下推送由服务端负责，免打扰提醒也交给服务端发，前端不重复发
+  preSilenceEnabled: () => !backendActive.value
 })
 
 function markPush(key, state, error, channels, results) {
@@ -2488,6 +2491,30 @@ function onFlushSilent() {
     push
       .flushSilentSummary()
       .then(() => showToast('静默汇总已尝试推送'))
+      .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
+  }
+}
+
+/**
+ * 设置页「试发一条免打扰提醒」按钮。
+ * 走与自动提醒完全相同的文案与发送路径（pushPreSilenceNotice），
+ * 改完文案可以先看一眼效果，确认没问题再等下一个时段自动触发。
+ */
+function onTestPreSilence() {
+  if (backendActive.value) {
+    showToast('后端模式下推送在服务端，请到后端机器查看')
+    return
+  }
+  if (typeof push.pushPreSilenceNotice === 'function') {
+    push
+      .pushPreSilenceNotice()
+      .then((r) =>
+        showToast(
+          r && r.ok
+            ? `免打扰提醒已推送${r.reason ? '（' + r.reason + '）' : ''}`
+            : `未推送：${(r && (r.reason || '没有可用渠道')) || '未知原因'}`
+        )
+      )
       .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
   }
 }

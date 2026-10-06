@@ -750,9 +750,9 @@
               <div class="slot-list">
                 <div class="slot-row" v-for="(s, i) in slotsOf" :key="i">
                   <span class="slot-idx">{{ i + 1 }}</span>
-                  <input class="field mini" type="time" v-model="s.start" />
+                  <input class="field mini" type="time" v-model="s.start" @click="openPicker" />
                   <span class="tilde">~</span>
-                  <input class="field mini" type="time" v-model="s.end" />
+                  <input class="field mini" type="time" v-model="s.end" @click="openPicker" />
                   <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
                   <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
                   <button
@@ -783,6 +783,26 @@
                 </label>
               </div>
 
+              <!-- 时段开启前的提醒推送（preNotify，默认开） -->
+              <div class="opt pre-notify">
+                <span>
+                  <strong>时段开启前先推送提醒</strong>
+                  <em>每个免打扰时段开始的瞬间，先推一条说明：本次免打扰的时长、期间仍持续统计、结束时间，以及结束后会汇总推送本时段内的全部报警</em>
+                </span>
+                <label class="opt-inline">
+                  <span
+                    class="switch"
+                    :class="{ on: opts.silent.preNotify !== false }"
+                    @click="opts.silent.preNotify = opts.silent.preNotify === false"
+                  ></span>
+                  <span class="muted">{{ opts.silent.preNotify !== false ? '已开启' : '已关闭' }}</span>
+                </label>
+              </div>
+              <div class="test-row" v-if="opts.silent.preNotify !== false">
+                <button class="btn tiny" @click="testPreSilence">试发一条提醒</button>
+                <span class="muted">按第一个时段立即发一条，看看文案效果</span>
+              </div>
+
               <p class="silent-state">
                 <b>当前状态：</b>{{ silentStatusText }}
                 <button class="btn tiny" @click="flushSilentNow">立即推送静默汇总</button>
@@ -811,31 +831,36 @@
                   </button>
                 </div>
 
+              <!-- 时长选择：常用时长铺一行（网格整齐），自定义时长单独一行，不再和 chips 挤在一行 -->
               <div class="temp-dur" v-if="tempMode === 'hours'">
-                <button
-                  v-for="h in TEMP_HOURS"
-                  :key="h"
-                  class="chip sm"
-                  :class="{ on: tempHours === h }"
-                  @click="tempHours = h"
-                >
-                  {{ h }} 小时
-                </button>
-                <span class="tilde">或</span>
-                <input
-                  class="field mini"
-                  type="number"
-                  min="0.5"
-                  max="168"
-                  step="0.5"
-                  v-model.number="tempHours"
-                  title="自定义小时数（0.5 ~ 168）"
-                />
-                <span class="muted">小时</span>
+                <div class="temp-quick">
+                  <button
+                    v-for="h in TEMP_HOURS"
+                    :key="h"
+                    class="chip sm"
+                    :class="{ on: tempHours === h }"
+                    @click="tempHours = h"
+                  >
+                    {{ h }} 小时
+                  </button>
+                </div>
+                <label class="temp-custom">
+                  <span class="muted">自定义</span>
+                  <input
+                    class="field mini"
+                    type="number"
+                    min="0.5"
+                    max="168"
+                    step="0.5"
+                    v-model.number="tempHours"
+                    title="自定义小时数（0.5 ~ 168）"
+                  />
+                  <span class="muted">小时</span>
+                </label>
               </div>
 
               <div class="temp-until" v-else>
-                <input class="field" type="datetime-local" v-model="tempUntilLocal" />
+                <input class="field" type="datetime-local" v-model="tempUntilLocal" @click="openPicker" />
                 <button class="btn tiny" @click="tempUntilLocal = tomorrowMorning">明天早上 08:00</button>
                 <button class="btn tiny" @click="tempUntilLocal = tonightMidnight">今晚 24:00</button>
               </div>
@@ -1595,7 +1620,10 @@
               <strong>Webhook 地址</strong>
               <em>群机器人 → 自定义机器人 → Webhook 地址</em>
             </span>
-            <input class="field" v-model.trim="opts.dingtalk.webhook" spellcheck="false" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.dtWebhook ? 'text' : 'password'" v-model.trim="opts.dingtalk.webhook" spellcheck="false" autocomplete="off" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+              <button type="button" class="pw-eye" :title="revealed.dtWebhook ? '隐藏' : '显示'" @click="revealed.dtWebhook = !revealed.dtWebhook">{{ revealed.dtWebhook ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <div class="opt col">
@@ -1603,7 +1631,10 @@
               <strong>加签密钥</strong>
               <em>安全设置选择「加签」时填写，留空则不加签（需用关键词或 IP 白名单）</em>
             </span>
-            <input class="field" v-model.trim="opts.dingtalk.secret" spellcheck="false" placeholder="SECxxxxxxxx" />
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.dtSecret ? 'text' : 'password'" v-model.trim="opts.dingtalk.secret" spellcheck="false" autocomplete="off" placeholder="SECxxxxxxxx" />
+              <button type="button" class="pw-eye" :title="revealed.dtSecret ? '隐藏' : '显示'" @click="revealed.dtSecret = !revealed.dtSecret">{{ revealed.dtSecret ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <label class="opt">
@@ -1912,7 +1943,10 @@
               <strong>机器人 Token</strong>
               <em>在 Telegram 里找 @BotFather → /newbot 创建，复制返回的 Token</em>
             </span>
-            <input class="field" v-model.trim="tg.token" spellcheck="false" placeholder="123456789:AAxxxxxxxxxxxxxxxx" />
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.tgToken ? 'text' : 'password'" v-model.trim="tg.token" spellcheck="false" autocomplete="off" placeholder="123456789:AAxxxxxxxxxxxxxxxx" />
+              <button type="button" class="pw-eye" :title="revealed.tgToken ? '隐藏' : '显示'" @click="revealed.tgToken = !revealed.tgToken">{{ revealed.tgToken ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <div class="opt col">
@@ -1923,7 +1957,10 @@
                 群链接里看到的 1234567890 要写成 -1001234567890，否则会报「chat not found」
               </em>
             </span>
-            <input class="field" v-model.trim="tg.chatId" spellcheck="false" placeholder="-1001234567890" />
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.tgChat ? 'text' : 'password'" v-model.trim="tg.chatId" spellcheck="false" autocomplete="off" placeholder="-1001234567890" />
+              <button type="button" class="pw-eye" :title="revealed.tgChat ? '隐藏' : '显示'" @click="revealed.tgChat = !revealed.tgChat">{{ revealed.tgChat ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <div class="opt col">
@@ -1936,7 +1973,10 @@
                 留空则只能生成仅 TG 内部可用的 t.me/c/… 链接
               </em>
             </span>
-            <input class="field" v-model.trim="tg.groupUsername" spellcheck="false" placeholder="my_monitor_group" />
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.tgGroup ? 'text' : 'password'" v-model.trim="tg.groupUsername" spellcheck="false" autocomplete="off" placeholder="my_monitor_group" />
+              <button type="button" class="pw-eye" :title="revealed.tgGroup ? '隐藏' : '显示'" @click="revealed.tgGroup = !revealed.tgGroup">{{ revealed.tgGroup ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <div class="opt">
@@ -2268,13 +2308,17 @@
               <strong>群机器人 Webhook</strong>
               <em>群设置 → 群机器人 → 添加 → 复制 Webhook 地址；只粘贴 key 那一串也可以</em>
             </span>
-            <input
-              class="field"
-              v-model.trim="wc.webhook"
-              spellcheck="false"
-              autocomplete="off"
-              placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
-            />
+            <div class="pw-wrap">
+              <input
+                class="field"
+                :type="revealed.wcWebhook ? 'text' : 'password'"
+                v-model.trim="wc.webhook"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
+              />
+              <button type="button" class="pw-eye" :title="revealed.wcWebhook ? '隐藏' : '显示'" @click="revealed.wcWebhook = !revealed.wcWebhook">{{ revealed.wcWebhook ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <div class="opt">
@@ -2540,7 +2584,10 @@
               <strong>解锁密码</strong>
               <em>留空表示点击屏幕任意位置即可恢复</em>
             </span>
-            <input class="field" v-model.trim="opts.mask.password" spellcheck="false" autocomplete="off" placeholder="留空 = 无需密码" />
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.maskPwd ? 'text' : 'password'" v-model.trim="opts.mask.password" spellcheck="false" autocomplete="off" placeholder="留空 = 无需密码" />
+              <button type="button" class="pw-eye" :title="revealed.maskPwd ? '隐藏' : '显示'" @click="revealed.maskPwd = !revealed.maskPwd">{{ revealed.maskPwd ? '🙈' : '👁' }}</button>
+            </div>
           </div>
 
           <div class="opt">
@@ -2746,6 +2793,7 @@ const emit = defineEmits([
   'watch-sync',
   'backend-sync',
   'flush-silent',
+  'test-pre-silent',
   'restart-system',
   /* 临时静默（item 112） */
   'start-temp-silent',
@@ -3063,16 +3111,62 @@ const runtimeTipText = computed(() => {
 
 /* ---------------- 静默时段列表（item 114：支持多时段） ---------------- */
 /**
- * 归一化读出时段列表。
- * 老配置只有 silent.start / silent.end（单时段），这里自动包装成一项，
- * 用户升级后原有的夜间时段不会凭空消失，也不需要写数据迁移。
+ * 老配置只有 silent.start / silent.end（单时段）：初次打开时**就地**把它收口成
+ * slots 数组。这样下面的时间输入框 v-model 直接绑在真实配置对象上，改完
+ * 「保存并应用」才会真正落盘（之前返回的是新拷贝，改了也白改、再打开还是旧的）。
+ * 只在缺 slots 时补一次；之后 slots 是唯一数据源。
  */
-const slotsOf = computed(() => {
-  const c = opts.silent || {}
-  if (Array.isArray(c.slots) && c.slots.length) {
-    return c.slots.map((s) => ({ start: String(s?.start ?? ''), end: String(s?.end ?? '') }))
+watch(
+  () => opts.silent,
+  (s) => {
+    if (!s) return
+    if (!Array.isArray(s.slots) || s.slots.length === 0) {
+      s.slots = [
+        {
+          start: s.start != null ? String(s.start) : '19:00',
+          end: s.end != null ? String(s.end) : '08:00'
+        }
+      ]
+    }
+  },
+  { immediate: true }
+)
+
+/**
+ * 直接返回真实的 slots 数组（引用稳定）。
+ * 时间输入框 v-model 原地改 opts.silent.slots[i].start / .end，
+ * 保存即生效；也避免每次渲染都生成新对象导致输入框失焦、「点不灵敏」。
+ */
+const slotsOf = computed(() =>
+  opts.silent && Array.isArray(opts.silent.slots) ? opts.silent.slots : []
+)
+
+/**
+ * 点时间输入框任意位置都弹出原生选择器（桌面端默认只有小箭头能点开，
+ * 监控大屏触屏上特别「点不灵敏」）。showPicker 在受控点击时调用，
+ * 个别浏览器不支持或元素不可交互会抛错，安静吞掉即可。
+ */
+function openPicker(e) {
+  const el = e && e.target
+  if (el && typeof el.showPicker === 'function') {
+    try {
+      el.showPicker()
+    } catch (_) {
+      /* 忽略：不支持或被浏览器策略拦截时退回普通聚焦 */
+    }
   }
-  return [{ start: String(c.start ?? '19:00'), end: String(c.end ?? '08:00') }]
+}
+
+/* 敏感字段（token / webhook / secret / chatId 等）默认以密码框遮罩，
+ * 点眼睛图标临时显示，避免旁人瞥见凭据。每个字段独立开关。 */
+const revealed = reactive({
+  dtWebhook: false,
+  dtSecret: false,
+  tgToken: false,
+  tgChat: false,
+  tgGroup: false,
+  wcWebhook: false,
+  maskPwd: false
 })
 
 /** 把 slots 写回配置；老字段 start/end 同步为首个时段，兼容旧版本读取 */
@@ -3165,6 +3259,11 @@ const silentStatusText = computed(() => {
 })
 function flushSilentNow() {
   emit('flush-silent')
+}
+
+/** 试发一条「免打扰时段开启前」提醒（调完文案先看一眼效果） */
+function testPreSilence() {
+  emit('test-pre-silent')
 }
 
 /* ---------------- 统计页重置回调（item 111） ---------------- */
@@ -5583,6 +5682,44 @@ function loadHidden() {
 
 .slot-row .field.mini {
   width: 104px;
+  cursor: pointer;
+}
+
+/* 敏感字段密码框 + 眼睛切换按钮（默认遮罩，点眼睛临时显示） */
+.pw-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.pw-wrap .field {
+  width: 100%;
+  padding-right: 38px;
+}
+.pw-eye {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 6px;
+  opacity: 0.78;
+  transition: opacity 0.15s, background 0.15s;
+}
+.pw-eye:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.pw-eye:active {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .slot-tag {
@@ -5637,8 +5774,45 @@ function loadHidden() {
   gap: 6px;
 }
 
+/* 「按小时」：常用时长一行（自身成网格、自适应换行），自定义时长另起一行 */
+.temp-dur {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.temp-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+
+.temp-custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .temp-dur .field.mini {
-  width: 68px;
+  width: 82px;
+}
+
+/* 时段开启前提醒（preNotify）—— 跟其它开关行保持一致的呼吸感 */
+.pre-notify {
+  margin-top: 2px;
+}
+/* 描述较长：左侧文案允许换行收缩，右侧开关+状态不换行、也不被挤成竖排 */
+.pre-notify > span:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.pre-notify .opt-inline {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* 「按小时 / 静默到几点」两个模式的切换，用 seg 按钮对，跟页面其它分段控件一致 */

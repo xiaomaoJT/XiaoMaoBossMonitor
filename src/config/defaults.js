@@ -416,13 +416,24 @@ export const HIDDEN_OPTIONS = {
     /**
      * 静默时段列表（item 114）。每一项是 { start, end }，支持跨零点。
      * 空数组 = 没有定时静默（但临时静默仍然可用）。
+     *
+     * 内置隐藏配置的默认两个时段：夜里 20:00 ~ 次日 08:00 + 午休 12:00 ~ 13:30。
      */
-    slots: [{ start: '19:00', end: '08:00' }],
+    slots: [
+      { start: '20:00', end: '08:00' },
+      { start: '12:00', end: '13:30' }
+    ],
+    /**
+     * 每个免打扰时段「开启前」是否先推送一条提醒（默认开）。
+     * 提醒会告诉：本次免打扰的时长、期间仍持续统计但不实时推送、结束时间，
+     * 以及结束后会自动汇总推送本时段内捕获的全部报警。可在设置里关掉。
+     */
+    preNotify: true,
     /**
      * @deprecated 老版本的单时段字段。读取时会自动并入 slots（见 useAlertPush.readSlots），
      * 保留仅为了兼容用户已保存的旧配置，新代码不要再直接用 start/end。
      */
-    start: '19:00',
+    start: '20:00',
     end: '08:00',
     /**
      * 静默时段内暂停实时推送、改在结束时汇总的渠道。
@@ -845,6 +856,13 @@ export const DEFAULT_OPTIONS = (() => {
   wipe(o.dingtalk, ['webhook', 'secret'])
   wipe(o.telegram, ['token', 'chatId', 'groupUsername'])
   wipe(o.wecom, ['webhook'])
+
+  /*
+   * 远程控制的白名单 id **只活在隐藏配置（HIDDEN_OPTIONS）里**，不许进默认配置。
+   * 初始化配置里把它清空（没人能下发指令），只有「加载内置配置」输密码后才带回来。
+   * 否则「恢复初始化」之后白名单还在，等于把授权 id 写死进了空白配置。
+   */
+  if (o.telegram.remote) o.telegram.remote.allowUserIds = []
 
   return o
 })()

@@ -459,6 +459,129 @@ export function useAlertPush(options, hooks = {}) {
     if (sent.length) notify(`静默时段汇总已推送（${sent.join(' + ')}）`)
   }
 
+  /* ---------------- 免打扰时段「开启前」提醒（preNotify，默认开） ---------------- */
+
+  /** 'HH:MM' → 当天第几分钟 */
+  function hm2min(hm) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm || '').trim())
+    if (!m) return null
+    return Number(m[1]) * 60 + Number(m[2])
+  }
+
+  /**
+   * 生成「免打扰时段开启前」提醒的三种文案（markdown / html / 纯文本）。
+   * 内容按用户要求讲清四件事：本次免打扰时长、期间仍持续统计、结束时间、
+   * 结束后会推送什么。
+   */
+  function buildPreSilenceMessages(slot) {
+    const s = hm2min(slot && slot.start)
+    const e = hm2min(slot && slot.end)
+    if (s === null || e === null || s === e) return null
+
+    const p2 = (n) => String(n).padStart(2, '0')
+    const fmt = (min) => `${p2(Math.floor(min / 60))}:${p2(min % 60)}`
+    // 结束时间早于开始时间 = 跨零点（夜里那场都是）
+    const cross = e < s
+    const startLabel = fmt(s)
+    const endLabel = (cross ? '次日 ' : '') + fmt(e)
+    const durMin = cross ? 1440 - s + e : e - s
+    const dh = Math.floor(durMin / 60)
+    const dm = durMin % 60
+    const durText = dh ? (dm ? `${dh} 小时 ${dm} 分` : `${dh} 小时`) : `${dm} 分钟`
+    const rangeText = `${startLabel} ~ ${endLabel}`
+
+    return {
+      title: '🔕 免打扰时段已开启',
+      markdown: [
+        '### 🔕 免打扰时段已开启',
+        '>',
+        `> **时段**：${rangeText}　（时长约 ${durText}）`,
+        '>',
+        '> 这段时间内**不再实时逐条推送**，但监控与事件**统计照常进行**，不会漏记。',
+        `> 到 **${endLabel}** 自动结束，届时会**汇总推送**本时段内捕获的全部报警。`
+      ].join('\n'),
+      html: [
+        '🔕 <b>免打扰时段已开启</b>',
+        '',
+        `时段：<b>${rangeText}</b>（时长约 ${durText}）`,
+        '',
+        '这段时间内<b>不再实时逐条推送</b>，但监控与事件<b>统计照常进行</b>，不会漏记。',
+        `到 <b>${endLabel}</b> 自动结束，届时会<b>汇总推送</b>本时段内捕获的全部报警。`
+      ].join('\n'),
+      plain: [
+        '🔕 免打扰时段已开启',
+        `时段：${rangeText}（时长约 ${durText}）`,
+        '这段时间内不再实时逐条推送，但监控与事件统计照常进行。',
+        `到 ${endLabel} 自动结束，届时会汇总推送本时段内捕获的全部报警。`
+      ].join('\n')
+    }
+  }
+
+  /** 发一条「免打扰时段开启前」提醒；preNotify 关着、或没配渠道时静默跳过 */
+  async function pushPreSilenceNotice(slot) {
+    if (silentCfg().preNotify === false) return { ok: false, reason: 'preNotify 已关闭' }
+    const msg = buildPreSilenceMessages(slot)
+    if (!msg) return { ok: false, reason: '时段格式无效' }
+    const r = await sendDirect({
+      title: msg.title,
+      text: msg.markdown,
+      html: msg.html,
+      kind: 'silent'
+    })
+    // sendDirect 成功时返回 { ok, reason }（reason 为空=全渠道成功，非空=部分失败说明），没有 sent 字段
+    if (r && r.ok) notify(r.reason ? `免打扰提醒已推送（${r.reason}）` : '免打扰提醒已推送')
+    return r
+  }
+
+  /*
+   * 进入时段的那一刻发提醒。
+   *
+   * 用一个 30 秒心跳比对「当前命中的时段签名」：签名从空变成某个时段，
+   * 说明刚踏进一个新的免打扰窗口，这时发一条提醒。原来打算用定时器
+   * 精确卡在 start，但那样一改配置就得重排一堆定时器，边界上（改时段、
+   * 跨零点、休眠唤醒）反而更容易漏发；心跳比对简单且不会重复。
+   */
+  let preHeartbeat = null
+  let lastPreKey = ''
+  function silentKeyOf(now) {
+    const s = silentState(now)
+    if (!s.active) return ''
+    if (s.temp) return `temp:${s.endMs}` // 临时静默不在这里提醒（只提醒定时时段）
+    const hit = matchSlot(now)
+    return hit ? `slot:${hit.start}-${hit.end}` : ''
+  }
+  /**
+   * 是否允许由「本进程」发免打扰提醒。
+   * 后端模式下前端和后端都会跑这套推送，若两边都发提醒会重复，
+   * 所以由调用方用 hooks.preSilenceEnabled 决定：
+   *   - 前端传 () => !backendActive（后端接管时前端闭嘴）
+   *   - 后端（notify.mjs）不传 = 默认恒为 true（它就是那个该发的人）
+   */
+  function preAllowed() {
+    const h = hooks.preSilenceEnabled
+    if (typeof h === 'function') return !!h()
+    if (h === false) return false
+    return true
+  }
+  function startPreSilenceWatcher() {
+    if (preHeartbeat) return
+    // 先记一次当前状态：启动时若已经处在时段里，不补发一条"即将开始"
+    lastPreKey = silentKeyOf(Date.now())
+    preHeartbeat = setInterval(() => {
+      const now = Date.now()
+      const key = silentKeyOf(now)
+      if (!key) {
+        lastPreKey = ''
+        return
+      }
+      if (key === lastPreKey) return
+      lastPreKey = key
+      if (key.startsWith('slot:') && preAllowed()) {
+        pushPreSilenceNotice(matchSlot(now)).catch(() => {})
+      }
+    }, 30000)
+  }
+
   /**
    * 开启临时静默（item 112）：从现在起免打扰，到期自动汇总。
    *
@@ -919,6 +1042,12 @@ export function useAlertPush(options, hooks = {}) {
       clearTimeout(silentTimer)
       silentTimer = null
     }
+    // 免打扰提醒心跳同理：配置被洗掉后不该再按旧时段发提醒
+    if (preHeartbeat) {
+      clearInterval(preHeartbeat)
+      preHeartbeat = null
+    }
+    lastPreKey = ''
     silentBuffer.length = 0
     silentSeen.clear()
     pendingCount.value = 0
@@ -1016,6 +1145,8 @@ export function useAlertPush(options, hooks = {}) {
       // 巡检 / 状态异常在各渠道里可以单独关掉
       if (kind === 'patrol') return !(c.patrol && c.patrol.enabled === false)
       if (kind === 'status') return !(c.statusAlerts && c.statusAlerts.enabled === false)
+      // 'silent'：免打扰提醒，只发给「静默渠道集合」里已就绪的渠道（跟静默汇总同一批）
+      if (kind === 'silent') return (silentCfg().channels || []).includes(d.id)
       return true
     }).map((d) => d.id)
     if (!ids.length) return { ok: false, reason: '没有渠道接收这类通知' }
@@ -1397,18 +1528,32 @@ export function useAlertPush(options, hooks = {}) {
    */
   if (silentState(Date.now()).active) scheduleSilentFlush()
 
+  // 每个免打扰时段「开启前」的提醒心跳（preNotify，默认开）
+  startPreSilenceWatcher()
+
   return {
     handleAlarm,
     sendDirect,
     pushExtraShot,
     /** 立即把当前静默缓冲汇总发出去（设置页可挂「立即推送」按钮） */
     flushSilentSummary,
+    /**
+     * 手动发一条「免打扰时段开启前」提醒。
+     * 心跳检测到进入新时段时会自动调；设置页的「试发一条」按钮也走这里，
+     * 方便在改动文案后先看一眼效果（不受 preNotify 开关限制，刻意如此）。
+     */
+    pushPreSilenceNotice: (slot) => {
+      const slots = readSlots()
+      return pushPreSilenceNotice(slot || matchSlot(Date.now()) || slots[0] || null)
+    },
     /** 临时静默（item 112）：从现在起 N 小时免打扰，到期自动汇总 */
     startTempSilent,
     /** 提前结束临时静默（默认立刻把已收存的汇总发出去） */
     endTempSilent,
     /** 临时静默状态查询（设置页 / 事件面板显示剩余时长用） */
     tempSilentInfo,
+    /** 生成免打扰提醒文案（导出来方便单测与调试文案，不参与推送） */
+    buildPreSilenceMessages,
     pendingCount,
     rateLimit,
     channels,
