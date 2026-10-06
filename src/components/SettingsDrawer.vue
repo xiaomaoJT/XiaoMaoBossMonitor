@@ -235,8 +235,15 @@
           </div>
         </section>
 
-        <!-- ==================== 画面布局 ==================== -->
-        <section class="block" v-show="tab === 'layout'">
+        <!-- ==================== 外观（画面布局 + 主题 + 通知位置，item 116 合并） ====================
+             原来是两个标签页：「画面布局」和「外观」。两者都是"长什么样、摆在哪"，
+             拆开反而要来回切。现在合成一个「外观」，内部按三段分组：
+               ① 画面布局（预设网格 / 自定义摆放）
+               ② 报警通知位置（item 117：四角可配）
+               ③ 界面主题
+        -->
+        <section class="block" v-show="tab === 'appearance'">
+          <!-- ---------- ① 画面布局 ---------- -->
           <div class="block-head">
             <h3>画面布局</h3>
             <span class="state-chip" :class="layoutKey === 'free' ? 'ready' : ''">
@@ -282,12 +289,78 @@
           <p class="hint" v-else>
             提示：切到「自定义摆放」后，每一路画面都可以单独拖动和拉伸，适合主次分明的大屏。
           </p>
-        </section>
 
-        <!-- ==================== 外观主题 ==================== -->
-        <section class="block" v-show="tab === 'appearance'">
+          <div class="divider"></div>
+
+          <!-- ---------- ② 报警通知位置（item 117） ---------- -->
           <div class="block-head">
-            <h3>外观风格</h3>
+            <h3>报警通知位置</h3>
+            <span class="state-chip" :class="opts.alert && opts.alert.topNotify !== false ? 'ready' : ''">
+              {{ opts.alert && opts.alert.topNotify !== false ? '已开启' : '已关闭' }}
+            </span>
+          </div>
+          <p class="hint">
+            报警瞬间弹出的那张带缩略图的卡片停靠在哪个角。默认左上角 —— 顶栏下方不压画面。
+            靠上的位置会自动让开顶栏。
+          </p>
+
+          <div class="opt">
+            <span>
+              <strong>显示报警通知卡片</strong>
+              <em>关掉后报警只记入右下角事件面板与推送，不再弹卡片</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: opts.alert && opts.alert.topNotify !== false }"
+              @click="toggleTopNotify"
+            ></span>
+          </div>
+
+          <div class="opt col" v-if="opts.alert && opts.alert.topNotify !== false">
+            <span>
+              <strong>停靠位置</strong>
+              <em>报警卡片弹出的角落</em>
+            </span>
+            <div class="pos-picker">
+              <button
+                v-for="p in NOTIFY_POSITIONS"
+                :key="p.key"
+                class="pos-btn"
+                :class="[p.key, { on: notifyPos === p.key }]"
+                :title="p.label"
+                @click="setNotifyPos(p.key)"
+              >
+                <span class="pos-dot"></span>
+                <em>{{ p.label }}</em>
+              </button>
+            </div>
+            <div class="opt-inline">
+              <span class="muted">边距</span>
+              <input
+                class="field mini"
+                type="number"
+                min="0"
+                max="80"
+                v-model.number="notifyGap"
+                @change="setNotifyGap(notifyGap)"
+              />
+              <span class="muted">px</span>
+            </div>
+          </div>
+
+          <div class="toggle-tip">
+            <strong>事件面板的位置是固定的</strong>
+            <em>
+              右下角那个可点开的报警记录列表始终在<b>右下角</b>，不随上面的设置变动 ——
+              它是常驻的历史查阅入口，位置固定才不会和拖动的画面抢地方。
+            </em>
+          </div>
+
+          <div class="divider"></div>
+
+          <!-- ---------- ③ 界面主题 ---------- -->
+          <div class="block-head">
+            <h3>界面主题</h3>
           </div>
           <p class="hint">
             点击立即生效并自动保存。
@@ -381,17 +454,11 @@
           </div>
         </section>
 
-        <!-- ==================== 统计（item 111） ==================== -->
-        <section class="block" v-show="tab === 'stats'">
-          <h3>数据统计</h3>
-          <p class="hint">
-            按天独立计数，**不受「保留事件条数」限制** —— 事件列表被淘汰或清空后，这里的数字依然完整。
-            统计仅保留最近 7 天。
-          </p>
-          <StatsPanel @reset-done="onStatsReset" />
-        </section>
-
-        <!-- ==================== 关于系统 ==================== -->
+        <!-- ==================== 关于系统（+ 数据统计，item 119 合并） ====================
+             统计原来单独占一个「统计」标签，但它回答的也是"这台设备跑得怎么样"，
+             和系统信息、能力检测是同一类问题。合到一页里，上半部分是设备与能力，
+             下半部分是运行统计，按"先看有没有问题、再看跑得怎么样"的顺序排。
+        -->
         <section class="block" v-show="tab === 'about'">
           <AboutSystem
             :cameras="cameras"
@@ -400,46 +467,30 @@
             :layout-key="layoutKey"
             :hidden-ids="hiddenIds"
           />
+
+          <div class="divider"></div>
+
+          <!-- ---------- 数据统计（item 111 + 119） ---------- -->
+          <div class="block-head">
+            <h3>数据统计</h3>
+            <span class="state-chip">保留 7 天</span>
+          </div>
+          <p class="hint">
+            按天独立计数，<b>不受「报警记录保留条数」限制</b> —— 事件列表被淘汰或清空后，
+            这里的数字依然完整。图表与上方系统信息同属一页：先看设备有没有问题，再看它跑得怎么样。
+          </p>
+          <StatsPanel @reset-done="onStatsReset" />
         </section>
 
         <!-- ==================== 播放与性能 ==================== -->
         <section class="block" v-show="tab === 'play'">
           <h3>播放设置</h3>
           <!--
-            事件面板停靠位置（item 113）。默认左下角。
-            四个角各对应一个 data-pos，CSS 侧只固定横向 + 纵向各一个方向。
+            ⚠️ 这里原本是「事件面板位置」的四角选择器（item 113 加的），已删除（item 117）：
+            事件面板固定在右下角，不该跟着用户改来改去 ——
+            它是常驻的历史查阅入口，位置固定才不会和拖动的画面抢地方。
+            可配位置的是**左上角报警通知卡片**，已挪到「设置 → 外观 → 报警通知位置」。
           -->
-          <div class="opt col">
-            <span>
-              <strong>事件面板位置</strong>
-              <em>报警事件 / 推送面板停靠在屏幕的哪个角（默认左下角）</em>
-            </span>
-            <div class="pos-picker">
-              <button
-                v-for="p in PANEL_POSITIONS"
-                :key="p.key"
-                class="pos-btn"
-                :class="[p.key, { on: panelPos === p.key }]"
-                :title="p.label"
-                @click="setPanelPos(p.key)"
-              >
-                <span class="pos-dot"></span>
-                <em>{{ p.label }}</em>
-              </button>
-            </div>
-            <div class="opt-inline">
-              <span class="muted">边距</span>
-              <input
-                class="field mini"
-                type="number"
-                min="0"
-                max="80"
-                v-model.number="panelGap"
-                @change="setPanelGap(panelGap)"
-              />
-              <span class="muted">px</span>
-            </div>
-          </div>
 
           <label class="opt">
             <span>
@@ -663,101 +714,102 @@
             <span class="switch" :class="{ on: opts.alarmSound }" @click="opts.alarmSound = !opts.alarmSound"></span>
           </label>
 
-          <!-- ==================== 静默时段（免打扰推送） ==================== -->
+          <!--
+            免打扰（静默推送）—— item 121 UI 美化。
+            原来这几块平铺在页面上，和上下的"检测识别""画面截图"选项混在一起，
+            看不出「这是一整套免打扰机制」。现在用一张带标题的卡片把它们圈起来，
+            内部再分「① 定时静默（夜间/午休…）」和「② 临时静默（接下来几小时）」，
+            状态一目了然，也不会让下面的选项被推得太远。
+          -->
           <div class="divider"></div>
-          <div class="opt col">
-            <span>
-              <strong>夜间免打扰（静默推送）</strong>
-              <em>开启后，所选渠道在静默时段内<strong>不再逐条实时推送</strong>，改为在结束时刻发一条汇总</em>
-            </span>
-            <label class="opt-inline">
+          <div class="grp">
+            <div class="grp-head">
+              <span class="grp-ico quiet">🔕</span>
+              <div class="grp-titles">
+                <strong>免打扰（静默推送）</strong>
+                <em>
+                  静默时段内{{ '' }}
+                  <b>不再逐条实时推送</b>，改为在结束时刻发一条汇总；
+                  临时静默则用来「接下来几小时别吵我」，优先级更高。
+                </em>
+              </div>
               <span class="switch" :class="{ on: opts.silent.enabled }" @click="opts.silent.enabled = !opts.silent.enabled"></span>
-              <span class="muted">{{ opts.silent.enabled ? '已开启' : '已关闭' }}</span>
-            </label>
-          </div>
+            </div>
 
-          <!--
-            静默时段列表（item 114：支持多个时段）。
-            夜里一场、午休再一场，各自在结束时刻发一条汇总。
-            老配置只有 start/end，这里用 slotsOf() 归一化后照常显示，不丢用户已有设置。
-          -->
-          <div class="opt col" v-if="opts.silent.enabled">
-            <span>
-              <strong>静默时段</strong>
-              <em>
-                可以配多个时段（如夜里 + 午休），每个时段在结束时刻各发一条汇总。
+            <!-- ---------- ① 定时静默（可多个时段） ---------- -->
+            <div class="grp-body" v-if="opts.silent.enabled">
+              <div class="sub-label">
+                定时静默时段
+                <em v-if="activeSlotLabel" class="live-tag">当前生效 {{ activeSlotLabel }}</em>
+              </div>
+              <p class="hint tight">
+                可配多个时段（如夜里 + 午休），每个时段在结束时刻各发一条汇总。
                 结束时间早于开始时间视为跨零点（例如 19:00 ~ 08:00）。
-              </em>
-            </span>
+              </p>
 
-            <div class="slot-list">
-              <div class="slot-row" v-for="(s, i) in slotsOf" :key="i">
-                <span class="slot-idx">{{ i + 1 }}</span>
-                <input class="field mini" type="time" v-model="s.start" />
-                <span class="tilde">~</span>
-                <input class="field mini" type="time" v-model="s.end" />
-                <span class="slot-tag" v-if="s.start === s.end">起止相同，不生效</span>
-                <span class="slot-tag" v-else-if="s.end < s.start">跨零点</span>
-                <button
-                  class="btn tiny danger slot-del"
-                  title="删除这个时段"
-                  :disabled="slotsOf.length <= 1"
-                  @click="removeSlot(i)"
-                >
-                  删除
-                </button>
+              <div class="slot-list">
+                <div class="slot-row" v-for="(s, i) in slotsOf" :key="i">
+                  <span class="slot-idx">{{ i + 1 }}</span>
+                  <input class="field mini" type="time" v-model="s.start" />
+                  <span class="tilde">~</span>
+                  <input class="field mini" type="time" v-model="s.end" />
+                  <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
+                  <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
+                  <button
+                    class="btn tiny danger slot-del"
+                    title="删除这个时段"
+                    :disabled="slotsOf.length <= 1"
+                    @click="removeSlot(i)"
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
-            </div>
 
-            <div class="slot-actions">
-              <button class="btn tiny" @click="addSlot">+ 添加时段</button>
-              <span class="muted" v-if="activeSlotLabel">当前生效：{{ activeSlotLabel }}</span>
-            </div>
-          </div>
-
-          <div class="opt col" v-if="opts.silent.enabled">
-            <span>
-              <strong>静默时暂停推送的渠道</strong>
-              <em>勾选的渠道在静默时段内不实时推送；结束时刻统一发汇总（默认三端都参与）</em>
-            </span>
-            <div class="ch-pick">
-              <label class="chip" :class="{ on: opts.silent.channels.includes('ding') }">
-                <input type="checkbox" value="ding" v-model="opts.silent.channels" /> 钉钉
-              </label>
-              <label class="chip" :class="{ on: opts.silent.channels.includes('wecom') }">
-                <input type="checkbox" value="wecom" v-model="opts.silent.channels" /> 企业微信
-              </label>
-              <label class="chip" :class="{ on: opts.silent.channels.includes('tg') }">
-                <input type="checkbox" value="tg" v-model="opts.silent.channels" /> TG
-              </label>
-            </div>
-          </div>
-
-          <p class="hint silent-state" v-if="opts.silent.enabled">
-            <b>当前状态：</b>{{ silentStatusText }}
-            <button class="btn tiny" @click="flushSilentNow">立即推送静默汇总</button>
-          </p>
-
-          <!--
-            临时静默（item 112）：会议 / 演示 / 临时排查时"接下来几小时别发消息"。
-            与上面的夜间定时静默并存且优先级更高；到点自动把期间收存的报警汇总发出。
-          -->
-          <div class="opt col temp-silent">
-            <span>
-              <strong>临时静默</strong>
-              <em>临时的免打扰：选一个时长或直接指定"静默到几点"，立刻生效，到点自动汇总推送（优先级高于上面的定时静默）</em>
-            </span>
-
-            <template v-if="!tempActive">
-              <!-- 两种结束方式：按小时 / 指定到几点（含跨天，如"明天 08:00"） -->
-              <div class="seg temp-mode">
-                <button class="seg-btn" :class="{ on: tempMode === 'hours' }" @click="tempMode = 'hours'">
-                  按小时
-                </button>
-                <button class="seg-btn" :class="{ on: tempMode === 'until' }" @click="tempMode = 'until'">
-                  静默到几点
-                </button>
+              <div class="slot-actions">
+                <button class="btn tiny" @click="addSlot">+ 添加时段</button>
               </div>
+
+              <div class="sub-label mt">静默时暂停推送的渠道</div>
+              <div class="ch-pick">
+                <label class="chip" :class="{ on: opts.silent.channels.includes('ding') }">
+                  <input type="checkbox" value="ding" v-model="opts.silent.channels" /> 钉钉
+                </label>
+                <label class="chip" :class="{ on: opts.silent.channels.includes('wecom') }">
+                  <input type="checkbox" value="wecom" v-model="opts.silent.channels" /> 企业微信
+                </label>
+                <label class="chip" :class="{ on: opts.silent.channels.includes('tg') }">
+                  <input type="checkbox" value="tg" v-model="opts.silent.channels" /> TG
+                </label>
+              </div>
+
+              <p class="silent-state">
+                <b>当前状态：</b>{{ silentStatusText }}
+                <button class="btn tiny" @click="flushSilentNow">立即推送静默汇总</button>
+              </p>
+            </div>
+
+            <!-- ---------- ② 临时静默 ---------- -->
+            <div class="grp-body temp-silent" :class="{ active: tempActive }">
+              <div class="sub-label">
+                临时静默
+                <em class="live-tag" v-if="tempActive">静默中 · 至 {{ tempInfo.untilLabel }}</em>
+              </div>
+              <p class="hint tight">
+                会议 / 演示 / 临时排查时用：选一个时长或直接指定"静默到几点"，立刻生效，到点自动汇总。
+                <b>优先级高于上面的定时静默</b>。
+              </p>
+
+              <template v-if="!tempActive">
+                <!-- 两种结束方式：按小时 / 指定到几点（含跨天，如"明天 08:00"） -->
+                <div class="seg temp-mode">
+                  <button class="seg-btn" :class="{ on: tempMode === 'hours' }" @click="tempMode = 'hours'">
+                    按小时
+                  </button>
+                  <button class="seg-btn" :class="{ on: tempMode === 'until' }" @click="tempMode = 'until'">
+                    静默到几点
+                  </button>
+                </div>
 
               <div class="temp-dur" v-if="tempMode === 'hours'">
                 <button
@@ -810,14 +862,15 @@
                 <button class="btn small primary" @click="startTempNow">开启临时静默</button>
                 <span class="muted" v-if="tempPreview">{{ tempPreview }}</span>
               </div>
-            </template>
+              </template>
 
-            <div class="test-row" v-else>
-              <span class="state-chip ready">静默中 · 至 {{ tempInfo.untilLabel }}（{{ tempInfo.leftLabel }}）</span>
-              <button class="btn small" @click="endTempNow(false)">结束但不推送</button>
-              <button class="btn small primary" @click="endTempNow(true)">结束并立即汇总</button>
+              <div class="test-row" v-else>
+                <span class="state-chip ready">静默中 · 至 {{ tempInfo.untilLabel }}（{{ tempInfo.leftLabel }}）</span>
+                <button class="btn small" @click="endTempNow(false)">结束但不推送</button>
+                <button class="btn small primary" @click="endTempNow(true)">结束并立即汇总</button>
+              </div>
+              <p class="hint tight" v-if="tempActive && tempInfo.reason">用途备注：{{ tempInfo.reason }}</p>
             </div>
-            <p class="hint" v-if="tempActive && tempInfo.reason">用途备注：{{ tempInfo.reason }}</p>
           </div>
 
           <!--
@@ -1939,72 +1992,81 @@
           </label>
 
           <!--
-            远程控制（方案 C，TG 私聊指令）
+            远程控制（方案 C，TG 私聊指令）—— item 121 UI 美化。
             不需要公网入口：后端主动用 getUpdates 长轮询去 TG 拉指令。
             安全上做了三件事 —— 只认私聊、只认白名单、危险动作单独开关。
+            同样用 grp 卡片圈起来，和上面的「免打扰」视觉一致。
           -->
           <div class="divider"></div>
-          <div class="opt col remote-block">
-            <span>
-              <strong>🤖 远程控制（私聊指令）</strong>
-              <em>
-                在手机上<b>私聊</b>这个机器人发指令即可远程控制推送静默与巡检，无需开放公网端口。
-                开启后记得在下方点「保存」，配置会同步给后端。
-              </em>
-            </span>
-
-            <label class="opt-inline">
+          <div class="grp" :class="{ live: tg.remote.enabled && tgRemoteChip.running }">
+            <div class="grp-head">
+              <span class="grp-ico remote">🤖</span>
+              <div class="grp-titles">
+                <strong>远程控制（私聊指令）</strong>
+                <em>
+                  在手机上<b>私聊</b>这个机器人发指令，即可远程控制推送静默与巡检，<b>无需开放公网端口</b>。
+                </em>
+              </div>
               <span class="switch" :class="{ on: tg.remote.enabled }" @click="tg.remote.enabled = !tg.remote.enabled"></span>
-              <span class="muted">{{ tg.remote.enabled ? '已开启（后端将开始监听指令）' : '已关闭' }}</span>
-              <span class="state-chip" :class="tgRemoteChip.cls">{{ tgRemoteChip.text }}</span>
-            </label>
+            </div>
 
-            <template v-if="tg.remote.enabled">
-              <div class="opt col">
-                <span>
-                  <strong>授权用户 ID</strong>
-                  <em>
-                    只有这些 <b>Telegram 用户 id</b> 发的指令才会被执行，其它人一律忽略（连回执都不给）。
-                    在 Telegram 里找 <b>@userinfobot</b> 可以查到自己的 id。
-                  </em>
+            <div class="grp-body">
+              <!-- 运行状态：用户最怕"配好了但不知道有没有生效"，所以如实显示 -->
+              <div class="remote-status">
+                <span class="state-chip" :class="tgRemoteChip.cls">{{ tgRemoteChip.text }}</span>
+                <span class="muted">
+                  {{ tg.remote.enabled ? '改动后点下方「保存」同步给后端' : '开启后后端才会开始拉取指令' }}
                 </span>
-                <div class="id-list">
-                  <span class="id-chip" v-for="(id, i) in tg.remote.allowUserIds" :key="i">
-                    <code>{{ id }}</code>
-                    <button class="id-x" title="移除" @click="removeAllowId(i)">×</button>
-                  </span>
-                  <span class="id-empty" v-if="!tg.remote.allowUserIds.length">未配置 —— 任何人都无法下发指令</span>
-                </div>
-                <div class="test-row">
-                  <input
-                    class="field mini"
-                    v-model.trim="newAllowId"
-                    placeholder="输入用户 id 后回车添加"
-                    @keyup.enter="addAllowId"
-                  />
-                  <button class="btn tiny" :disabled="!newAllowId" @click="addAllowId">添加</button>
-                </div>
-                <p class="hint err-text" v-if="allowIdError">{{ allowIdError }}</p>
               </div>
 
+            <template v-if="tg.remote.enabled">
+              <!-- ---------- 安全：授权用户 ---------- -->
+              <div class="sub-label">授权用户</div>
+              <p class="hint tight">
+                只有这些 <b>Telegram 用户 id</b> 发的指令才会被执行，其它人一律忽略（连回执都不给）。
+                群里发的一律不理会。在 Telegram 里找 <b>@userinfobot</b> 可查自己的 id。
+              </p>
+              <div class="id-list">
+                <span class="id-chip" v-for="(id, i) in tg.remote.allowUserIds" :key="i">
+                  <code>{{ id }}</code>
+                  <button class="id-x" title="移除" @click="removeAllowId(i)">×</button>
+                </span>
+                <span class="id-empty" v-if="!tg.remote.allowUserIds.length">未配置 —— 任何人都无法下发指令</span>
+              </div>
+              <div class="test-row">
+                <input
+                  class="field mini"
+                  v-model.trim="newAllowId"
+                  placeholder="输入用户 id 后回车添加"
+                  @keyup.enter="addAllowId"
+                />
+                <button class="btn tiny" :disabled="!newAllowId" @click="addAllowId">添加</button>
+              </div>
+              <p class="hint err-text" v-if="allowIdError">{{ allowIdError }}</p>
+
+              <!-- ---------- 危险动作 ---------- -->
+              <div class="sub-label mt">危险操作</div>
               <div class="opt">
                 <span>
                   <strong>允许 /reboot 重启服务</strong>
-                  <em>危险动作，需额外二次确认（/reboot confirm）才真正执行</em>
+                  <em>还要再发一次 <code>/reboot confirm</code> 才会真正执行</em>
                 </span>
                 <span class="switch" :class="{ on: tg.remote.allowReboot }" @click="tg.remote.allowReboot = !tg.remote.allowReboot"></span>
               </div>
 
+              <!-- ---------- 指令清单 ---------- -->
+              <div class="sub-label mt">可用指令</div>
+              <p class="hint tight">
+                已注册到 TG 的命令菜单 —— 在聊天框输入 <code>/</code> 就会自动弹出候选，不用背。
+              </p>
               <div class="cmd-list">
-                <div class="cmd-hint">
-                  指令已注册到 TG 的命令菜单 —— 在聊天框输入 <code>/</code> 就会自动弹出候选，不用背：
-                </div>
                 <div class="cmd" v-for="c in TG_COMMANDS" :key="c.cmd">
                   <code>{{ c.usage }}</code>
                   <span>{{ c.desc }}</span>
                 </div>
               </div>
             </template>
+            </div>
           </div>
 
           <div class="toggle-tip">
@@ -2870,13 +2932,6 @@ const TABS = [
     desc: '流自愈（持续异常自动恢复）与定时重启系统',
     icon: 'M12 4v3M12 17v3M4 12H1M23 12h-3M5.6 5.6 3.5 3.5M20.5 20.5l-2.1-2.1M18.4 5.6l2.1-2.1M3.5 20.5l2.1-2.1M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z'
   },
-  /* 统计紧跟系统维护：都属于"跑起来之后回头看"的东西 */
-  {
-    key: 'stats',
-    label: '统计',
-    desc: '报警趋势 · 类型分布 · 三端推送成功率（保留 7 天）',
-    icon: 'M4 20V10M10 20V4M16 20v-7M22 20H2'
-  },
   {
     key: 'profiles',
     label: '配置方案',
@@ -2889,17 +2944,11 @@ const TABS = [
     desc: '一键盖住大屏、解锁密码',
     icon: 'M3 12s3.5-6 9-6c1.3 0 2.5.3 3.5.8M21 12s-3.5 6-9 6c-1.3 0-2.5-.3-3.5-.8M4 20L20 4'
   },
-  /* 画面布局、外观放最后：低频操作不挡在前面 */
-  {
-    key: 'layout',
-    label: '画面布局',
-    desc: '切换预设网格，或自由拖动与拉伸画面',
-    icon: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z'
-  },
+  /* 外观（画面布局 + 主题 + 报警通知位置）放最后：低频操作不挡在前面 */
   {
     key: 'appearance',
     label: '外观',
-    desc: '界面主题：液态 / 暗黑 / 亮色，iOS 可跟随系统',
+    desc: '画面布局 · 报警通知位置 · 界面主题',
     icon: 'M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.4 5.4 0 0 1 12 3zM12 21a9 9 0 0 1 0-18'
   },
   {
@@ -3124,28 +3173,39 @@ function onStatsReset() {
   resetPushStats()
 }
 
-/* ---------------- 事件面板停靠位置（item 113） ---------------- */const PANEL_POSITIONS = [
+/* ---------------- 报警通知位置（item 117） ---------------- */
+/**
+ * 停靠位置四选一。默认左上角：顶栏下方不压画面主体，
+ * 而右下角已经被常驻的事件面板占了。
+ */
+const NOTIFY_POSITIONS = [
   { key: 'tl', label: '左上' },
   { key: 'tr', label: '右上' },
   { key: 'bl', label: '左下' },
   { key: 'br', label: '右下' }
 ]
 
-const panelPos = computed(() => {
-  const p = opts.ui && opts.ui.eventPanel
-  return PANEL_POSITIONS.some((x) => x.key === p) ? p : 'bl'
+const notifyPos = computed(() => {
+  const p = opts.ui && opts.ui.notifyPos
+  return NOTIFY_POSITIONS.some((x) => x.key === p) ? p : 'tl'
 })
-const panelGap = computed(() => (opts.ui ? Number(opts.ui.eventPanelGap) : 14) || 0)
+const notifyGap = computed(() => (opts.ui ? Number(opts.ui.notifyGap) : 14) || 0)
 
-function setPanelPos(key) {
+function setNotifyPos(key) {
   if (!opts.ui) opts.ui = {}
-  opts.ui.eventPanel = key
+  opts.ui.notifyPos = key
 }
 
-function setPanelGap(v) {
+function setNotifyGap(v) {
   if (!opts.ui) opts.ui = {}
   const n = Number(v)
-  opts.ui.eventPanelGap = Number.isFinite(n) ? Math.max(0, Math.min(80, n)) : 14
+  opts.ui.notifyGap = Number.isFinite(n) ? Math.max(0, Math.min(80, n)) : 14
+}
+
+/** 报警通知卡片总开关（关掉后只记事件面板与推送，不弹卡片） */
+function toggleTopNotify() {
+  if (!opts.alert) opts.alert = {}
+  opts.alert.topNotify = opts.alert.topNotify === false
 }
 
 /* ---------------- 临时静默（item 112） ---------------- */
@@ -4093,14 +4153,14 @@ function removeAllowId(i) {
  */
 const tgRemoteChip = computed(() => {
   const st = backendStatus.value && backendStatus.value.tgRemote
-  if (!st) return { cls: '', text: '未连接后端' }
-  if (!st.enabled) return { cls: 'err', text: '未开启' }
-  if (!st.running) return { cls: 'err', text: '后端未运行' }
+  if (!st) return { cls: '', text: '未连接后端', running: false }
+  if (!st.enabled) return { cls: '', text: '未开启', running: false }
+  if (!st.running) return { cls: 'err', text: '后端未运行', running: false }
   const parts = [`已监听 · 收到 ${st.received} 条`]
   if (st.executed) parts.push(`已执行 ${st.executed}`)
   if (st.rejected) parts.push(`拒绝 ${st.rejected}`)
   if (st.lastCmd) parts.push(`最近 ${st.lastCmd}`)
-  return { cls: 'ready', text: parts.join(' · ') }
+  return { cls: 'ready', text: parts.join(' · '), running: true }
 })
 
 function remove(i) {
@@ -5178,7 +5238,7 @@ function loadHidden() {
   position: relative;
   width: 52px;
   height: 38px;
-  padding: 0;
+  padding: 0 0 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
@@ -5220,21 +5280,22 @@ function loadHidden() {
   right: 4px;
 }
 .pos-btn.bl .pos-dot {
-  bottom: 4px;
+  bottom: 15px;
   left: 4px;
 }
 .pos-btn.br .pos-dot {
-  bottom: 4px;
+  bottom: 15px;
   right: 4px;
 }
 
 .pos-btn em {
   position: absolute;
-  bottom: -16px;
+  bottom: 1px;
   left: 0;
   right: 0;
   font-style: normal;
-  font-size: 10.5px;
+  font-size: 10px;
+  line-height: 1.2;
   color: var(--text-dim-2);
   text-align: center;
 }
@@ -5256,6 +5317,27 @@ function loadHidden() {
 /* ---------- 远程控制（方案 C，TG 私聊指令） ---------- */
 .remote-block {
   border-left: 2px solid color-mix(in srgb, #35c98a 55%, transparent);
+}
+
+/* 真正在监听时整块微微提亮，一眼看出"远程控制是活的" */
+.grp.live .grp-head {
+  background: color-mix(in srgb, var(--ok) 7%, transparent);
+}
+
+.grp-ico.remote {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.remote-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.remote-status .muted {
+  font-size: 11px;
+  color: var(--text-dim-2);
 }
 
 .id-list {
@@ -5348,7 +5430,128 @@ function loadHidden() {
   min-width: 0;
 }
 
-/* ---------- 静默时段列表（item 114） ---------- */
+/* ---------- 分组卡片（item 121 静默 / 远程控制 UI 美化） ----------
+ * 这两块功能各自选项多、层级深，原先平铺在页面上会被上下内容淹没。
+ * 用 grp 卡片圈起来：头部是「图标 + 标题 + 总开关」，下面按 sub-label 分小节。
+ */
+.grp {
+  margin: 0 0 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  overflow: hidden;
+}
+
+.grp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.grp-ico {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 14px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.grp-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.grp-titles strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.grp-titles em {
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim-2);
+}
+
+.grp-titles b {
+  color: var(--text-dim);
+}
+
+.grp-body {
+  padding: 11px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* 临时静默生效时整块提亮，一眼看出"现在是静音状态" */
+.grp-body.temp-silent.active {
+  background: color-mix(in srgb, #9b6dff 6%, transparent);
+}
+
+.sub-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.sub-label.mt {
+  margin-top: 3px;
+}
+
+/* 「当前生效 19:00~08:00」这类实时状态标签 */
+.live-tag {
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 32%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.hint.tight {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.silent-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  border-radius: 8px;
+  border-left: 2px solid color-mix(in srgb, #f5a623 60%, transparent);
+  background: color-mix(in srgb, #f5a623 7%, transparent);
+}
+
+.silent-state b {
+  color: var(--text-soft);
+}
+
+/* 静默时段列表（item 114） ---------- */
 .slot-list {
   display: flex;
   flex-direction: column;
@@ -5388,6 +5591,20 @@ function loadHidden() {
   padding: 1px 6px;
   border-radius: 999px;
   border: 1px solid var(--line-soft);
+}
+
+/* 跨零点 = 正常用法，给个中性偏暖的提示 */
+.slot-tag.cross {
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+/* 起止相同 = 这个时段永远不会命中，必须显眼地警示 */
+.slot-tag.invalid {
+  color: var(--err-text);
+  border-color: color-mix(in srgb, var(--err) 38%, transparent);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
 }
 
 .slot-del {

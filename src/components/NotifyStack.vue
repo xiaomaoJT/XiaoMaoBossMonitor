@@ -1,5 +1,5 @@
 <template>
-  <transition-group name="notify" tag="div" class="notify-stack">
+  <transition-group name="notify" tag="div" class="notify-stack" :style="posStyle">
     <article
       v-for="n in items"
       :key="n.key"
@@ -53,13 +53,53 @@
 </template>
 
 <script setup>
-defineProps({
+import { computed } from 'vue'
+
+const props = defineProps({
   items: { type: Array, default: () => [] },
   /** 单条通知的存活时长（毫秒），用于画进度条 */
-  life: { type: Number, default: 10000 }
+  life: { type: Number, default: 10000 },
+  /**
+   * 停靠位置（item 117）：'tl' 左上（默认）| 'tr' 右上 | 'bl' 左下 | 'br' 右下。
+   * 在「设置 → 外观」里配置。默认左上是历史行为。
+   */
+  pos: { type: String, default: 'tl' },
+  /** 与屏幕边缘的间距（px） */
+  posOffset: { type: Number, default: 14 }
 })
 
 const emit = defineEmits(['focus', 'dismiss'])
+
+/**
+ * 四角定位。
+ * 固定**一个横向**（left 或 right）和**一个纵向**（top 或 bottom），
+ * 另一方向留 auto —— 这样卡片按内容自然向下/向上生长，
+ * 不会因为固定了两轴而被拉伸变形。
+ *
+ * ⚠️ 靠上的两个角要额外让开顶栏（--topbar-h）：原来写死 top 时就是这么避让的，
+ * 挪到可配置后必须在这里补回来，否则卡片会压在品牌栏上。
+ */
+const posStyle = computed(() => {
+  const p = ['tl', 'tr', 'bl', 'br'].includes(props.pos) ? props.pos : 'tl'
+  const gap = Number(props.posOffset) || 0
+  const s = { top: 'auto', bottom: 'auto', left: 'auto', right: 'auto' }
+  // 顶部让开顶栏；--topbar-h 没定义时退化用 56px
+  const topOff = `calc(var(--topbar-h, 56px) + ${gap}px)`
+  if (p === 'tl') {
+    s.left = `${gap}px`
+    s.top = topOff
+  } else if (p === 'tr') {
+    s.right = `${gap}px`
+    s.top = topOff
+  } else if (p === 'bl') {
+    s.left = `${gap}px`
+    s.bottom = `${gap}px`
+  } else {
+    s.right = `${gap}px`
+    s.bottom = `${gap}px`
+  }
+  return s
+})
 
 function typeText(type) {
   switch (type) {
@@ -96,10 +136,14 @@ function clock(ts) {
 </script>
 
 <style scoped>
+/*
+ * 位置由 JS 的 posStyle 内联控制（四角可配，item 117），
+ * 所以这里**不再写死 left/top** —— 写死了会跟内联样式打架
+ * （内联优先级高，CSS 里的值等于失效，留着反而误导后来的人）。
+ * 只保留定位方式、层级、尺寸这些与位置无关的部分。
+ */
 .notify-stack {
   position: fixed;
-  left: 14px;
-  top: calc(var(--topbar-h) + 12px);
   z-index: 210;
   display: flex;
   flex-direction: column;

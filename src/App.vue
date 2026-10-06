@@ -143,12 +143,21 @@
     />
 
     <!--
-      ⚠️ 这里原本挂着 NotifyStack（顶部中间那摞带缩略图的报警卡片），已按要求移除（item 10）：
-      它和左上角的 EventPanel 是同一份数据、同一批内容，两处同时冒出来属于重复提醒，
-      报警一密集就互相盖住。现在只保留左上角事件面板一处入口。
-      通知数据源（notifies / pushNotify）仍保留 —— 设置里的「顶部通知」开关
-      与 notifyDesktop 的系统通知都还在用，脚本侧不便删干净。
+      报警通知卡片（item 117 恢复）。
+      ⚠️ 上一轮我误把它当成「与事件面板重复」删掉了，其实两者定位不同：
+        - NotifyStack：报警瞬间弹入的卡片，10 秒自动消失，告诉你「刚才发生了什么」；
+        - EventPanel：常驻右下角的可点开列表，能翻历史、能导出、能标已读。
+      同一条数据两处都出现不是重复，而是「即时提醒」+「事后查阅」的分工。
+      位置可在「设置 → 外观」里配四角（默认左上）。
     -->
+    <NotifyStack
+      :items="notifies"
+      :life="NOTIFY_LIFE"
+      :pos="notifyPos"
+      :pos-offset="notifyGap"
+      @focus="focusEvent"
+      @dismiss="dismissNotify"
+    />
 
     <PrivacyMask
       :open="masked"
@@ -221,6 +230,7 @@ import {
 } from './config/defaults'
 import { useAlertPush } from './composables/useAlertPush'
 import { dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
+import NotifyStack from './components/NotifyStack.vue'
 import { statAlarm, statChannelState, statPersonHit, statPush } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
@@ -457,7 +467,8 @@ const events = ref([])
 const uiOptions = computed(() => {
   const u = options.ui || {}
   return {
-    eventPanel: ['bl', 'br', 'tl', 'tr'].includes(u.eventPanel) ? u.eventPanel : 'bl',
+    // 事件面板固定在右下角（item 117：位置可配的是左上角通知卡片，不是它）
+    eventPanel: 'br',
     eventPanelGap: Number.isFinite(Number(u.eventPanelGap)) ? Math.max(0, Number(u.eventPanelGap)) : 14
   }
 })
@@ -474,17 +485,73 @@ const readCount = computed(() => events.value.filter((e) => !!e.read).length)
 /** 当前保留的历史事件总数（受「报警记录保留条数」上限约束） */
 const historyCount = computed(() => events.value.length)
 
-/* ==================== 顶部通知数据（item 10 后不再渲染） ====================
- * 顶部中间的 NotifyStack 已移除（与左上角事件面板重复）。
- * notifies 这份数据仍保留两处用途：
- *   - 完整人形补图回来时要回填缩略图（见补拍回调里的 notifies.map）；
- *   - 设置页「顶部通知」开关的语义仍要保留（用户能选择是否启用）。
- * 所以这里只把它标成"不再上屏"，不做删除，避免牵连其它逻辑。
+/* ==================== 报警通知卡片（item 117 恢复） ====================
+ * 报警瞬间弹入、带缩略图、10 秒自动消失的那摞卡片。
+ * 与右下角事件面板的分工：这里是「即时提醒」，那里是「事后查阅」。
+ *
+ * 去重规则：同一通道 + 同一类型只保留最新一条并重置计时，
+ * 避免同一个摄像头持续移动时刷出一屏卡片把画面全挡住。
  */
+const NOTIFY_LIFE = 10000
+const NOTIFY_MAX = 4
 const notifies = ref([])
+const notifyTimers = {}
 
-/** 顶部通知卡片已下线：保留函数签名，内部直接返回 */
-function pushNotify() {}
+function pushNotify(record) {
+  if (masked.value) return
+  if (!options.alert || options.alert.topNotify === false) return
+  const text =
+    record.type === 'person'
+      ? 'AI 人形识别：检测到人员'
+      : record.type === 'motion'
+      ? `画面移动${record.ratio ? ` · 变动 ${(record.ratio * 100).toFixed(1)}%` : ''}`
+      : record.text || '通道状态变化'
+
+  const item = {
+    key: record.key || `n-${Date.now()}`,
+    id: record.id,
+    name: record.name,
+    type: record.type,
+    thumb: record.thumb || '',
+    text,
+    time: record.time || Date.now()
+  }
+  // 同一通道同一类型短时间内只留最新一条，避免刷屏
+  const dedupKey = `${item.id}-${item.type}`
+  const exist = notifies.value.find((n) => `${n.id}-${n.type}` === dedupKey)
+  if (exist) {
+    clearTimeout(notifyTimers[exist.key])
+    notifies.value = notifies.value.map((n) => (n.key === exist.key ? { ...item, key: exist.key } : n))
+    notifyTimers[exist.key] = setTimeout(() => dismissNotify(exist.key), NOTIFY_LIFE)
+    return
+  }
+
+  notifies.value = [item, ...notifies.value].slice(0, NOTIFY_MAX)
+  // 被挤出可视区的旧通知直接清掉计时器
+  Object.keys(notifyTimers).forEach((k) => {
+    if (!notifies.value.some((n) => n.key === k)) {
+      clearTimeout(notifyTimers[k])
+      delete notifyTimers[k]
+    }
+  })
+  notifyTimers[item.key] = setTimeout(() => dismissNotify(item.key), NOTIFY_LIFE)
+}
+
+function dismissNotify(key) {
+  clearTimeout(notifyTimers[key])
+  delete notifyTimers[key]
+  notifies.value = notifies.value.filter((n) => n.key !== key)
+}
+
+/** 通知卡片位置（四角）与边距，可在「设置 → 外观」里改 */
+const notifyPos = computed(() => {
+  const p = (options.ui || {}).notifyPos
+  return ['tl', 'tr', 'bl', 'br'].includes(p) ? p : 'tl'
+})
+const notifyGap = computed(() => {
+  const n = Number((options.ui || {}).notifyGap)
+  return Number.isFinite(n) ? Math.max(0, Math.min(80, n)) : 14
+})
 
 /* ==================== 历史报警记录（IndexedDB 持久化） ==================== */
 /**
@@ -1481,10 +1548,17 @@ function onAlarm(payload) {
 
   appendEvent(record)
   if (options.alarmSound) beep(payload.type)
-  // 事件类型从 2 种扩到 8 种之后，文案统一由 useAlarmText 生成，避免各处写岔
-  const brief = alarmBrief(record)
-  if (brief) showToast(`${payload.name}：${brief}`)
+  /*
+   * ⚠️ 这里原来会 showToast(`${name}：${brief}`) —— 报警时在顶部正中弹一条
+   * 「大厅：监测到画面变动」式的文字提示（item 118 已去掉）。
+   * 原因：它和左上角的报警通知卡片、还有声音、标题闪烁是同一件事讲三遍，
+   * 而顶部正中这条最挡画面（正好压在画面上方），且和事件面板里的文案重复。
+   * 报警的呈现统一交给 NotifyStack（可配四角）+ 声音 + 标题闪烁。
+   * 其它场景的 toast（保存成功、切通道、导出完成…）是"操作反馈"，全部保留。
+   */
 
+  // 报警通知卡片（带缩略图，10 秒自动消失）
+  pushNotify(record)
   notifyDesktop(record)
   flashTitle()
 
@@ -2780,6 +2854,8 @@ onBeforeUnmount(() => {
   clearInterval(patrolTimer)
   clearInterval(repeatTimer)
   clearInterval(tempSilentTimer)
+  // 通知卡片的自动消失计时器：不清的话热更新时旧计时器还会把新卡片提前收走
+  Object.keys(notifyTimers).forEach((k) => clearTimeout(notifyTimers[k]))
   onFreeUp()
   stopFlashTitle()
   // 解绑可见性监听 + 释放常亮（桌面端要通知主进程停掉 powerSaveBlocker）

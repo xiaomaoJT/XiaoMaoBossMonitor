@@ -49,10 +49,15 @@
       </header>
 
       <!--
-        统计 + 已读管理。
+        统计 + 已读管理（item 120 重排）。
         四个数字以前只是 <span>（纯展示），点了没反应 —— 用户以为坏了。
         其实「今日/历史/未读/已读」天然就是四种筛选口径，直接做成可点的切换：
           今日 → 时间范围跳到今天；历史 → 全部；未读/已读 → 在当前时间范围上叠加读状态过滤。
+
+        ⚠️ 改成 4 列 grid 而不是 flex：
+        原来 4 个块 + 「全部已读」挤在 420px 宽的面板里，flex 换行把第二行顶得参差不齐。
+        grid 固定两行 × 两列，块宽均分，**任何宽度下都不换行错位**；
+        「全部已读」移到底部的操作行，不跟数字抢位置。
       -->
       <div class="stats">
         <button
@@ -91,15 +96,20 @@
           <i>已读</i>
           <b>{{ readCount }}</b>
         </button>
-        <span class="spacer"></span>
-        <button class="btn small" :disabled="!unreadCount" @click="emit('mark-all-read')">全部已读</button>
       </div>
 
-      <!-- 筛选栏：类型直接可见（常用），时间范围收进下拉，避免一排按钮挤成一团 -->
+      <!--
+        筛选栏（item 120 重排）。
+        两处改动：
+          1. 主筛选只留**真实报警类型**（全部 / 人形 / 人脸 / 区域 / 姿态 / 移动 / 计数）；
+          2. 「通道」和「后台异常」抽到下面独立的 sysbar 里 ——
+             它们不是"你关心的报警"，而是机器自己产生的状态流水/错误，
+             混在报警类型里点两下就找不到，也不该占着主筛选的位置。
+      -->
       <div class="filterbar">
         <div class="seg">
           <button
-            v-for="f in FILTERS"
+            v-for="f in MAIN_FILTERS"
             :key="f.key"
             class="seg-btn"
             :class="{ on: filter === f.key }"
@@ -113,11 +123,10 @@
 
         <span class="spacer"></span>
 
-        <!-- 选中「通道状态」时，顺手把「这类消息要不要推送」的入口摆出来：
-             它的配置藏在设置 →「状态巡检」页，光靠记忆很难找得到。 -->
-        <button v-if="filter === 'system'" class="btn small" @click="emit('open-status-config')">
-          配置异常推送
-        </button>
+        <!--
+          「配置异常推送」入口移到了下面的 tip-row：它只对「通道」筛选有意义，
+          放在主筛选条右侧会让人误以为是全局设置。
+        -->
 
         <div class="range-wrap">
           <button class="range-btn" :class="{ on: range !== 'today' || hours.length }" @click.stop="rangeOpen = !rangeOpen">
@@ -160,10 +169,44 @@
         </div>
       </div>
 
+      <!--
+        机器状态区（item 120 新增）：把「通道」和「后台异常」从主筛选里独立出来。
+        两者性质和报警不同 —— 报警是"检测到目标"，这里是"设备自己出状况了"，
+        所以单独一行、用不同颜色区分，也不再占用主筛选条的位置。
+      -->
+      <div class="sysbar">
+        <span class="sb-label">机器状态</span>
+        <button
+          class="sb-chip channel"
+          :class="{ on: filter === 'system' }"
+          title="通道状态消息（断线 / 恢复）"
+          @click="filter = filter === 'system' ? 'all' : 'system'"
+        >
+          <span class="sb-dot"></span>
+          通道
+          <em v-if="countOf('system')">{{ countOf('system') }}</em>
+        </button>
+        <button
+          class="sb-chip err"
+          :class="{ on: filter === 'error' }"
+          title="后台运行异常（解码 / 模型 / 内存等报错）"
+          @click="filter = filter === 'error' ? 'all' : 'error'"
+        >
+          <span class="sb-dot"></span>
+          后台异常
+          <em v-if="errorLog.length">{{ errorLog.length }}</em>
+        </button>
+        <span class="spacer"></span>
+        <button class="btn small" :disabled="!unreadCount" @click="emit('mark-all-read')">全部已读</button>
+      </div>
+
       <div class="tip-row">
         <em class="range-tip">
           {{ rangeLabel }}{{ hours.length ? ` · ${hours.length} 个时段` : '' }} · {{ filteredEvents.length }} 条
         </em>
+        <button v-if="filter === 'system'" class="btn tiny" @click="emit('open-status-config')">
+          配置异常推送
+        </button>
       </div>
 
       <div class="hour-row" v-if="isDayRange && showHours">
@@ -186,19 +229,19 @@
       </div>
 
       <!--
-        运行异常（item 9）—— 独立分区，刻意不放进上面的类型筛选里。
+        后台异常明细（item 9 + 120）。
+        入口在上面 sysbar 的「后台异常」里；默认收起，只在用户主动点开/选中时展开。
         这类条目不是"报警"：Array buffer allocation failed 这类运行期异常
         既不属于人形/人脸任何一类，也不该占未读角标、更不该混进今日报警计数。
-        放在自己的折叠区里，既能查得到，又不污染报警统计。
       -->
-      <div class="err-zone" v-if="errorLog.length">
+      <div class="err-zone" v-if="errorLog.length && (errZoneOpen || filter === 'error')">
         <button class="ez-head" @click="errZoneOpen = !errZoneOpen">
           <span class="ez-dot"></span>
           <b>运行异常</b>
           <em>{{ errorLog.length }} 条</em>
           <span class="spacer"></span>
           <span class="ez-hint">不计入报警统计</span>
-          <svg class="caret" :class="{ up: errZoneOpen }" viewBox="0 0 24 24" width="12" height="12">
+          <svg class="caret" :class="{ up: errZoneOpen || filter === 'error' }" viewBox="0 0 24 24" width="12" height="12">
             <path
               fill="none"
               stroke="currentColor"
@@ -209,7 +252,7 @@
             />
           </svg>
         </button>
-        <ul class="ez-list" v-if="errZoneOpen">
+        <ul class="ez-list" v-if="errZoneOpen || filter === 'error'">
           <li v-for="(it, i) in errorLog" :key="i">
             <span class="ez-time">{{ errTime(it.time) }}</span>
             <span class="ez-src">{{ it.source }}</span>
@@ -218,7 +261,12 @@
         </ul>
       </div>
 
-      <div class="list" v-if="filteredEvents.length">
+      <!-- 选「后台异常」时，下面那份事件列表没有意义，直接提示 -->
+      <p class="err-only-hint" v-else-if="filter === 'error' && errorLog.length === 0">
+        本次运行没有捕获到后台异常，状态良好。
+      </p>
+
+      <div class="list" v-if="showList && filteredEvents.length">
         <article
           class="item"
           v-for="(ev, i) in filteredEvents"
@@ -936,15 +984,25 @@ const statPick = ref('')
  * 「通道状态」四个字把整行挤到换行、字样错位，现在最长也就两字。
  * 完整含义放到 title 上，鼠标悬浮可见。
  */
-const FILTERS = [
+/**
+ * 主筛选：只放**真实报警类型**（item 120）。
+ * 「通道」和「后台异常」被抽到 sysbar 单独一行了 —— 它们是设备状态而非报警。
+ */
+const MAIN_FILTERS = [
   { key: 'all', label: '全部', title: '全部报警（不含通道状态）' },
   { key: 'person', label: '人形', title: '人形检测报警' },
   { key: 'face', label: '人脸', title: '人脸识别报警' },
   { key: 'zone', label: '区域', title: '区域规则报警（走入 / 走出 / 徘徊）' },
   { key: 'pose', label: '姿态', title: '姿态识别报警' },
   { key: 'motion', label: '移动', title: '移动检测报警' },
-  { key: 'count', label: '计数', title: '人员计数报警' },
-  { key: 'system', label: '通道', title: '通道状态消息（断线 / 恢复）' }
+  { key: 'count', label: '计数', title: '人员计数报警' }
+]
+
+/** 全部筛选定义（含已移到 sysbar 的两个，countOf 仍要能算它们的数量） */
+const FILTERS = [
+  ...MAIN_FILTERS,
+  { key: 'system', label: '通道', title: '通道状态消息（断线 / 恢复）' },
+  { key: 'error', label: '后台异常', title: '后台运行异常（解码 / 模型 / 内存等报错）' }
 ]
 
 const filteredEvents = computed(() => {
@@ -954,6 +1012,9 @@ const filteredEvents = computed(() => {
   else if (statPick.value === 'read') list = list.filter((ev) => !!ev.read)
   return list
 })
+
+/** 选「后台异常」时，下面那份事件列表要藏起来（异常在上面的 err-zone 里单独列） */
+const showList = computed(() => filter.value !== 'error')
 
 /**
  * 顶部四个统计块的点击行为。
@@ -987,6 +1048,8 @@ function matches(ev, key) {
    */
   if (key === 'all') return !isSystemEvent(ev)
   if (key === 'system') return isSystemEvent(ev)
+  // 「后台异常」不是事件类型，它来自 useErrorLog，不在 events 里（由 err-zone 单独渲染）
+  if (key === 'error') return false
   // 区域一类里有走入 / 走出 / 徘徊三种事件
   if (key === 'zone') return ev.type === 'enter' || ev.type === 'exit' || ev.type === 'loiter'
   return ev.type === key
@@ -1967,27 +2030,35 @@ header {
 
 /* ==================== 统计栏 + 已读管理 + 时间筛选 ==================== */
 
+/*
+ * 四个统计块（item 120）。
+ * 用 grid 而非 flex：flex 在 420px 宽的面板里会把 4 个块 + 「全部已读」挤到换行，
+ * 第二行参差不齐。grid 固定 2×2 均分，任何宽度下都整齐。
+ */
 .stats {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  padding: 9px 10px 0;
 }
 
 .st {
   display: inline-flex;
   align-items: baseline;
+  justify-content: center;
   gap: 5px;
-  padding: 3px 9px;
+  padding: 4px 6px;
   border-radius: 7px;
   background: var(--panel);
   border: 1px solid var(--line-soft);
+  min-width: 0;
 }
 
 .st i {
   font-style: normal;
   font-size: 11px;
   color: var(--text-dim-2);
+  white-space: nowrap;
 }
 
 .st b {
@@ -2245,6 +2316,110 @@ header {
 }
 
 /*
+ * 机器状态区（item 120）。
+ * 「通道」和「后台异常」从主筛选里独立出来放这一行 —— 它们是设备状态而非报警，
+ * 用暖/红两色区分，用户一眼能分清"这是出问题了"而不是"检测到目标了"。
+ * 行不换行：放不下时只让右侧的「全部已读」按钮先让位。
+ */
+.sysbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px 0;
+  min-width: 0;
+}
+
+.sb-label {
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+  padding-right: 2px;
+  border-right: 1px solid var(--line-soft);
+  margin-right: 3px;
+  padding-left: 2px;
+  line-height: 1.1;
+  writing-mode: horizontal-tb;
+}
+
+.sb-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+  color: var(--text-dim);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.sb-chip .sb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.sb-chip em {
+  font-style: normal;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+/* 通道 = 橙（断线/恢复，属于设备状态） */
+.sb-chip.channel .sb-dot {
+  background: var(--warn);
+}
+.sb-chip.channel em {
+  color: var(--warn-text);
+}
+
+/* 后台异常 = 红（真出错了，比通道更严重） */
+.sb-chip.err .sb-dot {
+  background: var(--err);
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--err) 18%, transparent);
+}
+.sb-chip.err em {
+  color: var(--err-text);
+}
+
+.sb-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.sb-chip.channel.on {
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.sb-chip.err.on {
+  color: var(--err-text);
+  border-color: color-mix(in srgb, var(--err) 50%, transparent);
+  background: color-mix(in srgb, var(--err) 13%, transparent);
+}
+
+/* 选中「后台异常」而一条都没有时，给一句明确的"状态良好"，而不是空白面板 */
+.err-only-hint {
+  margin: 10px 10px 0;
+  padding: 14px 12px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--ok-text);
+  border: 1px dashed color-mix(in srgb, var(--ok) 32%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ok) 6%, transparent);
+}
+
+/*
  * 类型筛选这一排（item 3）。
  * 以前八个标签在窄屏下会 flex-wrap 换行，行的高度被撑开、字样上下错位。
  * 现在改成「永不换行 + 放不下就横向滚动」：
@@ -2444,7 +2619,16 @@ header {
 
 /* 当前筛选结果的概览，单独一行细字，不占太多高度 */
 .tip-row {
-  padding: 5px 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 0;
+  flex-wrap: wrap;
+}
+
+.tip-row .range-tip {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .custom-row {
