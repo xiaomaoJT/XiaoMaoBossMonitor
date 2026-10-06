@@ -1083,6 +1083,15 @@ function pushStateOf(ev) {
 
     // 2) 没调用到这个渠道：能解释就解释清楚
     if (masterOff) return { ...base, on: false, why: '该通道已关闭「推送总开关」' }
+    /*
+     * 后端推送是异步的（截图上传 + 图床 + 三家接口最长 60s），前端轮询到这条事件时，
+     * 后端可能**还没回写**逐渠道状态 —— 此时 push 有值但 pushChannels 是空的。
+     * 这属于「结果未知」，不是「没推这个渠道」，不能报成"本次推送未包含该渠道"。
+     */
+    if (ev.source === 'backend' && ev.push && !pushed) {
+      // state 给 'sending'：渠道标签显示「推送中」而不是干巴巴的 off，与上方「正在推送…」一致
+      return { ...base, on: false, state: 'sending', why: '由后端推送 · 渠道回执尚未回写' }
+    }
     if (ev.push === 'ok' || ev.push === 'merged' || ev.push === 'fail' || ev.push === 'sending') {
       return { ...base, on: false, why: '本次推送未包含该渠道' }
     }
@@ -1595,7 +1604,22 @@ function onAlarm(payload) {
    * 前端在这里不能再推一遍，否则同一个报警会收到两条 —— 只标状态。
    */
   if (backendActive.value && payload.source === 'backend') {
-    markPush(record.key, 'ok', '由后端服务推送（本机页面可关）', '后端')
+    /*
+     * ⚠️ 必须用后端**真实的**逐渠道数据，不能图省事写死一个「后端」。
+     *
+     * 后端推送调度整体在服务端跑，它早就把「本次调用了哪些渠道、各渠道回执如何」
+     * 写进事件记录了（useBackendEvents 带过来的 backendPushChannels / backendPushResults）。
+     * 以前这里一律 markPush(..., '后端')，等于把那份真实数据**覆盖掉**了：
+     * 详情页按渠道名匹配 pushChannels 时，「后端」跟「钉钉/企微/TG」一个都对不上，
+     * 三个渠道全被判成"本次推送未包含该渠道" —— 明明三端都收到了。
+     */
+    markPush(
+      record.key,
+      payload.backendPush || 'sending',
+      payload.backendPushError || '由后端服务推送（本机页面可关）',
+      String(payload.backendPushChannels || '').trim(),
+      payload.backendPushResults || null
+    )
     /*
      * 统计打点（item 111）：后端模式下 recordPush 跑在服务端，前端收不到，
      * 于是"三端推送成功率"会一直是空。这里改从后端事件自带的 pushResults

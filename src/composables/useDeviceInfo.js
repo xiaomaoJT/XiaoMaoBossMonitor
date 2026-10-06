@@ -84,6 +84,11 @@ function serverRuntime(app, version) {
         p === 'darwin' ? 'macOS' : p === 'win32' ? 'Windows' : p === 'linux' ? 'Linux' : p || ''
       if (osName) parts.push(osName)
       if (process.arch) parts.push(process.arch)
+      // 机器名：多台机器同时值守时，光有「Node 22 · Linux」分不清是哪台。
+      // 同样不引 os 模块 —— 主机名这几个环境变量 Node 自己就带。
+      const env = process.env || {}
+      const host = env.HOSTNAME || env.COMPUTERNAME || env.MACHINE || ''
+      if (host && parts.indexOf(host) < 0) parts.push(host)
     }
   } catch (e) {
     /* 拿不到就只报一个笼统的服务端标识，不影响推送 */
@@ -108,12 +113,28 @@ export function detectRuntime(brand) {
   const version = (brand && brand.version) || ''
 
   /*
-   * ⚠️ 后端（Node）没有 navigator / window / screen，ua 恒为空串，
-   * 往下走会一路落到「未知浏览器 / 未知系统」。而通过终端 `npm run server`
-   * 启动恰恰是最常见的部署方式，推送里却显示「未知浏览器 · 未知系统」，
-   * 收信人根本判断不出消息来自哪台机器 —— 这里显式识别为「后端服务」。
+   * ⚠️ 必须先认「跑在 Node 里」，不能只看 ua 是否为空。
+   *
+   * Node 21+ **自带** `navigator`（globalThis.navigator.userAgent === "Node.js/22"），
+   * 所以后端进程里 ua 并不是空串 —— 以前靠 `if (!ua)` 兜底已经失效了，
+   * 于是后端推送里的「运行设备」一律显示成「网页端 · 未知浏览器 · 未知系统」，
+   * 收信人根本判断不出消息来自哪台机器。
+   *
+   * 判定条件（任一命中即视为后端）：
+   *   1. window 就是 globalThis 本身 —— compat.mjs 的 shim 就是这么挂的；
+   *   2. 没有 document —— 浏览器一定有；
+   *   3. UA 自带 Node.js 标记（Node 自带的 navigator / 老版本 shim 伪造的 UA）。
    */
-  if (!ua) return serverRuntime(app, version)
+  const isNode =
+    (typeof window !== 'undefined' && typeof document === 'undefined') ||
+    (typeof document === 'undefined' && typeof process !== 'undefined' && !!process.versions?.node) ||
+    /\bNode\.js\//.test(ua) ||
+    /^BossMonitor-Headless\//.test(ua)
+
+  if (isNode) return serverRuntime(app, version)
+
+  // 浏览器环境但 UA 读不到（极少数内嵌 WebView 会这样）→ 仍按网页端解析，至少不误报成后端
+  if (!ua) return { kind: 'web', label: '网页端', detail: '', line: '网页端 · 浏览器访问' }
 
   const isElectron = /Electron\//.test(ua)
   const native = nativePlatform()
