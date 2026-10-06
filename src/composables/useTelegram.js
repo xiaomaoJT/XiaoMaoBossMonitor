@@ -38,6 +38,15 @@ export function normalizeTelegram(tg) {
   if (tg.alsoSendOriginal === undefined) tg.alsoSendOriginal = false
   // 推送消息模板：空串 = 用内置默认模板（见 useMessageTemplate.js）
   if (typeof tg.template !== 'string') tg.template = ''
+
+  /* ---- 远程控制（方案 C）配置 ----
+   * 逐字段兜底而不是整体替换：老配置里没有 remote 这一块，
+   * 直接整体赋值会把已经配好的字段冲掉。 */
+  const r = tg.remote || (tg.remote = {})
+  if (r.enabled === undefined) r.enabled = false
+  if (!Array.isArray(r.allowUserIds)) r.allowUserIds = []
+  if (r.pollMs === undefined) r.pollMs = 3000
+  if (r.allowReboot === undefined) r.allowReboot = false
   return tg
 }
 

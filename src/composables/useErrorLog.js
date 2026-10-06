@@ -41,6 +41,17 @@ function normalizeMessage(err) {
   if (/Maximum recursive updates/i.test(msg)) {
     return '界面组件出现了循环更新，已自动中断（通常是某处 computed 反复改写自己的依赖）'
   }
+  /*
+   * 内存/缓冲类异常（item 9）。
+   * 这一族报错在长跑时最常见，而且 msg 本身是英文、看不出所以然，
+   * 这里补一句中文说明，让人知道是"哪一类问题"而不是"程序崩了"。
+   */
+  if (/Array buffer allocation failed|RangeError/i.test(msg)) {
+    return `${msg}（内存/缓冲区分配失败：通常是长时间运行后累积占用过高，或某帧画面过大导致申请内存被拒）`
+  }
+  if (/Out of memory|Allocation failed|heap/i.test(msg)) {
+    return `${msg}（内存不足：建议关闭一些通道降低并发，或重启服务释放内存）`
+  }
   if (/ResizeObserver loop/i.test(msg)) {
     return '尺寸变化回调触发过于频繁（通常无害）'
   }

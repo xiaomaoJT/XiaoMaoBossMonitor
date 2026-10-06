@@ -177,76 +177,200 @@ export function useAlertPush(options, hooks = {}) {
   const silentCfg = () => options.silent || {}
 
   /**
+   * 读出所有定时静默时段（item 114：支持多个时段）。
+   *
+   * 兼容老配置：老版本只有 start / end 两个字段、没有 slots。
+   * 这里做一次归一化 —— 有 slots 就用 slots；没有但有 start/end 就当成单个时段。
+   * 用户升级后原有的夜间时段不会丢，也不用写数据迁移脚本。
+   * 非法项（start === end，等于 0 长度窗口）会被过滤掉。
+   */
+  function readSlots() {
+    const c = silentCfg()
+    if (!c) return []
+    const out = []
+    const push = (s, e) => {
+      const a = toMin(s)
+      const b = toMin(e)
+      if (a === b) return
+      out.push({ start: a, end: b })
+    }
+    if (Array.isArray(c.slots) && c.slots.length) {
+      c.slots.forEach((it) => {
+        if (it && it.start !== undefined && it.end !== undefined) push(it.start, it.end)
+      })
+    } else if (c.start !== undefined && c.end !== undefined) {
+      // 老配置：单时段
+      push(c.start, c.end)
+    }
+    return out
+  }
+
+  /** 「今天零点 + 距天分钟数」换算成时间戳；dayOff 用于跨天（-1=昨天，1=明天） */
+  function slotBoundary(now, min, dayOff) {
+    const d = new Date(now)
+    d.setFullYear(d.getFullYear(), d.getMonth(), d.getDate() + (dayOff || 0))
+    d.setHours(0, 0, 0, 0)
+    return d.getTime() + min * 60000
+  }
+
+  /**
+   * 找出当前命中的那个时段，并算出它的起止时间戳。
+   * 多个时段重叠时取**结束最晚**的那个（免打扰当然按最宽的窗口算）。
+   */
+  function matchSlot(now) {
+    const d = new Date(now)
+    const m = d.getHours() * 60 + d.getMinutes()
+    const today = d.getDate()
+    let best = null
+    readSlots().forEach((s) => {
+      const hit = s.start < s.end ? m >= s.start && m < s.end : m >= s.start || m < s.end
+      if (!hit) return
+      let startMs
+      let endMs
+      if (s.start < s.end) {
+        startMs = slotBoundary(now, s.start, 0)
+        endMs = slotBoundary(now, s.end, 0)
+      } else if (m >= s.start) {
+        // 跨零点，现在处于「开始之后」那半段 → 结束在明天
+        startMs = slotBoundary(now, s.start, 0)
+        endMs = slotBoundary(now, s.end, 1)
+      } else {
+        // 跨零点，现在处于「结束之前」那半段 → 开始在昨天
+        startMs = slotBoundary(now, s.start, -1)
+        endMs = slotBoundary(now, s.end, 0)
+      }
+      if (!best || endMs > best.endMs) best = { start: s.start, end: s.end, startMs, endMs }
+    })
+    if (best) best.crossDay = new Date(best.endMs).getDate() !== today
+    return best
+  }
+
+  /**
+   * 临时静默是否生效（item 112）。
+   *
+   * 与夜间定时静默并存、且**优先级更高**：用户手动点了「临时静默 2 小时」，
+   * 哪怕现在是白天（定时窗口没开）也照样免打扰；反过来夜里到了定时窗口，
+   * 也不会缩短用户手动设的临时窗口 —— 取两者中更晚的结束时刻。
+   *
+   * 配置字段：
+   *   tempUntil    临时静默截止时间戳（毫秒），0 / 缺省 = 未开启
+   *   tempChannels 临时静默覆盖的渠道；为空则沿用 channels（三端）
+   *   tempLabel    可选的用途备注，会写进状态文案
+   */
+  function tempSilentState(now) {
+    const c = silentCfg()
+    const until = Number(c.tempUntil) || 0
+    if (!until) return { active: false }
+    if (until <= now) return { active: false, expired: true, endMs: until }
+    const chans = Array.isArray(c.tempChannels) && c.tempChannels.length
+      ? c.tempChannels
+      : (c.channels || [])
+    if (!chans.length) return { active: false, expired: true, endMs: until }
+    return {
+      active: true,
+      startMs: now,
+      endMs: until,
+      channels: chans,
+      reason: String(c.tempLabel || '').trim()
+    }
+  }
+
+  /**
    * 当前是否处于全局静默时段，并给出窗口的起止时间戳 / 文案标签。
-   * 支持跨零点（例如 19:00 ~ 次日 08:00）。
+   * 支持跨零点（19:00 ~ 次日 08:00）与**多个时段**（item 114）。
    * @returns {{active:boolean, startMs?:number, endMs?:number, rangeLabel?:string, endLabel?:string}}
    */
   function silentState(now) {
     const c = silentCfg()
+
+    /*
+     * 临时静默优先：只要它还有效就直接返回，rangeLabel 标成「临时静默（至 HH:MM）」。
+     * 这样用户在事件面板点一下就能立刻免打扰，不用等夜里、也不用改定时设置。
+     */
+    const temp = tempSilentState(now)
+    if (temp.active) {
+      const p2t = (n) => String(n).padStart(2, '0')
+      const e = new Date(temp.endMs)
+      const left = Math.max(0, temp.endMs - now)
+      /*
+       * 分钟先四舍五入、再进位到小时。
+       * 反过来算（小时向下取整、分钟四舍五入）会出现 "2 小时 60 分" ——
+       * 因为 2h59.6m 的分钟四舍五入成 60，却没把它并进小时。
+       */
+      const totalMin = Math.round(left / 60000)
+      const hh = Math.floor(totalMin / 60)
+      const mm = totalMin % 60
+      const leftLabel = hh ? `${hh} 小时 ${mm} 分后` : `${mm} 分后`
+      return {
+        active: true,
+        temp: true,
+        startMs: temp.startMs,
+        endMs: temp.endMs,
+        channels: temp.channels,
+        rangeLabel: `临时静默（至 ${p2t(e.getHours())}:${p2t(e.getMinutes())}）`,
+        endLabel: `${p2t(e.getHours())}:${p2t(e.getMinutes())}`,
+        leftLabel
+      }
+    }
+
     if (!c || !c.enabled) return { active: false }
-    const start = toMin(c.start)
-    const end = toMin(c.end)
-    if (start === end) return { active: false }
-    const d = new Date(now)
-    const m = d.getHours() * 60 + d.getMinutes()
-    const active = start < end ? m >= start && m < end : m >= start || m < end
-    if (!active) return { active: false }
-    const y = d.getFullYear()
-    const mo = d.getMonth()
-    const da = d.getDate()
-    const midnight = (off) => {
-      const x = new Date(now)
-      x.setFullYear(y, mo, da + off)
-      x.setHours(0, 0, 0, 0)
-      return x.getTime()
-    }
-    let startMs
-    let endMs
-    if (start < end) {
-      startMs = midnight(0) + start * 60000
-      endMs = midnight(0) + end * 60000
-    } else if (m >= start) {
-      startMs = midnight(0) + start * 60000
-      endMs = midnight(1) + end * 60000
-    } else {
-      startMs = midnight(-1) + start * 60000
-      endMs = midnight(0) + end * 60000
-    }
+    const hit = matchSlot(now)
+    if (!hit) return { active: false }
+
     const p2 = (n) => String(n).padStart(2, '0')
     const fmt = (ms) => {
       const x = new Date(ms)
       return `${p2(x.getHours())}:${p2(x.getMinutes())}`
     }
-    const endDay = new Date(endMs).getDate() !== da ? '次日 ' : ''
+    const endDay = hit.crossDay ? '次日 ' : ''
     return {
       active: true,
-      startMs,
-      endMs,
-      rangeLabel: `${fmt(startMs)} ~ ${endDay}${fmt(endMs)}`,
-      endLabel: `${endDay}${fmt(endMs)}`
+      startMs: hit.startMs,
+      endMs: hit.endMs,
+      rangeLabel: `${fmt(hit.startMs)} ~ ${endDay}${fmt(hit.endMs)}`,
+      endLabel: `${endDay}${fmt(hit.endMs)}`
     }
   }
 
-  /** 下一个静默结束时刻的时间戳（用于排程汇总推送），不在静默时段也返回今晚/明早的结束点 */
+  /**
+   * 下一个静默结束时刻的时间戳（用于排程汇总推送）。
+   * 现在不在任何时段里 → 返回最近一个即将到来的结束点（多时段里取最早的那个）。
+   */
   function nextQuietEndMs(now) {
+    /*
+     * 临时静默正在进行 → 汇总就排在这个窗口的末尾（不能排到夜里的固定时刻，
+     * 否则临时窗口内的报警要一直等到夜里才汇总；也不能排到固定时刻之后，
+     * 否则用户明明设了 2 小时，结果 20 小时后才收到汇总）。
+     */
+    const temp = tempSilentState(now)
+    if (temp.active) return temp.endMs
+
     const c = silentCfg()
     if (!c || !c.enabled) return null
-    const end = toMin(c.end)
-    if (end === toMin(c.start)) return null
-    const d = new Date(now)
-    const base = new Date(d)
-    base.setHours(0, 0, 0, 0)
-    const today = base.getTime() + end * 60000
-    const tomorrow = today + 1440 * 60000
-    if (today > now) return today
-    if (tomorrow > now) return tomorrow
-    return tomorrow
+    const slots = readSlots()
+    if (!slots.length) return null
+
+    // 已经在某个时段里 → 它的结束点就是最近的（重叠时 matchSlot 已取最宽的）
+    const cur = matchSlot(now)
+    if (cur) return cur.endMs
+
+    // 不在任何时段里 → 今天/明天最早到来的那个结束点
+    let best = null
+    slots.forEach((s) => {
+      const todayEnd = slotBoundary(now, s.end, 0)
+      const cand = todayEnd > now ? todayEnd : todayEnd + 1440 * 60000
+      if (best === null || cand < best) best = cand
+    })
+    return best
   }
 
   /** 某渠道此刻是否应被全局静默收存（不实时推） */
   function isSilentSuppressed(id, now) {
     const s = silentState(now)
-    return s.active && (silentCfg().channels || []).includes(id)
+    if (!s.active) return false
+    // 临时静默按 tempChannels 走，夜间定时按 channels 走
+    const chans = s.temp ? s.channels || [] : silentCfg().channels || []
+    return chans.includes(id)
   }
 
   /** 静默时段内收存的报警快照（去重 by key） */
@@ -312,7 +436,15 @@ export function useAlertPush(options, hooks = {}) {
     const buf = silentBuffer.splice(0, silentBuffer.length)
     silentSeen.clear()
     if (!buf.length) return
-    const ids = (silentCfg().channels || []).filter((id) => isReady(id))
+    /*
+     * 汇总发给谁：临时静默期间收存的就发给临时静默覆盖的渠道，
+     * 否则回落到夜间定时的 channels —— 不能一律用 channels，
+     * 否则「只对钉钉临时静默 1 小时」会把汇总也发给没被静默的企微。
+     */
+    const temp = tempSilentState(endMs)
+    const tempLeft = temp.active || temp.expired ? temp.channels || null : null
+    const targetCfg = tempLeft || silentCfg().channels || []
+    const ids = targetCfg.filter((id) => isReady(id))
     if (!ids.length) return
     const startMs = buf.reduce((m, r) => Math.min(m, r.time || endMs), endMs)
     const summary = buildSilentSummary(buf, silentCfg(), { startMs, endMs })
@@ -325,6 +457,105 @@ export function useAlertPush(options, hooks = {}) {
       }
     })
     if (sent.length) notify(`静默时段汇总已推送（${sent.join(' + ')}）`)
+  }
+
+  /**
+   * 开启临时静默（item 112）：从现在起免打扰，到期自动汇总。
+   *
+   * 两种指定结束方式（用户需求：既能设"N 小时"，也能选"静默到几点"）：
+   *   - 传 hours（>0）：从现在起 N 小时；
+   *   - 传 untilAt（时间戳，必须晚于现在）：静默到该时刻（跨零点也没问题）。
+   * 两者都传时 untilAt 优先。立即重排汇总定时器，把原先排在夜里的那个换成这条窗口。
+   *
+   * @param {number} [hours] 时长（小时），支持小数
+   * @param {string[]} [channels] 覆盖渠道，缺省沿用配置里的三端
+   * @param {string} [label] 用途备注（会出现在状态文案里）
+   * @param {number} [untilAt] 绝对截止时间戳（"静默到几点"用这个）
+   * @returns {{ok:boolean, until?:number, reason?:string}}
+   */
+  function startTempSilent(hours, channels, label, untilAt) {
+    const now = Date.now()
+    const maxMs = 7 * 24 * 3600000
+    let until = 0
+    if (Number(untilAt) > 0) {
+      until = Number(untilAt)
+      if (until <= now) return { ok: false, reason: '结束时间必须晚于当前时间' }
+    } else {
+      const h = Number(hours)
+      if (!Number.isFinite(h) || h <= 0) {
+        return { ok: false, reason: '请选择时长，或指定一个晚于当前时间的结束时刻' }
+      }
+      until = now + Math.min(h, 168) * 3600000
+    }
+    if (until - now > maxMs) return { ok: false, reason: '单次临时静默最长 7 天' }
+
+    const c = silentCfg()
+    c.tempUntil = until
+    if (Array.isArray(channels) && channels.length) c.tempChannels = channels.slice()
+    if (label) c.tempLabel = String(label).slice(0, 40)
+    // 重排汇总：把夜里的定时器换成这条临时窗口的
+    if (silentTimer) {
+      clearTimeout(silentTimer)
+      silentTimer = null
+    }
+    scheduleSilentFlush()
+    const p2 = (n) => String(n).padStart(2, '0')
+    const e = new Date(until)
+    const span = until - now
+    // 同上：分钟先进位到小时
+    const totalMin = Math.round(span / 60000)
+    const hh = Math.floor(totalMin / 60)
+    const mm = totalMin % 60
+    const how = hh ? `${hh} 小时 ${mm} 分后` : `${mm} 分后`
+    notify(`已开启临时静默，至 ${p2(e.getHours())}:${p2(e.getMinutes())}（${how}）自动汇总推送`)
+    return { ok: true, until }
+  }
+
+  /** 提前结束临时静默：立即把已收存的报警汇总发出去（不等到期） */
+  function endTempSilent(flush = true) {
+    const c = silentCfg()
+    if (!Number(c.tempUntil)) return { ok: false, reason: '当前没有临时静默' }
+    c.tempUntil = 0
+    c.tempLabel = ''
+    if (silentTimer) {
+      clearTimeout(silentTimer)
+      silentTimer = null
+    }
+    if (flush) {
+      return flushSilentSummary().then(() => ({ ok: true }))
+    }
+    return { ok: true }
+  }
+
+  /** 临时静默当前状态（给设置页 / 事件面板显示） */
+  function tempSilentInfo(now = Date.now()) {
+    const t = tempSilentState(now)
+    if (!t.active) {
+      return { active: false, expired: !!t.expired, endMs: t.endMs || 0 }
+    }
+    const p2 = (n) => String(n).padStart(2, '0')
+    const e = new Date(t.endMs)
+    const left = t.endMs - now
+    // 同上：分钟先进位到小时，避免出现 "2 小时 60 分"
+    const totalMin = Math.round(left / 60000)
+    const hh = Math.floor(totalMin / 60)
+    const mm = totalMin % 60
+    /*
+     * 跨天时补一个日期前缀（"明天 08:00" / "10-07 08:00"）——
+     * 用户指定的结束时刻很可能落在第二天，只写 "08:00" 会以为已经过了。
+     */
+    const endDay = new Date(now)
+    endDay.setHours(0, 0, 0, 0)
+    const dayDiff = Math.round((new Date(e.getFullYear(), e.getMonth(), e.getDate()).getTime() - endDay.getTime()) / 86400000)
+    const dayPrefix = dayDiff === 0 ? '' : dayDiff === 1 ? '明天 ' : dayDiff === 2 ? '后天 ' : `${dayDiff} 天后 `
+    return {
+      active: true,
+      endMs: t.endMs,
+      untilLabel: `${dayPrefix}${p2(e.getHours())}:${p2(e.getMinutes())}`,
+      leftLabel: hh ? `${hh} 小时 ${mm} 分后` : `${mm} 分后`,
+      channels: t.channels,
+      reason: t.reason
+    }
   }
 
   /** 单渠道预检 */
@@ -508,15 +739,26 @@ export function useAlertPush(options, hooks = {}) {
     const fails = results.filter((r) => !r.ok)
     // 送达了、但附带信息没成功的（例如企微文字发出去了、截图没发出去）
     const warns = results.filter((r) => r.ok && r.warn).map((r) => `${r.name}：${r.warn}`)
+    /*
+     * pushResults 逐渠道记录最终成败（成功 / 失败+原因）。
+     * pushChannels 只表示「本次调用过哪些渠道」，两者分开：
+     * 前者回答"发了没有"，后者回答"发成了吗"。用户在详情里要能同时看到。
+     */
+    const detail = {}
+    results.forEach((r) => {
+      detail[r.name] = r.ok ? 'ok' : `fail:${r.reason || '未知错误'}`
+    })
     if (okNames.length) {
       const note = [fails.map((f) => `${f.name}：${f.reason}`).join('；'), warns.join('；')]
         .filter(Boolean)
         .join('；')
-      records.forEach((r) => onState(r.key, merged ? 'merged' : 'ok', note, okNames.join(' + ')))
+      records.forEach((r) =>
+        onState(r.key, merged ? 'merged' : 'ok', note, okNames.join(' + '), detail)
+      )
       return
     }
     const reason = fails.map((f) => `${f.name}：${f.reason}`).join('；') || '未知错误'
-    records.forEach((r) => onState(r.key, 'fail', reason))
+    records.forEach((r) => onState(r.key, 'fail', reason, '', detail))
     notify(`推送失败：${reason}`)
   }
 
@@ -551,7 +793,16 @@ export function useAlertPush(options, hooks = {}) {
       st.windowTs.push(now)
     })
 
-    records.forEach((r) => onState(r.key, 'sending'))
+    /*
+     * ⚠️ 立刻把「本次要发往哪些渠道」写回去，而不是等所有回调落定。
+     * 详情页要靠 pushChannels 显示每个渠道的状态，而推送要等截图上传 +
+     * 图床 + 各家接口返回，最长可达 PUSH_TIMEOUT_MS（60s）。
+     * 以前这段时间里 pushChannels 是空的，界面就退化成「本次推送未包含该渠道」——
+     * 明明三端都收到了，却显示得像没发。用户明确要求：调用了就显示已推送。
+     * 这里的 'sent' 只是「已发出」，等 settle 落定后会被 ok / fail 覆盖成最终结果。
+     */
+    const attemptedNames = ids.map((id) => CHANNEL_DEFS.find((d) => d.id === id).name).join(' + ')
+    records.forEach((r) => onState(r.key, 'sending', '', attemptedNames))
 
     // ⚠️ 顺序很关键：钉钉 / 企业微信要复用 Telegram 那条消息的链接，
     // 所以 Telegram 必须先发完，把 messageUrl 放进 ctx 再发其余渠道。
@@ -587,7 +838,12 @@ export function useAlertPush(options, hooks = {}) {
     if (!results) {
       const names = ids.map((id) => CHANNEL_DEFS.find((d) => d.id === id).name).join(' + ')
       const reason = `${names}：推送超时（${PUSH_TIMEOUT_MS / 1000}s 内未返回，通常是网络不通或图床无响应）`
-      records.forEach((r) => onState(r.key, 'fail', reason))
+      // 超时也逐渠道标注，这样界面能显示「已推送 · 结果未知」而不是"未包含该渠道"
+      const detail = {}
+      ids.forEach((id) => {
+        detail[CHANNEL_DEFS.find((d) => d.id === id).name] = 'timeout'
+      })
+      records.forEach((r) => onState(r.key, 'fail', reason, names, detail))
       notify(`推送超时：${reason}`)
       return
     }
@@ -679,12 +935,16 @@ export function useAlertPush(options, hooks = {}) {
      * 全局静默时段：被选中的渠道在时段内「不实时推」，改为收存到 silentBuffer，
      * 等时段结束统一发一条汇总。判定「该渠道本应收到」时忽略渠道级 quiet，
      * 避免和这里的全局收存打架（全局优先级更高）。
+     * 临时静默（item 112）也走这里，只是渠道集合来自 silentState().channels。
      */
     const sState = silentState(now)
+    const quietChans = sState.temp
+      ? sState.channels || []
+      : (silentCfg().channels || [])
     const suppressIds =
-      sState.active && (silentCfg().channels || []).length
+      sState.active && quietChans.length
         ? CHANNEL_DEFS.filter(
-            (d) => silentCfg().channels.includes(d.id) && checkChannel(d.id, record, now, true).ok
+            (d) => quietChans.includes(d.id) && checkChannel(d.id, record, now, true).ok
           ).map((d) => d.id)
         : []
     let buffered = false
@@ -1143,6 +1403,12 @@ export function useAlertPush(options, hooks = {}) {
     pushExtraShot,
     /** 立即把当前静默缓冲汇总发出去（设置页可挂「立即推送」按钮） */
     flushSilentSummary,
+    /** 临时静默（item 112）：从现在起 N 小时免打扰，到期自动汇总 */
+    startTempSilent,
+    /** 提前结束临时静默（默认立刻把已收存的汇总发出去） */
+    endTempSilent,
+    /** 临时静默状态查询（设置页 / 事件面板显示剩余时长用） */
+    tempSilentInfo,
     pendingCount,
     rateLimit,
     channels,

@@ -67,6 +67,8 @@ function toPayload(ev) {
     backendPush: ev.push || '',
     backendPushError: ev.pushError || '',
     backendPushChannels: ev.pushChannels || '',
+    /** 逐渠道回执（后端已解析好的对象），用于「已推送但失败/超时」的区分 */
+    backendPushResults: ev.pushResults || null,
     source: 'backend',
     fps: null,
     kbps: null,

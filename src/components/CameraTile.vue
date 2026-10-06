@@ -52,13 +52,45 @@
       </span>
       <span class="dot" :class="{ [status]: true, pausedDot: manuallyPaused }"></span>
       <span class="name" :title="cam.name">{{ cam.name }}</span>
-      <span class="chip on" v-if="analysisOn" title="已开启移动检测">
-        <svg viewBox="0 0 24 24" width="11" height="11">
-          <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M4 18a9 9 0 0 1 16 0M7.5 18a5.5 5.5 0 0 1 9 0" />
+      <!--
+        检测类标签：移动 / 人形 / 人脸 / 姿态 / 区域 / 计数。
+        · hit  = 最近 5 秒内该类型命中过（对应标签高亮，见 markHit）
+        · t-xxx= 每个类型一套配色，避免全是同色看不出区别
+      -->
+      <span
+        v-if="analysisOn"
+        class="chip t-motion"
+        :class="{ on: true, hit: hitKinds.has('motion') }"
+        title="已开启移动检测"
+      >
+        <svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M13.5 5.5a2 2 0 1 0-4 0M6 12.5a2 2 0 1 0-4 0M22 12.5a2 2 0 1 0-4 0M19 21a2 2 0 1 0-4 0M3.5 21a2 2 0 1 0-4 0M11 10.5l-3 2M11 10.5l3.5 2M11 10.5V17M11 17l-5 3M11 17l4 3"
+          />
         </svg>
         移动
       </span>
-      <span class="chip ai" v-if="cam.ai" :title="aiTitle">
+      <span
+        v-if="cam.ai"
+        class="chip t-person"
+        :class="{ on: true, hit: hitKinds.has('person') }"
+        :title="aiTitle"
+      >
+        <svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
+          <circle cx="12" cy="7" r="3.4" fill="none" stroke="currentColor" stroke-width="1.8" />
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            d="M5.5 20.5c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"
+          />
+        </svg>
         {{ aiChipText }}
       </span>
       <!--
@@ -66,7 +98,23 @@
         没开启的（通道关了、或者全局总闸没开）一律不画 ——
         只在生效时才出现，看到标签就等于确认它在工作。
       -->
-      <span v-for="e in extChips" :key="e.key" class="chip ext" :title="e.title">
+      <span
+        v-for="e in extChips"
+        :key="e.key"
+        class="chip ext"
+        :class="[`t-${e.key}`, { hit: hitKinds.has(e.key) }]"
+        :title="e.title"
+      >
+        <svg class="ext-ico" viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
+          <path
+            :d="EXT_ICON[e.key] || EXT_ICON.default"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
         {{ e.label }}
       </span>
       <span class="chip blind" v-if="cam.blind" title="盲视模式：画面已隐藏，检测仍在运行">盲视</span>
@@ -98,7 +146,7 @@
         </div>
         <div class="b-rows">
           <span>画面已隐藏，解码与检测正常</span>
-          <span>上次分析：<b>{{ analyzeAgo }}</b></span>
+          <span>上次分析：<b>{{ analyzeAgo }}</b><template v-if="lastAnalyzeAt">（{{ clockText(lastAnalyzeAt) }}）</template></span>
           <span v-if="lastAlarmText">最近报警：<b class="b-alarm">{{ lastAlarmText }}</b></span>
           <span v-else>最近报警：暂无</span>
         </div>
@@ -721,6 +769,20 @@ function reconnect() {
 /* ==================== 智能分析 ==================== */
 const alarm = ref(false)
 const alarmType = ref('motion')
+/**
+ * 最近命中过的检测类型（item 13/105：命中时让对应的标签高亮）。
+ * 用 Set 而不是单个值 —— 人形 + 人脸 + 区域可能同一帧一起命中，
+ * 逐个高亮才准确；5 秒后自动熄灭，和报警角标的节奏一致。
+ */
+const hitKinds = ref(new Set())
+let hitTimer = null
+function markHit(...kinds) {
+  const next = new Set(hitKinds.value)
+  kinds.forEach((k) => k && next.add(k))
+  hitKinds.value = next
+  clearTimeout(hitTimer)
+  hitTimer = setTimeout(() => (hitKinds.value = new Set()), 5000)
+}
 const personBoxes = ref([])
 const motionBox = ref(null)
 const roiEditing = ref(false)
@@ -814,14 +876,27 @@ watch(blindOn, (v) => {
   }
 })
 
+/**
+ * 相对时间文案。10 秒内算「刚刚」（item 106）——
+ * 盲视面板每 1s 刷新一次，5 秒的门槛会让"上次分析"几乎永远显示成秒数，
+ * 反而看不清到底是刚才还是几分钟前。超出 10 秒才给"X 秒 / X 分钟前"。
+ */
 function agoText(ts) {
   if (!ts) return '—'
   const s = Math.max(0, Math.round((nowTick.value - ts) / 1000))
-  if (s < 5) return '刚刚'
+  if (s <= 10) return '刚刚'
   if (s < 60) return `${s} 秒前`
   const m = Math.floor(s / 60)
   if (m < 60) return `${m} 分钟前`
   return `${Math.floor(m / 60)} 小时前`
+}
+
+/** 绝对时间 HH:MM:SS */
+function clockText(ts) {
+  if (!ts) return '—'
+  const d = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 const analyzeAgo = computed(() => agoText(lastAnalyzeAt.value))
@@ -875,6 +950,15 @@ const extChips = computed(() =>
     title: `这一路已开启${d.full}`
   }))
 )
+
+/** 附加分析标签的图标路径（统一 24×24 线性风格，stroke 用 currentColor 跟随配色） */
+const EXT_ICON = {
+  face: 'M4 8.5a2.5 2.5 0 1 1 4 0 2.5 2.5 0 0 1-4 0zM16 8.5a2.5 2.5 0 1 1 4 0 2.5 2.5 0 0 1-4 0zM9 15.2c.6-1.4 1.7-2.2 3-2.2s2.4.8 3 2.2M3 20.5c0-2.6 1.6-4.4 3.6-4.9M21 20.5c0-2.6-1.6-4.4-3.6-4.9',
+  pose: 'M12 4.2a1.7 1.7 0 1 1 0 3.4 1.7 1.7 0 0 1 0-3.4zM12 8v5m0 0-3.4 6M12 13l3.4 6M7 9.5l5 1.5 5-1.5',
+  zone: 'M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M12 14.5v-3M12 14.5l-2 2M12 14.5l2 2',
+  count: 'M4 20V9m5 11V4m5 16v-7m5 7V7M2.5 20h19',
+  default: 'M5 12h14'
+}
 
 /**
  * 触发报警的变动阈值（归一化，占总画面比例）。
@@ -1035,9 +1119,13 @@ async function tickAi() {
 function emitExtraAlarm(evt, canvas) {
   const type = evt.type
   if (!type) return
-  const thumb = canvas ? encodeJPEG(canvas, 360, 0.62) : ''
+  // 与 triggerAlarm 统一走 grabArchiveShot：直接编码检测画布容易出黑图
+  const thumb = grabArchiveShot(canvas, 360)
   const shot = canvas ? grabArchiveShot(canvas) : ''
   const info = videoInfo.value
+
+  // 命中即高亮对应的标签（人脸/姿态/区域/计数）
+  markHit(type)
 
   emit('alarm', {
     id: props.cam.id,
@@ -1131,10 +1219,10 @@ function looksBlank(source) {
  *   3. 检测采样帧（兜底，通常已经被缩小过）
  * 这样即使某个源被降采样或还没出画面，也不会把糊图存进事件记录。
  */
-function grabArchiveShot(fallback) {
+function grabArchiveShot(fallback, maxWidth) {
   const raw = props.options.alert ? Number(props.options.alert.shotWidth) : NaN
   // 未配置过该项（老版本配置）时回退到 0（原图）
-  const cap = Number.isFinite(raw) ? (raw > 0 ? raw : Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER
+  const cap = maxWidth > 0 ? maxWidth : Number.isFinite(raw) ? (raw > 0 ? raw : Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER
 
   const candidates = []
   if (boxEl.value) {
@@ -1162,12 +1250,19 @@ function grabArchiveShot(fallback) {
 function triggerAlarm(type, ratio, canvas) {
   alarmType.value = type
   alarm.value = true
+  // 命中即高亮对应标签（移动 / 人形）
+  markHit(type)
   lastAlarmInfo.value = { type, at: Date.now() }
   clearTimeout(alarmTimer)
   alarmTimer = setTimeout(() => (alarm.value = false), 4000)
 
-  // 列表缩略图：小图即可，避免列表变重
-  const thumb = encodeJPEG(canvas, 360, 0.62)
+  /*
+   * ⚠️ 列表缩略图原来直接拿 `canvas`（检测采样帧）编码，
+   * 而详情用的 shot 走的是 grabArchiveShot —— 后者会跳过空帧挑真正有画面的源。
+   * 检测画布在触发瞬间常常已经被清空 / 还没落帧，于是列表缩略图一片黑，
+   * 只有打开详情（用 shot）才正常。现在两者统一走同一套取源逻辑。
+   */
+  const thumb = grabArchiveShot(canvas, 360)
   // 详情 / 放大查看用的原图
   const shot = grabArchiveShot(canvas)
 
@@ -1642,6 +1737,7 @@ onBeforeUnmount(async () => {
   closeMore()
   observer && observer.disconnect()
   clearTimeout(alarmTimer)
+  clearTimeout(hitTimer)
   clearInterval(blindTickTimer)
   await destroyPlayer()
 })
@@ -2127,6 +2223,81 @@ defineExpose({
   color: #7fe3d4;
   background: color-mix(in srgb, var(--cyan) 14%, transparent);
   border-color: color-mix(in srgb, var(--cyan) 30%, transparent);
+}
+
+/* 扩展标签的图标与文字之间留一点呼吸，视觉上更紧凑 */
+.chip .ext-ico {
+  flex: 0 0 auto;
+  opacity: 0.9;
+}
+
+/*
+ * 每个检测类型一套配色（item 105）。
+ * 以前移动是蓝、人形是绿、附加分析一律青色，三种颜色混在一起
+ * 分不清谁是谁；现在按类型分色，扫一眼画面就知道开了哪些能力。
+ * 颜色沿用项目既有变量，避免和整体主题脱节。
+ */
+.chip.t-motion {
+  color: #7fb6ff;
+  background: color-mix(in srgb, #4d8ef7 16%, transparent);
+  border-color: color-mix(in srgb, #4d8ef7 34%, transparent);
+}
+
+.chip.t-person {
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 32%, transparent);
+}
+
+.chip.t-face {
+  color: #c3a6ff;
+  background: color-mix(in srgb, #9b6dff 16%, transparent);
+  border-color: color-mix(in srgb, #9b6dff 34%, transparent);
+}
+
+.chip.t-pose {
+  color: #ffb27f;
+  background: color-mix(in srgb, #ff8a3d 16%, transparent);
+  border-color: color-mix(in srgb, #ff8a3d 34%, transparent);
+}
+
+.chip.t-zone {
+  color: #ffd980;
+  background: color-mix(in srgb, #f0b429 16%, transparent);
+  border-color: color-mix(in srgb, #f0b429 34%, transparent);
+}
+
+.chip.t-count {
+  color: #7fe3d4;
+  background: color-mix(in srgb, var(--cyan) 14%, transparent);
+  border-color: color-mix(in srgb, var(--cyan) 32%, transparent);
+}
+
+/*
+ * 命中高亮（item 13）：检测到该类型的瞬间，标签整体提亮 + 轻微脉冲，
+ * 5 秒后由 markHit 自动熄灭。这样「刚才那一帧到底是什么触发的报警」
+ * 在画面上就有直接的视觉落点，不必去翻事件列表。
+ */
+.chip.hit {
+  color: #fff;
+  background: color-mix(in srgb, currentColor 34%, transparent);
+  border-color: color-mix(in srgb, currentColor 70%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, currentColor 45%, transparent),
+    0 0 10px color-mix(in srgb, currentColor 55%, transparent);
+  animation: chip-hit 0.55s ease-out;
+  z-index: 2;
+}
+
+@keyframes chip-hit {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
 }
 
 .alarm-tag {

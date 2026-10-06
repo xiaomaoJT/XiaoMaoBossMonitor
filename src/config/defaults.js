@@ -177,6 +177,20 @@ export const HIDDEN_OPTIONS = {
    */
   keepAwake: true,
 
+  /* ---------------- 界面布局偏好 ---------------- */
+  /** 界面微调：事件面板停靠位置等（item 113） */
+  ui: {
+    /**
+     * 事件 / 推送面板停靠在哪个角：
+     *   bl = 左下（默认）、br = 右下、tl = 左上、tr = 右上
+     * 左下是默认值：顶栏有品牌和按钮、左边是画面主体，落在左下既不挡顶栏
+     * 也不压住画面正中。
+     */
+    eventPanel: 'bl',
+    /** 面板与屏幕边缘的间距（px） */
+    eventPanelGap: 14
+  },
+
   /* ---------------- 智能分析 ---------------- */
   /** 运动检测总开关 */
   analysisEnabled: true,
@@ -363,16 +377,16 @@ export const HIDDEN_OPTIONS = {
     /** 恢复正常时也推送一条 */
     notifyRecover: true,
     /** 持续异常时的重复提醒间隔（分钟），0 = 只提醒一次 */
-    repeatMinutes: 10
+    repeatMinutes: 0
   },
 
   /* ---------------- 定时状态巡检（全局，三个渠道共用调度） ---------------- */
   patrol: {
     enabled: true,
     /** 巡检推送间隔（分钟） */
-    intervalMinutes: 30,
+    intervalMinutes: 60,
     /** 只在存在异常时才推送 */
-    onlyWhenAbnormal: false,
+    onlyWhenAbnormal: true,
     /** 报告里是否包含非监听通道 */
     includeAll: true
   },
@@ -390,19 +404,39 @@ export const HIDDEN_OPTIONS = {
    * 默认开启：晚上 7 点 ~ 次日早上 8 点；三端（钉钉 / 企微 / TG）默认全部参与。
    * 汇总消息内容见 useDingTalk.buildSilentSummary：报警总数、按通道、按类型、
    * 人员识别（已识别人数）、累计到访人次、峰值同时在线等，全部列清。
+   *
+   * 时段可以配**多个**（slots）：夜里一场、午休再一场，各自在结束时发一条汇总。
+   * 单个时段写法：{ start: '19:00', end: '08:00' }（end 小于 start 视为跨零点）。
    */
   silent: {
     /** 是否开启静默时段（默认开） */
     enabled: true,
-    /** 静默开始时刻（HH:mm，支持跨零点） */
+    /**
+     * 静默时段列表（item 114）。每一项是 { start, end }，支持跨零点。
+     * 空数组 = 没有定时静默（但临时静默仍然可用）。
+     */
+    slots: [{ start: '19:00', end: '08:00' }],
+    /**
+     * @deprecated 老版本的单时段字段。读取时会自动并入 slots（见 useAlertPush.readSlots），
+     * 保留仅为了兼容用户已保存的旧配置，新代码不要再直接用 start/end。
+     */
     start: '19:00',
-    /** 静默结束时刻：到这一刻自动发汇总（HH:mm） */
     end: '08:00',
     /**
      * 静默时段内暂停实时推送、改在结束时汇总的渠道。
      * 空数组 = 不暂停任何渠道（等于没开）。默认三端都参与。
      */
-    channels: ['ding', 'wecom', 'tg']
+    channels: ['ding', 'wecom', 'tg'],
+
+    /* ---- 临时静默（item 112）：手动「接下来 N 小时别吵我」 ----
+     * 与上面的定时静默并存，且**优先级更高**：
+     *   - tempUntil    截止时间戳（毫秒），0 / 缺省 = 未开启
+     *   - tempChannels 覆盖的渠道；空数组则沿用上面的 channels
+     *   - tempLabel    用途备注（会出现在状态文案里，便于回头看当时为什么静默）
+     * 用于会议、演示、临时排查这类"这段时间别给我发消息"的场景。 */
+    tempUntil: 0,
+    tempChannels: [],
+    tempLabel: ''
   },
 
   /* ---------------- 流自愈（持续异常自动恢复） ----------------
@@ -615,7 +649,34 @@ export const HIDDEN_OPTIONS = {
 
     /* ---- 这个渠道是否接收「监控异常」与「定时巡检」通知 ---- */
     statusAlerts: { enabled: true },
-    patrol: { enabled: true }
+    patrol: { enabled: true },
+
+    /* ---- 远程控制（方案 C：TG 私聊指令控制后端） ----------------
+     * 不需要公网入口：后端用 Bot API 的 getUpdates 长轮询取指令，
+     * 你在手机上私聊机器人发 /silent 2h 就能控制这台机器。
+     *
+     * ⚠️ 安全边界（改之前务必读完）：
+     *   1. **只认私聊** —— chat.type 必须是 'private'，群里任何人发都直接忽略；
+     *   2. **只认白名单用户** —— allowUserIds 之外的 id 一律不回不回、不执行；
+     *   3. 远程能重启机器，所以**默认关闭**，要显式打开 remote.enabled 才会监听指令。
+     */
+    remote: {
+      /** 是否接受 TG 指令（安全起见默认关闭） */
+      enabled: false,
+      /**
+       * 允许发指令的 Telegram 用户 id（数字）。
+       * 空数组 = 谁都不能控制；多个 id 用逗号分隔。
+       * ⚠️ 这是**唯一的身份判据**，不要为了图省事填群 id。
+       */
+      allowUserIds: ['100000001'],
+      /** 长轮询间隔（毫秒）。Telegram 建议 ≤50s；调大省流量但响应变慢 */
+      pollMs: 3000,
+      /**
+       * 是否允许 /reboot（重启系统）。
+       * 危险动作单独一档开关：调试远程功能时先关掉，确认无误再开。
+       */
+      allowReboot: false
+    }
   },
 
   /* ---------------- 企业微信推送（群机器人 Webhook） ---------------- */

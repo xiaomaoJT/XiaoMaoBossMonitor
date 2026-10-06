@@ -103,6 +103,8 @@
       :layout-key="layoutKey"
       :native="isNativeApp"
       :events="events"
+      :temp-silent="tempSilentState"
+      @temp-state="refreshTempSilentState"
       @close="settingsOpen = false"
       @save="applyConfig"
       @reset="onReset"
@@ -117,6 +119,8 @@
       @backend-sync="onBackendSyncNow"
       @flush-silent="onFlushSilent"
       @restart-system="onRestartSystem"
+      @start-temp-silent="onStartTempSilent"
+      @end-temp-silent="onEndTempSilent"
     />
 
     <EventPanel
@@ -125,6 +129,9 @@
       :events="events"
       :load-shot="loadEventShot"
       :push-state="pushStateOf"
+      :error-log="errorLog"
+      :pos="uiOptions.eventPanel"
+      :pos-offset="uiOptions.eventPanelGap"
       @close="eventPanelOpen = false"
       @clear="clearEvents"
       @export="exportEvents"
@@ -135,7 +142,13 @@
       @open-status-config="openStatusConfig"
     />
 
-    <NotifyStack :items="notifies" :life="NOTIFY_LIFE" @focus="focusEvent" @dismiss="dismissNotify" />
+    <!--
+      ⚠️ 这里原本挂着 NotifyStack（顶部中间那摞带缩略图的报警卡片），已按要求移除（item 10）：
+      它和左上角的 EventPanel 是同一份数据、同一批内容，两处同时冒出来属于重复提醒，
+      报警一密集就互相盖住。现在只保留左上角事件面板一处入口。
+      通知数据源（notifies / pushNotify）仍保留 —— 设置里的「顶部通知」开关
+      与 notifyDesktop 的系统通知都还在用，脚本侧不便删干净。
+    -->
 
     <PrivacyMask
       :open="masked"
@@ -194,7 +207,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CameraTile from './components/CameraTile.vue'
 import EventPanel from './components/EventPanel.vue'
-import NotifyStack from './components/NotifyStack.vue'
 import PrivacyMask from './components/PrivacyMask.vue'
 import TopBar from './components/TopBar.vue'
 import SettingsDrawer from './components/SettingsDrawer.vue'
@@ -209,6 +221,7 @@ import {
 } from './config/defaults'
 import { useAlertPush } from './composables/useAlertPush'
 import { dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
+import { statAlarm, statChannelState, statPersonHit, statPush } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
   buildStatusAlertMessage,
@@ -436,6 +449,18 @@ const flashId = ref('')
 const LOCATE_MS = 3000
 
 const events = ref([])
+
+/**
+ * 界面布局偏好（item 113）。
+ * 老配置没有 ui 块，这里用默认值兜底，避免读到 undefined。
+ */
+const uiOptions = computed(() => {
+  const u = options.ui || {}
+  return {
+    eventPanel: ['bl', 'br', 'tl', 'tr'].includes(u.eventPanel) ? u.eventPanel : 'bl',
+    eventPanelGap: Number.isFinite(Number(u.eventPanelGap)) ? Math.max(0, Number(u.eventPanelGap)) : 14
+  }
+})
 /**
  * 未读数量直接从记录里算，不再单独维护一个计数器（避免和持久化的已读状态对不上）。
  *
@@ -449,57 +474,17 @@ const readCount = computed(() => events.value.filter((e) => !!e.read).length)
 /** 当前保留的历史事件总数（受「报警记录保留条数」上限约束） */
 const historyCount = computed(() => events.value.length)
 
-/* ==================== 左上角简要通知（10 秒自动消失） ==================== */
-const NOTIFY_LIFE = 10000
-const NOTIFY_MAX = 4
+/* ==================== 顶部通知数据（item 10 后不再渲染） ====================
+ * 顶部中间的 NotifyStack 已移除（与左上角事件面板重复）。
+ * notifies 这份数据仍保留两处用途：
+ *   - 完整人形补图回来时要回填缩略图（见补拍回调里的 notifies.map）；
+ *   - 设置页「顶部通知」开关的语义仍要保留（用户能选择是否启用）。
+ * 所以这里只把它标成"不再上屏"，不做删除，避免牵连其它逻辑。
+ */
 const notifies = ref([])
-const notifyTimers = {}
 
-function pushNotify(record) {
-  if (masked.value) return
-  if (!options.alert || options.alert.topNotify === false) return
-  const text =
-    record.type === 'person'
-      ? 'AI 人形识别：检测到人员'
-      : record.type === 'motion'
-      ? `画面移动${record.ratio ? ` · 变动 ${(record.ratio * 100).toFixed(1)}%` : ''}`
-      : record.text || '通道状态变化'
-
-  const item = {
-    key: record.key || `n-${Date.now()}`,
-    id: record.id,
-    name: record.name,
-    type: record.type,
-    thumb: record.thumb || '',
-    text,
-    time: record.time || Date.now()
-  }
-  // 同一通道同一类型短时间内只留最新一条，避免刷屏
-  const dedupKey = `${item.id}-${item.type}`
-  const exist = notifies.value.find((n) => `${n.id}-${n.type}` === dedupKey)
-  if (exist) {
-    clearTimeout(notifyTimers[exist.key])
-    notifies.value = notifies.value.map((n) => (n.key === exist.key ? { ...item, key: exist.key } : n))
-    notifyTimers[exist.key] = setTimeout(() => dismissNotify(exist.key), NOTIFY_LIFE)
-    return
-  }
-
-  notifies.value = [item, ...notifies.value].slice(0, NOTIFY_MAX)
-  // 被挤出可视区的旧通知直接清掉计时器
-  Object.keys(notifyTimers).forEach((k) => {
-    if (!notifies.value.some((n) => n.key === k)) {
-      clearTimeout(notifyTimers[k])
-      delete notifyTimers[k]
-    }
-  })
-  notifyTimers[item.key] = setTimeout(() => dismissNotify(item.key), NOTIFY_LIFE)
-}
-
-function dismissNotify(key) {
-  clearTimeout(notifyTimers[key])
-  delete notifyTimers[key]
-  notifies.value = notifies.value.filter((n) => n.key !== key)
-}
+/** 顶部通知卡片已下线：保留函数签名，内部直接返回 */
+function pushNotify() {}
 
 /* ==================== 历史报警记录（IndexedDB 持久化） ==================== */
 /**
@@ -535,6 +520,8 @@ async function appendEvent(record) {
   const next = [record, ...events.value]
   const dropped = next.length > maxEvents.value ? next.slice(maxEvents.value) : []
   events.value = next.slice(0, maxEvents.value).map((e) => (e.key === record.key ? toLightRecord(record) : e))
+  // 今日报警独立计数（不受 maxEvents 淘汰影响，见 todayAlarmCount 注释）
+  if (!isSystemEvent(record)) bumpTodayCount(1)
   try {
     await dbPutEvent(record)
     if (dropped.length) await dbDeleteEvents(dropped.map((d) => d.key))
@@ -553,12 +540,50 @@ async function loadEventShot(key) {
   }
 }
 
-const todayCount = computed(() => {
-  const start = new Date()
-  start.setHours(0, 0, 0, 0)
-  // 今日报警数：同样排除通道状态消息（offline / online），口径与「全部」标签一致
-  return events.value.filter((e) => e.time >= start.getTime() && !isSystemEvent(e)).length
-})
+/**
+ * 今日报警次数（item 109）。
+ *
+ * ⚠️ 不能直接数 events.value —— 那个列表受 maxEvents（默认 200）淘汰，
+ * 报警一起来就会把最早的挤掉，于是「今日报警」到 200 就再也不涨了，
+ * 明明今天已经报了 500 次。这里改成一个**独立的当日累计计数**：
+ * 每条新事件 +1，跨零点自动归零，与列表淘汰彻底解耦。
+ */
+const todayAlarmCount = ref(0)
+/** todayAlarmCount 归属的日期（毫秒时间戳，每天一个），用于跨零点检测 */
+let todayCountDay = startOfDayStamp()
+
+function startOfDayStamp() {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+function bumpTodayCount(delta) {
+  const today = startOfDayStamp()
+  if (today !== todayCountDay) {
+    // 跨过零点：先归零，再把新一天的第一条算进去
+    todayCountDay = today
+    todayAlarmCount.value = 0
+  }
+  todayAlarmCount.value = Math.max(0, todayAlarmCount.value + delta)
+}
+
+/**
+ * 首屏 / 切回前台时用内存里已有的事件把当日计数补齐。
+ * 只统计「今天零点之后、且列表里还留着的」那部分，
+ * 也就是说：今天没超过 maxEvents 时是精确值；超了则至少不低于实际值。
+ */
+function seedTodayCount() {
+  const today = startOfDayStamp()
+  if (today !== todayCountDay) {
+    todayCountDay = today
+    todayAlarmCount.value = 0
+  }
+  const fromList = events.value.filter((e) => e.time >= today && !isSystemEvent(e)).length
+  if (fromList > todayAlarmCount.value) todayAlarmCount.value = fromList
+}
+
+const todayCount = computed(() => todayAlarmCount.value)
 const lastEventAt = computed(() => (events.value.length ? events.value[0].time : 0))
 const lastEventText = computed(() => {
   const e = events.value[0]
@@ -942,16 +967,18 @@ function pushStateOf(ev) {
   const pushed = String(ev.pushChannels || '')
 
   /*
-   * ⚠️ 判断「这条事件到底推到哪些渠道」必须以**实际结果**为准，不能拿当前配置反推。
-   * 以前先查 enabled / 凭据 / 渠道勾选，只要配置里有一项不满足就显示 off，
-   * 于是「明明三条都推送成功了、详情里却全是 off」。
-   * pushChannels 是推送时真正发出的渠道列表（形如「钉钉 + 企微」），
-   * 命中了的渠道一律按「已送达」展示，配置里的那些 off 只作为补充说明。
+   * ⚠️ 三层状态，别再拿配置反推：
+   *   1. pushChannels —— 本次**调用过**哪些渠道。推送一发起就写回，不等回调
+   *      （截图上传 + 图床 + 三家接口最长要 60s，等回调期间界面会一直空白）。
+   *   2. pushResults  —— 各渠道的最终结果：ok / fail:原因 / timeout。
+   *   3. 配置          —— 只在前两项都没有时用来解释「为什么没推」。
+   * 用户诉求：只要调用了就显示「已推送」，有回调再额外标注成功/失败/超时。
    */
   const sentNames = pushed
     .split(/[+、,，\/]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 1)
+  const results = ev.pushResults && typeof ev.pushResults === 'object' ? ev.pushResults : null
 
   const defs = [
     ['ding', '钉钉', options.dingtalk],
@@ -964,6 +991,7 @@ function pushStateOf(ev) {
       id,
       label,
       sent: false,
+      called: false,
       on: false,
       silenced: true,
       why: '静默时段已收存，结束时刻统一汇总推送'
@@ -971,19 +999,29 @@ function pushStateOf(ev) {
   }
   return defs.map(([id, label, cfg]) => {
     const c = cfg || {}
-    const sent = sentNames.some((n) => n.includes(label) || label.includes(n))
-    const base = { id, label, sent }
-    const cfgReason = cfgBlockReason(id, c, ev, camCh)
-    // 1) 已经送达的渠道：直接认账，别再拿配置去"劝退"它
-    if (sent) return { ...base, on: true, why: '已推送成功' }
+    const called = sentNames.some((n) => n.includes(label) || label.includes(n))
+    const base = { id, label, sent: called, called }
+
+    // 1) 本次调用过：先认「已推送」，再按回调结果补充最终状态
+    if (called) {
+      const r = results ? results[label] || results[label.toLowerCase()] : null
+      if (r === 'ok') return { ...base, on: true, state: 'ok', why: '已推送成功' }
+      if (r === 'timeout') return { ...base, on: true, state: 'timeout', why: '已推送，结果未知（超时）' }
+      if (typeof r === 'string' && r.startsWith('fail:'))
+        return { ...base, on: true, state: 'fail', why: `已推送但失败：${r.slice(5)}` }
+      // 还在推送中，或没有结果：按用户要求直接显示"已推送"
+      return { ...base, on: true, state: 'sending', why: '已推送（等待回执）' }
+    }
+
+    // 2) 没调用到这个渠道：能解释就解释清楚
     if (masterOff) return { ...base, on: false, why: '该通道已关闭「推送总开关」' }
-    // 2) 本次推送有结果、只是没轮到这个渠道
-    if (ev.push === 'ok' || ev.push === 'merged') {
+    if (ev.push === 'ok' || ev.push === 'merged' || ev.push === 'fail' || ev.push === 'sending') {
       return { ...base, on: false, why: '本次推送未包含该渠道' }
     }
-    if (ev.push === 'fail') return { ...base, on: false, why: cfgReason || '推送失败' }
-    // 3) 还没出结果（或很老的记录）：按当前配置预览
-    return cfgReason ? { ...base, on: false, why: cfgReason } : { ...base, on: true, why: '已开启' }
+    const cfgReason = cfgBlockReason(id, c, ev, camCh)
+    return cfgReason
+      ? { ...base, on: false, why: cfgReason }
+      : { ...base, on: true, why: '已开启' }
   })
 }
 
@@ -1384,9 +1422,25 @@ const push = useAlertPush(options, {
   notify: (msg) => showToast(msg)
 })
 
-function markPush(key, state, error, channels) {
-  const patch = { push: state, pushError: error || '', pushChannels: channels || '' }
-  events.value = events.value.map((e) => (e.key === key ? { ...e, ...patch } : e))
+function markPush(key, state, error, channels, results) {
+  /*
+   * pushChannels 只增不减：它记录「本次调用过哪些渠道」。
+   * settle 落定时会再发一次（可能只含成功渠道），这里若直接覆盖，
+   * 就会把「已发出但失败/超时」的渠道抹掉，界面又变成"未包含该渠道"。
+   */
+  const patch = { push: state, pushError: error || '' }
+  if (channels) patch.pushChannels = channels
+  if (results) patch.pushResults = results
+  events.value = events.value.map((e) => {
+    if (e.key !== key) return e
+    // 已有渠道列表 + 本次没带新的 → 保留旧的（合并去重）
+    if (!channels && e.pushChannels) {
+      const merged = e.pushChannels.split(/\s*\+\s*/).filter(Boolean)
+      channels = merged.join(' + ')
+      patch.pushChannels = channels
+    }
+    return { ...e, ...patch }
+  })
   dbPatchEvent(key, patch).catch(() => {})
 }
 
@@ -1421,7 +1475,8 @@ function onAlarm(payload) {
     /** 后端事件的推送状态直接展示（本机事件的由调度器回填） */
     push: payload.backendPush || '',
     pushError: payload.backendPushError || '',
-    pushChannels: payload.backendPushChannels || ''
+    pushChannels: payload.backendPushChannels || '',
+    pushResults: payload.backendPushResults || null
   }
 
   appendEvent(record)
@@ -1432,7 +1487,18 @@ function onAlarm(payload) {
 
   notifyDesktop(record)
   flashTitle()
-  pushNotify(record)
+
+  /*
+   * 统计打点（item 111）。
+   * 记在这里而不是事件面板里，是因为这是"事件产生"的唯一入口 ——
+   * 前端检测、后端轮询、通道状态都走 onAlarm，一处覆盖全部。
+   * 通道状态（offline/online）不计入"报警"，单列一类，否则报警数会被断线刷高。
+   */
+  if (isSystemEvent(record)) statChannelState(record.type, record.time)
+  else {
+    statAlarm(record.type, record.time)
+    if (record.type === 'face' || record.faceName) statPersonHit(record.faceName, record.time)
+  }
 
   // 报警自动放大该画面（无人值守时很有用）
   if (options.alert && options.alert.autoZoom && !masked.value) {
@@ -1453,6 +1519,19 @@ function onAlarm(payload) {
    */
   if (backendActive.value && payload.source === 'backend') {
     markPush(record.key, 'ok', '由后端服务推送（本机页面可关）', '后端')
+    /*
+     * 统计打点（item 111）：后端模式下 recordPush 跑在服务端，前端收不到，
+     * 于是"三端推送成功率"会一直是空。这里改从后端事件自带的 pushResults
+     * 还原一次统计 —— 后端模式统计口径与前端模式一致。
+     */
+    const pr = record.pushResults
+    if (pr && typeof pr === 'object') {
+      Object.keys(pr).forEach((name) => {
+        const v = pr[name]
+        const id = name === '钉钉' ? 'ding' : name === '企微' ? 'wecom' : name === 'TG' ? 'tg' : ''
+        if (id) statPush(id, v === 'ok', record.time)
+      })
+    }
     return
   }
 
@@ -1674,9 +1753,35 @@ function openStatusConfig() {
   eventPanelOpen.value = false
 }
 
-function clearEvents() {
-  events.value = []
-  dbClearEvents().catch(() => {})
+/**
+ * 清空事件（item 12）：支持「全部 / 今日 / 昨日」三种范围。
+ * 按 key 精确删除要保留的记录，前端内存与 IndexedDB 同步收敛。
+ * @param {'all'|'today'|'yesterday'} scope
+ */
+function clearEvents(scope = 'all') {
+  if (scope === 'all') {
+    events.value = []
+    todayAlarmCount.value = 0
+    dbClearEvents().catch(() => {})
+    return
+  }
+  // 今日 / 昨日：算出保留区间，把落在区间内的记录删掉，其余留下
+  const now = new Date()
+  const d0 = new Date(now)
+  d0.setHours(0, 0, 0, 0)
+  const t0 = d0.getTime()
+  const from = scope === 'today' ? t0 : t0 - 86400000
+  const to = scope === 'today' ? t0 + 86400000 : t0
+  const inRange = (e) => e.time >= from && e.time < to
+  const removed = events.value.filter(inRange)
+  if (!removed.length) return
+  events.value = events.value.filter((e) => !inRange(e))
+  // 清掉今日记录时，当日累计计数一并回退（用户清空了就当没发生过）
+  if (scope === 'today') {
+    const removedAlarms = removed.filter((e) => !isSystemEvent(e)).length
+    bumpTodayCount(-removedAlarms)
+  }
+  dbDeleteEvents(removed.map((e) => e.key)).catch(() => {})
 }
 
 /* ---------------- 已读 / 未读 ---------------- */
@@ -2039,6 +2144,15 @@ const lastStatusNotify = {}
 let patrolTimer = null
 let repeatTimer = null
 
+/* 临时静默状态：只在设置抽屉打开时轮询（倒计时要走字），关掉就停 */
+watch(settingsOpen, (v) => {
+  if (v) scheduleTempSilentPoll()
+  else {
+    clearInterval(tempSilentTimer)
+    tempSilentTimer = null
+  }
+})
+
 /** 汇总当前所有通道的状态明细 */
 function buildStatusItems() {
   const tiles = {}
@@ -2331,6 +2445,102 @@ async function onRestartSystem() {
   }
 }
 
+/* ---------------- 临时静默（item 112） ---------------- */
+/**
+ * 开启临时静默：settings 传 { hours, channels }。
+ * 后端模式下推送在服务端跑，所以要把指令发到后端去。
+ */
+async function onStartTempSilent({ hours, channels, label, untilAt } = {}) {
+  const chans = Array.isArray(channels) && channels.length ? channels : ['ding', 'wecom', 'tg']
+  const payload = { hours: Number(hours) || 0, channels: chans, label: String(label || ''), untilAt: Number(untilAt) || 0 }
+  if (backendActive.value) {
+    const url = String((options.backend && options.backend.url) || '')
+    if (!url) {
+      showToast('未配置后端地址，无法远程开启（请到检测识别 → 后端检测服务里填写）')
+      return
+    }
+    try {
+      const r = await fetch(`${url}/api/temp-silent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok || !data.ok) {
+        showToast(`开启失败：${data.reason || 'HTTP ' + r.status}`)
+        return
+      }
+      showToast(`后端已进入临时静默（至 ${data.untilLabel || '到期'}）`)
+    } catch (e) {
+      showToast('开启失败：' + ((e && e.message) || '网络错误'))
+    }
+    return
+  }
+  const r = push.startTempSilent(payload.hours, chans, payload.label, payload.untilAt)
+  if (!r.ok) showToast(r.reason || '开启临时静默失败')
+}
+
+/** 结束临时静默；flush=true 时立刻把已收存的报警汇总发出去 */
+async function onEndTempSilent(flush) {
+  if (backendActive.value) {
+    const url = String((options.backend && options.backend.url) || '')
+    if (!url) {
+      showToast('未配置后端地址，请到后端机器操作')
+      return
+    }
+    try {
+      const r = await fetch(`${url}/api/temp-silent`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flush: !!flush })
+      })
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok || !data.ok) showToast(`结束失败：${data.reason || 'HTTP ' + r.status}`)
+      else showToast(flush ? '后端已结束静默并汇总推送' : '后端已结束临时静默')
+    } catch (e) {
+      showToast('结束失败：' + ((e && e.message) || '网络错误'))
+    }
+    return
+  }
+  const r = await push.endTempSilent(!!flush)
+  if (!r || !r.ok) showToast((r && r.reason) || '结束临时静默失败')
+  else showToast(flush ? '已结束静默并汇总推送' : '已结束临时静默')
+}
+
+/** 给设置页回传临时静默状态（后端模式下轮询后端接口） */
+const tempSilentState = ref({ active: false, untilLabel: '', leftLabel: '', channels: [], reason: '' })
+/** 状态轮询定时器：只在设置抽屉打开时跑，1 秒一次足够让倒计时走字 */
+let tempSilentTimer = null
+
+async function refreshTempSilentState() {
+  if (backendActive.value) {
+    const url = String((options.backend && options.backend.url) || '')
+    if (!url) {
+      tempSilentState.value = { active: false }
+      return
+    }
+    try {
+      const r = await fetch(`${url}/api/temp-silent`)
+      const data = await r.json().catch(() => ({}))
+      tempSilentState.value = data && data.active ? data : { active: false }
+    } catch (e) {
+      tempSilentState.value = { active: false }
+    }
+    return
+  }
+  if (typeof push.tempSilentInfo === 'function') {
+    tempSilentState.value = push.tempSilentInfo() || { active: false }
+  }
+}
+
+/** 设置抽屉开合时启停轮询：关着就不必每秒打扰后端 */
+function scheduleTempSilentPoll() {
+  clearInterval(tempSilentTimer)
+  tempSilentTimer = null
+  void refreshTempSilentState()
+  tempSilentTimer = setInterval(refreshTempSilentState, 1000)
+}
+
 function schedulePatrol() {
   clearInterval(patrolTimer)
   patrolTimer = null
@@ -2527,6 +2737,8 @@ onMounted(() => {
   // 历史报警从 IndexedDB 异步载入
   loadHistory().then((list) => {
     events.value = list
+    // 用已载入的记录补齐当日计数（重启后「今日报警」不会从 0 开始）
+    seedTodayCount()
     // 记录就位后再挂手表桥接：首屏推过去的就是完整列表，而不是空数组
     initWatchBridge()
   })
@@ -2567,7 +2779,7 @@ onBeforeUnmount(() => {
   clearTimeout(locateTimer)
   clearInterval(patrolTimer)
   clearInterval(repeatTimer)
-  Object.keys(notifyTimers).forEach((k) => clearTimeout(notifyTimers[k]))
+  clearInterval(tempSilentTimer)
   onFreeUp()
   stopFlashTitle()
   // 解绑可见性监听 + 释放常亮（桌面端要通知主进程停掉 powerSaveBlocker）

@@ -32,8 +32,10 @@
           </template>
           <span class="sep">·</span>
           <span class="stat">今日报警 {{ todayCount }} 次</span>
-          <span class="sep">·</span>
-          <span class="stat" :class="{ alarming: unread > 0 }">未读告警 {{ unread }} 条</span>
+          <!--
+            「未读告警 N 条」已移除（item 110）：右上角「事件」按钮上本来就有
+            未读角标，这里再写一遍是重复信息，而且窄屏下还挤掉后面的时间。
+          -->
           <span class="sep hide-md">·</span>
           <span class="dim hide-md">{{ lastEvent }}</span>
         </p>

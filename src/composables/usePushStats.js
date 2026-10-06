@@ -12,6 +12,10 @@
  *      因为各种原因没发的（静默时段、未勾选、限流）压根走不到这里，也不算数。
  */
 import { reactive } from 'vue'
+// ⚠️ 相对 import 必须带 .js 扩展名：后端用 Node ESM 直接加载这个文件，
+// Node 不会像 Vite 那样帮你补扩展名，写成 './useDailyStats' 会直接
+// ERR_MODULE_NOT_FOUND 起不来（前端 vite build 却是通过的，很容易漏）。
+import { statPush, resetDailyStats } from './useDailyStats.js'
 
 const KEY = 'monitor-wall-push-stats-v1'
 
@@ -105,6 +109,13 @@ export function recordPush(channelId, ok, error = '') {
     pushStats.lastAt = now
     if (!pushStats.firstAt) pushStats.firstAt = now
 
+    /*
+     * 每日统计（item 111）：复用这个唯一的推送结果入口，
+     * 这样「关于系统」的累计数和「统计」页的按天数天然一致，
+     * 不需要在两个地方各记一遍、也不会漏。
+     */
+    statPush(channelId, ok, now)
+
     if (ok) {
       pushStats.ok += 1
       ch.ok += 1
@@ -132,4 +143,6 @@ export function resetPushStats() {
   } catch (e) {
     /* 忽略 */
   }
+  // 累计清零了，按天统计也一起清（否则两边对不上，"统计"页还会留着旧数）
+  resetDailyStats()
 }

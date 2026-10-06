@@ -598,6 +598,21 @@ function statusLine(item) {
   return `${parts.slice(0, 1).join('')} · ${item.name}${parts.length > 1 ? ` · ${parts.slice(1).join(' · ')}` : ''}`
 }
 
+/**
+ * 异常原因文案（item 6）。
+ *
+ * 以前原因只拼在「状态」那一行里（`❌ 异常 · 解码中断：xxx`），
+ * 收到消息的人得自己从状态行里剥出原因。现在拆成独立一行，
+ * 并且把持续异常的前缀「持续异常 · 」也剥掉 —— 那是提醒节奏，不是原因本身。
+ */
+function reasonText(text) {
+  if (!text) return ''
+  return String(text)
+    .replace(/^持续异常\s*·\s*/, '')
+    .replace(/^持续异常\s*/, '')
+    .trim()
+}
+
 /** 监控异常 / 恢复通知 */
 export function buildStatusAlertMessage({ kind, cam, state, text, overview, downtimeMs, cfg, item }) {
   const prefix = (cfg && cfg.titlePrefix) || '【监控报警】'
@@ -617,17 +632,22 @@ export function buildStatusAlertMessage({ kind, cam, state, text, overview, down
     pushTo: [],
     roiText: cam.roi ? `${Math.round(cam.roi.w * 100)}×${Math.round(cam.roi.h * 100)}%` : '全画面'
   }
+  // 异常时单独给出「原因」和「已中断」，比混在状态行里更好读
+  const reason = isDown ? reasonText(text) : ''
+  // 恢复类消息里 text 形如「中断 128 秒」，那是中断时长不是原因
+  const downTag = isDown ? '已中断' : '中断时长'
 
   if (cfg && cfg.msgType === 'text') {
     const lines = [
       isDown ? `${prefix}${cam.name} 出现异常` : `${prefix}${cam.name} 已恢复正常`,
       `时间：${time}`,
-      `状态：${stateLabel(state, text)}`,
+      `状态：${stateLabel(state, isDown ? '' : text)}`,
+      reason ? `异常原因：${reason}` : '',
       `功能开关：${switchText(it)}`,
       techText(it) ? `画面参数：${techText(it)}` : '',
       overview ? `在线情况：${overview}` : '',
       cam.url ? `流地址：${cam.url}` : '',
-      downtimeMs ? `中断时长：${formatDuration(downtimeMs)}` : '',
+      downtimeMs ? `${downTag}：${formatDuration(downtimeMs)}` : '',
       isDown ? '请检查摄像机、网络或流媒体服务。' : ''
     ].filter(Boolean)
     return { title, text: lines.join('\n') }
@@ -637,12 +657,13 @@ export function buildStatusAlertMessage({ kind, cam, state, text, overview, down
     `### ${isDown ? '🔴 监控异常告警' : '🟢 监控恢复正常'}`,
     '',
     `- **通道**：${cam.name}`,
-    `- **状态**：${stateLabel(state, text)}`,
-    `- **时间**：${time}`,
-    `- **功能开关**：${switchText(it)}`
+    `- **状态**：${stateLabel(state, isDown ? '' : text)}`,
+    `- **时间**：${time}`
   ]
+  if (reason) lines.push(`- **异常原因**：${reason}`)
+  lines.push(`- **功能开关**：${switchText(it)}`)
   if (techText(it)) lines.push(`- **画面参数**：${techText(it)}`)
-  if (downtimeMs) lines.push(`- **${isDown ? '已中断' : '中断时长'}**：${formatDuration(downtimeMs)}`)
+  if (downtimeMs) lines.push(`- **${downTag}**：${formatDuration(downtimeMs)}`)
   if (overview) lines.push(`- **在线情况**：${overview}`)
   if (cam.url) lines.push(`- **流地址**：${cam.url}`)
   lines.push('', isDown ? '> 请检查摄像机电源、网络或流媒体服务器状态。' : '> 画面已恢复正常播放。')

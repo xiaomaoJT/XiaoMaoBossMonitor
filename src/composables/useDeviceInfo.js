@@ -63,6 +63,41 @@ function nativePlatform() {
 }
 
 /**
+ * 无浏览器环境（后端 Node 进程）的运行环境描述。
+ *
+ * 后端复用前端的推送代码，但它没有 navigator / window / screen，
+ * 设备信息只能从 Node 自己的 os 模块取 —— 这样通过终端启动后端时，
+ * 推送里的「运行设备」会显示成「后端服务 · Node 22 · Linux · 10.0.0.12」，
+ * 而不是让 UA 解析兜底成「未知浏览器 · 未知系统」。
+ *
+ * os 模块是 Node 内置的；万一拿不到（极老的运行时）也不影响推送，静默降级即可。
+ */
+function serverRuntime(app, version) {
+  const parts = []
+  try {
+    // 只用 process 上就有的字段，不 require('node:os')：
+    // 本文件是 ESM（require 不存在），而且它同时被浏览器打包，静态引入 node 模块会直接构建失败。
+    if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+      parts.push(`Node ${process.versions.node.split('.')[0]}`)
+      const p = process.platform
+      const osName =
+        p === 'darwin' ? 'macOS' : p === 'win32' ? 'Windows' : p === 'linux' ? 'Linux' : p || ''
+      if (osName) parts.push(osName)
+      if (process.arch) parts.push(process.arch)
+    }
+  } catch (e) {
+    /* 拿不到就只报一个笼统的服务端标识，不影响推送 */
+  }
+  const detail = parts.join(' · ')
+  return {
+    kind: 'server',
+    label: '后端服务',
+    detail,
+    line: `后端服务${detail ? ` · ${detail}` : ''}`
+  }
+}
+
+/**
  * 识别当前运行环境。
  * @param {object} [brand] 品牌信息，用于拼桌面端名称
  * @returns {{kind:string, label:string, detail:string, line:string}}
@@ -71,6 +106,14 @@ export function detectRuntime(brand) {
   const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || ''
   const app = (brand && brand.fullName) || 'BossMonitor'
   const version = (brand && brand.version) || ''
+
+  /*
+   * ⚠️ 后端（Node）没有 navigator / window / screen，ua 恒为空串，
+   * 往下走会一路落到「未知浏览器 / 未知系统」。而通过终端 `npm run server`
+   * 启动恰恰是最常见的部署方式，推送里却显示「未知浏览器 · 未知系统」，
+   * 收信人根本判断不出消息来自哪台机器 —— 这里显式识别为「后端服务」。
+   */
+  if (!ua) return serverRuntime(app, version)
 
   const isElectron = /Electron\//.test(ua)
   const native = nativePlatform()

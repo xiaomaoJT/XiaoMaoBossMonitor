@@ -1,6 +1,6 @@
 <template>
   <transition name="slide-up">
-    <section class="event-panel" v-if="open">
+    <section class="event-panel" v-if="open" :style="posStyle" :data-pos="pos">
       <header>
         <span class="title">
           <span class="live" :class="{ active: hasNew }"></span>
@@ -9,7 +9,31 @@
         </span>
         <span class="spacer"></span>
         <button class="btn small" @click="emit('export')">导出</button>
-        <button class="btn small danger" @click="emit('clear')">清空</button>
+        <!--
+          清空带范围（item 12）：全部 / 今日 / 昨日。
+          直接一个「清空」按钮把历史全删掉太危险 —— 加个下拉让用户明确选范围，
+          选「今日 / 昨日」时按钮文案也跟着变（清空今日 / 清空昨日），所见即所得。
+        -->
+        <div class="clear-wrap">
+          <button class="btn small danger" @click.stop="clearOpen = !clearOpen">
+            {{ clearLabel }}
+            <svg class="caret" viewBox="0 0 24 24" width="11" height="11">
+              <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 9.5l6 6 6-6" />
+            </svg>
+          </button>
+          <div class="clear-pop" v-if="clearOpen">
+            <button
+              v-for="c in CLEAR_SCOPES"
+              :key="c.key"
+              class="cp-item"
+              :class="{ on: clearScope === c.key, danger: c.key === 'all' }"
+              @click="pickClear(c.key)"
+            >
+              {{ c.label }}
+              <em>{{ c.count }}</em>
+            </button>
+          </div>
+        </div>
         <!--
           桌面端是右下角浮层，用横线表示「收起」；手机端整屏铺满（见 CSS 640px 断点），
           横线会让人误以为是收起面板，切到明确的 X。两个图标按断点二选一显示。
@@ -24,24 +48,49 @@
         </button>
       </header>
 
-      <!-- 统计 + 已读管理 -->
+      <!--
+        统计 + 已读管理。
+        四个数字以前只是 <span>（纯展示），点了没反应 —— 用户以为坏了。
+        其实「今日/历史/未读/已读」天然就是四种筛选口径，直接做成可点的切换：
+          今日 → 时间范围跳到今天；历史 → 全部；未读/已读 → 在当前时间范围上叠加读状态过滤。
+      -->
       <div class="stats">
-        <span class="st">
+        <button
+          class="st st-btn"
+          :class="{ on: statPick === 'today' }"
+          title="只看今天发生的报警"
+          @click="pickStat('today')"
+        >
           <i>今日报警</i>
           <b>{{ todayCount }}</b>
-        </span>
-        <span class="st">
+        </button>
+        <button
+          class="st st-btn"
+          :class="{ on: statPick === 'history' }"
+          title="看全部历史报警"
+          @click="pickStat('history')"
+        >
           <i>历史报警</i>
           <b>{{ events.length }}</b>
-        </span>
-        <span class="st unread" :class="{ hot: unreadCount > 0 }">
+        </button>
+        <button
+          class="st st-btn unread"
+          :class="{ hot: unreadCount > 0, on: statPick === 'unread' }"
+          title="只看还没读的报警"
+          @click="pickStat('unread')"
+        >
           <i>未读</i>
           <b>{{ unreadCount }}</b>
-        </span>
-        <span class="st read">
+        </button>
+        <button
+          class="st st-btn read"
+          :class="{ on: statPick === 'read' }"
+          title="只看已读的报警"
+          @click="pickStat('read')"
+        >
           <i>已读</i>
           <b>{{ readCount }}</b>
-        </span>
+        </button>
         <span class="spacer"></span>
         <button class="btn small" :disabled="!unreadCount" @click="emit('mark-all-read')">全部已读</button>
       </div>
@@ -54,6 +103,7 @@
             :key="f.key"
             class="seg-btn"
             :class="{ on: filter === f.key }"
+            :title="f.title"
             @click="filter = f.key"
           >
             {{ f.label }}
@@ -133,6 +183,39 @@
         <input class="field mini" type="datetime-local" v-model="customFrom" />
         <span class="tilde">→</span>
         <input class="field mini" type="datetime-local" v-model="customTo" />
+      </div>
+
+      <!--
+        运行异常（item 9）—— 独立分区，刻意不放进上面的类型筛选里。
+        这类条目不是"报警"：Array buffer allocation failed 这类运行期异常
+        既不属于人形/人脸任何一类，也不该占未读角标、更不该混进今日报警计数。
+        放在自己的折叠区里，既能查得到，又不污染报警统计。
+      -->
+      <div class="err-zone" v-if="errorLog.length">
+        <button class="ez-head" @click="errZoneOpen = !errZoneOpen">
+          <span class="ez-dot"></span>
+          <b>运行异常</b>
+          <em>{{ errorLog.length }} 条</em>
+          <span class="spacer"></span>
+          <span class="ez-hint">不计入报警统计</span>
+          <svg class="caret" :class="{ up: errZoneOpen }" viewBox="0 0 24 24" width="12" height="12">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M6 9.5l6 6 6-6"
+            />
+          </svg>
+        </button>
+        <ul class="ez-list" v-if="errZoneOpen">
+          <li v-for="(it, i) in errorLog" :key="i">
+            <span class="ez-time">{{ errTime(it.time) }}</span>
+            <span class="ez-src">{{ it.source }}</span>
+            <span class="ez-msg" :title="it.stack || it.message">{{ it.message }}</span>
+          </li>
+        </ul>
       </div>
 
       <div class="list" v-if="filteredEvents.length">
@@ -340,27 +423,35 @@
                 <dd>
                   <div class="ch-list">
                     <!--
-                      标签上写「实际结果」而不是「配置开关」：
-                      推到了就显示 已送达，没轮到这个渠道才亮 off。
-                      以前只认 c.on（配置判定），导致「三条都推送成功了、这里全是 off」。
+                      三层状态（与 App.vue pushStateOf 对应）：
+                        called  —— 本次推送调用过这个渠道（不等回调，发起即置位）
+                        state   —— 回执带来的最终结果 ok / fail / timeout
+                      只要调用过就亮「已推送」，有回执再补成功/失败/超时。
                     -->
                     <span
                       v-for="c in pushRows"
                       :key="c.id"
                       class="ch-tag"
-                      :class="{ on: c.on || c.sent, silenced: c.silenced }"
+                      :class="{
+                        on: c.on || c.called || c.sent,
+                        sent: c.called,
+                        bad: c.state === 'fail',
+                        warn: c.state === 'timeout',
+                        pending: c.state === 'sending',
+                        silenced: c.silenced
+                      }"
                       :title="c.why"
                     >
                       <i class="ch-dot"></i>
                       {{ c.label }}
-                      <em>{{ c.silenced ? '待汇总' : c.sent ? '已送达' : c.on ? 'on' : 'off' }}</em>
+                      <em>{{ chText(c) }}</em>
                     </span>
                     <span class="ch-note" v-if="!pushRows.length">
                       该通道已关闭「推送总开关」，三个渠道都不会推送
                     </span>
                   </div>
-                  <ul class="ch-why" v-if="pushRows.some((c) => !c.sent)">
-                    <li v-for="c in pushRows.filter((x) => !x.sent)" :key="c.id">
+                  <ul class="ch-why" v-if="pushRows.some((c) => !c.called && !c.silenced)">
+                    <li v-for="c in pushRows.filter((x) => !x.called && !x.silenced)" :key="c.id">
                       {{ c.label }}：{{ c.why }}
                     </li>
                   </ul>
@@ -451,7 +542,7 @@
   </Teleport>
 </template>
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { alarmDetail } from '../composables/useAlarmText'
 
 const props = defineProps({
@@ -460,7 +551,15 @@ const props = defineProps({
   /** 按 key 从 IndexedDB 取高清原图的函数（由 App 注入） */
   loadShot: { type: Function, default: null },
   /** 解析某条事件在三个渠道上的推送开关状态（由 App 注入） */
-  pushState: { type: Function, default: null }
+  pushState: { type: Function, default: null },
+  /** 全局运行期错误留档（由 App 注入 useErrorLog 的 errorLog） */
+  errorLog: { type: Array, default: () => [] },
+  /**
+   * 停靠位置（item 113）：'bl' 左下（默认）| 'br' 右下 | 'tl' 左上 | 'tr' 右上。
+   * 由 App 从 options.ui.eventPanel 读出来传入，偏移量同样可配。
+   */
+  pos: { type: String, default: 'bl' },
+  posOffset: { type: Number, default: 14 }
 })
 
 const emit = defineEmits([
@@ -602,8 +701,73 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('click', onDocClick)
+  clearInterval(tickTimer)
   endPan()
 })
+
+/* 墙钟心跳：只在面板打开时跑，面板关掉就不空转定时器 */
+watch(
+  () => props.open,
+  (v) => {
+    clearInterval(tickTimer)
+    tickTimer = null
+    if (v) {
+      nowTick.value = Date.now()
+      tickTimer = setInterval(() => {
+        nowTick.value = Date.now()
+      }, 3000)
+    }
+  }
+)
+
+/* ==================== 运行异常分区（item 9） ==================== */
+
+/** 折叠状态：默认收起，别一打开面板就是一屏报错 */
+const errZoneOpen = ref(false)
+
+/** 错误条目的时间显示：HH:MM:SS */
+function errTime(ts) {
+  const d = new Date(ts)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/* ==================== 清空范围（item 12） ==================== */
+
+/** 清空范围下拉 */
+const clearOpen = ref(false)
+const clearScope = ref('today')
+
+const startOfToday = () => {
+  const d = new Date()
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+/** 各范围当前有多少条（跟着时间心跳走，跨零点会自动更新） */
+const CLEAR_SCOPES = computed(() => {
+  const t0 = startOfToday()
+  const now = nowTick.value
+  const DAY = 86400000
+  const inRange = (from, to) =>
+    props.events.filter((e) => e.time >= from && e.time < to).length
+  return [
+    { key: 'today', label: '清空今日', count: inRange(t0, now + 1) },
+    { key: 'yesterday', label: '清空昨日', count: inRange(t0 - DAY, t0) },
+    { key: 'all', label: '清空全部', count: props.events.length }
+  ]
+})
+
+const clearLabel = computed(() => {
+  const hit = CLEAR_SCOPES.value.find((c) => c.key === clearScope.value)
+  return hit ? hit.label : '清空'
+})
+
+function pickClear(key) {
+  clearScope.value = key
+  clearOpen.value = false
+  emit('clear', key)
+}
 
 /* ==================== 统计 ==================== */
 
@@ -641,6 +805,21 @@ const RANGES = [
   { key: 'all', label: '全部' }
 ]
 
+/**
+ * 墙钟心跳。
+ *
+ * ⚠️ 这条是为了修「事件列表打开时不刷新」而加的：
+ * rangeBounds 里用了 Date.now() 来算「今天 / 近 N 小时」的上界，
+ * 但 Date.now() **不是响应式依赖** —— 对 range='today' 来说这个 computed
+ * 只有一个依赖（range 本身），所以首次求值后 `[今日零点, now+1]` 就被永久缓存。
+ * 之后新事件的 time 一定大于那个冻住的 now，于是 `ev.time >= to` 判假、
+ * 被过滤掉，列表看着就是「不更新」。定时打一下这个 ref，强制重算上界。
+ *
+ * 只在面板打开时走（省得后台空转），3 秒一次足够 —— 报警再密也不会差 3 秒。
+ */
+const nowTick = ref(Date.now())
+let tickTimer = null
+
 const range = ref('today')
 /** 按小时过滤：空数组 = 全天；只有在「今天 / 昨天」这类整天范围下才有意义 */
 const hours = ref([])
@@ -659,7 +838,8 @@ function toTs(localValue) {
 }
 
 const rangeBounds = computed(() => {
-  const now = Date.now()
+  // 依赖 nowTick：让它跟着心跳重算（原因见 nowTick 的注释）
+  const now = nowTick.value
   const t0 = startOfTodayTs()
   switch (range.value) {
     case 'today':
@@ -723,11 +903,15 @@ function toggleHoursRow() {
   showHours.value = !showHours.value
 }
 
-/** 点空白处收起时间范围下拉 */
+/** 点空白处收起浮层（时间范围 + 清空范围） */
 function onDocClick(e) {
-  if (!rangeOpen.value) return
   const el = e.target
-  if (el && el.closest && el.closest('.range-wrap')) return
+  if (el && el.closest) {
+    if (clearOpen.value && !el.closest('.clear-wrap')) clearOpen.value = false
+    if (rangeOpen.value && !el.closest('.range-wrap')) rangeOpen.value = false
+    return
+  }
+  clearOpen.value = false
   rangeOpen.value = false
 }
 
@@ -743,21 +927,57 @@ const hh = (n) => String(n).padStart(2, '0')
 /* ==================== 类型筛选 ==================== */
 
 const filter = ref('all')
+/** 顶部统计块选中的口径：'' | today | history | unread | read */
+const statPick = ref('')
 
+/*
+ * 类型筛选标签（item 3）。
+ * 文案压缩到 1~2 字：「通道状态」→「通道」。窄屏下这一排原本会因为
+ * 「通道状态」四个字把整行挤到换行、字样错位，现在最长也就两字。
+ * 完整含义放到 title 上，鼠标悬浮可见。
+ */
 const FILTERS = [
-  { key: 'all', label: '全部' },
-  { key: 'person', label: '人形' },
-  { key: 'face', label: '人脸' },
-  { key: 'zone', label: '区域' },
-  { key: 'pose', label: '姿态' },
-  { key: 'motion', label: '移动' },
-  { key: 'count', label: '计数' },
-  { key: 'system', label: '通道状态' }
+  { key: 'all', label: '全部', title: '全部报警（不含通道状态）' },
+  { key: 'person', label: '人形', title: '人形检测报警' },
+  { key: 'face', label: '人脸', title: '人脸识别报警' },
+  { key: 'zone', label: '区域', title: '区域规则报警（走入 / 走出 / 徘徊）' },
+  { key: 'pose', label: '姿态', title: '姿态识别报警' },
+  { key: 'motion', label: '移动', title: '移动检测报警' },
+  { key: 'count', label: '计数', title: '人员计数报警' },
+  { key: 'system', label: '通道', title: '通道状态消息（断线 / 恢复）' }
 ]
 
-const filteredEvents = computed(() =>
-  rangeEvents.value.filter((ev) => matches(ev, filter.value))
-)
+const filteredEvents = computed(() => {
+  let list = rangeEvents.value.filter((ev) => matches(ev, filter.value))
+  // 读状态筛选（顶部「未读 / 已读」）：叠加在时间范围 + 类型之上
+  if (statPick.value === 'unread') list = list.filter((ev) => !ev.read && !isSystemEvent(ev))
+  else if (statPick.value === 'read') list = list.filter((ev) => !!ev.read)
+  return list
+})
+
+/**
+ * 顶部四个统计块的点击行为。
+ * 'today' / 'history' 本质是时间范围，直接改 range；
+ * 'unread' / 'read' 是读状态，单独记在 statPick 里（叠加在当前时间范围之上）。
+ */
+function pickStat(key) {
+  if (statPick.value === key) {
+    // 再点一次同一个 = 取消这个筛选
+    statPick.value = ''
+    return
+  }
+  statPick.value = key
+  if (key === 'today') {
+    range.value = 'today'
+    hours.value = []
+    showHours.value = false
+  } else if (key === 'history') {
+    range.value = 'all'
+    hours.value = []
+    showHours.value = false
+  }
+  // 未读/已读只改 statPick，时间范围保持用户当前选择
+}
 
 function matches(ev, key) {
   /*
@@ -805,6 +1025,31 @@ function typeLabel(ev) {
 }
 
 const hasNew = computed(() => props.events.length > 0 && props.events[0].time > Date.now() - 6000)
+
+/**
+ * 停靠样式（item 113）。
+ * 四个角各写一套 left/right + top/bottom；只固定**一个横向**和一个纵向，
+ * 另一个方向交给 auto —— 这样面板高度变化时不会两头都被钉死。
+ */
+const posStyle = computed(() => {
+  const p = ['bl', 'br', 'tl', 'tr'].includes(props.pos) ? props.pos : 'bl'
+  const gap = Number(props.posOffset) || 0
+  const style = { top: 'auto', bottom: 'auto', left: 'auto', right: 'auto' }
+  if (p === 'bl') {
+    style.left = `${gap}px`
+    style.bottom = `${gap}px`
+  } else if (p === 'br') {
+    style.right = `${gap}px`
+    style.bottom = `${gap}px`
+  } else if (p === 'tl') {
+    style.left = `${gap}px`
+    style.top = `${gap}px`
+  } else {
+    style.right = `${gap}px`
+    style.top = `${gap}px`
+  }
+  return style
+})
 
 function formatTime(ts) {
   const d = new Date(ts)
@@ -877,9 +1122,32 @@ const pushRows = computed(() => {
     on: camCh ? camCh[id] !== false : true,
     // 兜底也要认实际结果，别再一律写 false 让标签全亮 off
     sent: pushed.includes(label),
+    called: pushed.includes(label),
     why: camCh && camCh[id] === false ? '该通道未勾选此渠道' : '已开启'
   }))
 })
+
+/**
+ * 渠道标签上的那一句短文案。
+ * 优先级：静默收存 → 回执结果（成功/失败/超时）→ 只要调用过就写「已推送」→ 才轮到配置态。
+ */
+function chText(c) {
+  if (c.silenced) return '待汇总'
+  switch (c.state) {
+    case 'ok':
+      return '已送达'
+    case 'fail':
+      return '推送失败'
+    case 'timeout':
+      return '结果未知'
+    case 'sending':
+      return '推送中'
+    default:
+      break
+  }
+  if (c.called || c.sent) return '已推送'
+  return c.on ? 'on' : 'off'
+}
 
 const pushResultText = computed(() => {
   const ev = detail.value
@@ -899,10 +1167,18 @@ const pushResultClass = computed(() => {
 </script>
 
 <style scoped>
+/*
+ * 面板停靠（item 113）
+ * ----------------------------------------------------------------------------
+ * 原来写死 right:14px; bottom:14px（右下角），但用户的实际场景是
+ * 顶部有顶栏、左侧有画面，事件面板默认落在**左下角**更顺手
+ * （不挡顶栏、离画面主体远、也不和右下角的小控件打架）。
+ *
+ * 现在改为 data-pos 驱动四个角，运行时由 JS 写 style（left/right/top/bottom），
+ * 用户可以在设置里选角 + 调偏移。选择结果存 options.ui.eventPanel。
+ */
 .event-panel {
   position: fixed;
-  right: 14px;
-  bottom: 14px;
   z-index: 95;
   width: 420px;
   max-width: 94vw;
@@ -1430,6 +1706,55 @@ header {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--ok) 18%, transparent);
 }
 
+/*
+ * 推送回执的细分状态（item 1）。
+ * 以前只有 on / off 两档，「已发出但失败」和「压根没发」长得一样，
+ * 现在拆开：蓝=已推送待回执、绿=已送达、红=推送失败、橙=结果未知。
+ */
+.ch-tag.pending {
+  color: #a8c8f0;
+  border-color: color-mix(in srgb, #4d8ef7 45%, transparent);
+  background: color-mix(in srgb, #4d8ef7 12%, transparent);
+}
+
+.ch-tag.pending .ch-dot {
+  background: #4d8ef7;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #4d8ef7 20%, transparent);
+  animation: ch-pulse 1.1s ease-in-out infinite;
+}
+
+.ch-tag.bad {
+  color: #ffc0c0;
+  border-color: color-mix(in srgb, var(--err) 50%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+.ch-tag.bad .ch-dot {
+  background: var(--err);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 20%, transparent);
+}
+
+.ch-tag.warn {
+  color: #ffd9a3;
+  border-color: color-mix(in srgb, #f5a623 45%, transparent);
+  background: color-mix(in srgb, #f5a623 12%, transparent);
+}
+
+.ch-tag.warn .ch-dot {
+  background: #f5a623;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #f5a623 20%, transparent);
+}
+
+@keyframes ch-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .ch-note {
   font-size: 11.5px;
   color: var(--text-dim-2);
@@ -1694,6 +2019,222 @@ header {
   color: #7fd6a3;
 }
 
+/*
+ * 统计块改成可点按钮（item 2）。
+ * 关键是要**完全继承 .st 的外观**：继承 .st 的盒模型后再把 button 的默认底/边框清掉，
+ * 否则 UA 默认样式（灰底、圆角、字体）会漏出来，看起来跟原来不一样。
+ * 选中态 .on 用高亮边框 + 轻微提亮，和 filterbar 的 seg-btn.on 保持同一套语言。
+ */
+.st-btn {
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.st-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+
+.st-btn:active {
+  transform: translateY(1px);
+}
+
+.st-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 1px;
+}
+
+.st-btn.on {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  background: color-mix(in srgb, var(--accent) 15%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.st-btn.on i {
+  color: var(--accent-text);
+}
+
+/* 未读 + 选中：两者叠加时以未读的红色为重（红色本身就是"待处理"的信号） */
+.st-btn.unread.hot.on {
+  border-color: color-mix(in srgb, var(--err) 65%, transparent);
+  background: color-mix(in srgb, var(--err) 15%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--err) 30%, transparent);
+}
+
+/* ---------- 运行异常分区（item 9） ---------- */
+.err-zone {
+  margin: 8px 10px 0;
+  border: 1px solid color-mix(in srgb, var(--err) 32%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--err) 7%, transparent);
+  overflow: hidden;
+}
+
+.ez-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+
+.ez-head:hover {
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.ez-head b {
+  color: var(--err-text);
+  font-weight: 600;
+}
+
+.ez-head em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--err-text);
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ez-hint {
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+}
+
+.ez-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--err);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 20%, transparent);
+  flex: 0 0 auto;
+}
+
+.ez-head .caret {
+  margin-left: 2px;
+  transition: transform 0.15s ease;
+  opacity: 0.7;
+}
+
+.ez-head .caret.up {
+  transform: rotate(180deg);
+}
+
+.ez-list {
+  margin: 0;
+  padding: 0 10px 8px;
+  list-style: none;
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.ez-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  border-top: 1px solid color-mix(in srgb, var(--err) 14%, transparent);
+}
+
+.ez-time {
+  flex: 0 0 auto;
+  color: var(--text-dim-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.ez-src {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: #ffb27f;
+  background: color-mix(in srgb, #ff8a3d 14%, transparent);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+.ez-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-soft, var(--text-dim));
+}
+
+/* ---------- 清空范围下拉（item 12） ---------- */
+.clear-wrap {
+  position: relative;
+}
+
+.clear-wrap .caret {
+  margin-left: 3px;
+  opacity: 0.75;
+}
+
+.clear-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  min-width: 148px;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--pop-bg, var(--panel-deep));
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+.cp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.cp-item:hover {
+  color: var(--text);
+  background: var(--pop-hover, color-mix(in srgb, var(--accent) 12%, transparent));
+}
+
+.cp-item.danger:hover {
+  color: var(--err-text);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+}
+
+.cp-item.on {
+  color: var(--accent-text-strong, var(--accent-text));
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.cp-item em {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- 筛选栏（类型直接可见 + 时间范围收进下拉） ---------- */
 .filterbar {
   display: flex;
@@ -1703,6 +2244,14 @@ header {
   flex-wrap: wrap;
 }
 
+/*
+ * 类型筛选这一排（item 3）。
+ * 以前八个标签在窄屏下会 flex-wrap 换行，行的高度被撑开、字样上下错位。
+ * 现在改成「永不换行 + 放不下就横向滚动」：
+ *   white-space: nowrap 保证「人形」「计数」不会被拆成两行；
+ *   overflow-x: auto 让整排可以滑动查看，视觉上始终是一行。
+ * 配合 FILTERS 里压缩过的 1~2 字文案，绝大多数屏宽下无需滚动。
+ */
 .seg {
   display: inline-flex;
   align-items: center;
@@ -1710,12 +2259,22 @@ header {
   border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--panel);
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.seg::-webkit-scrollbar {
+  display: none;
 }
 
 .seg-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex: 0 0 auto;
   height: 22px;
   padding: 0 8px;
   border: 0;
@@ -1724,6 +2283,7 @@ header {
   color: var(--text-dim);
   background: transparent;
   cursor: pointer;
+  white-space: nowrap;
   transition: all 0.14s ease;
 }
 
