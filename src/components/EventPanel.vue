@@ -603,6 +603,14 @@ const props = defineProps({
   /** 全局运行期错误留档（由 App 注入 useErrorLog 的 errorLog） */
   errorLog: { type: Array, default: () => [] },
   /**
+   * 「今日报警」当日累计数（由 App 注入 todayAlarmCount）。
+   *
+   * ⚠️ 必须用 App 传进来的这个**持久化计数**，不要在面板里自己数列表：
+   * 列表会被 maxEvents 淘汰、也会被「清空」清掉，而顶部顶栏显示的就是 App 那个数。
+   * 自己数的话，面板清空后立刻变 0、顶栏却还留着，两处对不上。
+   */
+  todayCount: { type: Number, default: null },
+  /**
    * 停靠位置（item 113）：'bl' 左下（默认）| 'br' 右下 | 'tl' 左上 | 'tr' 右上。
    * 由 App 从 options.ui.eventPanel 读出来传入，偏移量同样可配。
    */
@@ -828,8 +836,12 @@ function startOfTodayTs() {
 /** 通道状态消息（断线 / 恢复）：不算报警、不占未读角标，只在「通道状态」标签里看 */
 const isSystemEvent = (ev) => ev && (ev.type === 'offline' || ev.type === 'online')
 
-/** 今日报警数（不含通道状态这类系统消息，只算真正的报警） */
+/**
+ * 今日报警数（不含通道状态这类系统消息，只算真正的报警）。
+ * 优先用 App 注入的当日累计计数；没注入时才退回按列表现算（独立使用本组件的兜底）。
+ */
 const todayCount = computed(() => {
+  if (props.todayCount !== null && props.todayCount !== undefined) return props.todayCount
   const t0 = startOfTodayTs()
   return props.events.filter((e) => e.time >= t0 && !isSystemEvent(e)).length
 })

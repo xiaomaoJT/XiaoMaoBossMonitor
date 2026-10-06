@@ -131,6 +131,7 @@
       :load-shot="loadEventShot"
       :push-state="pushStateOf"
       :error-log="errorLog"
+      :today-count="todayCount"
       :pos="uiOptions.eventPanel"
       :pos-offset="uiOptions.eventPanelGap"
       @close="eventPanelOpen = false"
@@ -230,9 +231,9 @@ import {
   normalizeCameraChannels
 } from './config/defaults'
 import { useAlertPush } from './composables/useAlertPush'
-import { dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
+import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
 import NotifyStack from './components/NotifyStack.vue'
-import { statAlarm, statChannelState, statPersonHit, statPush } from './composables/useDailyStats'
+import { dayKey, dailyStats, statAlarm, statChannelState, statPersonHit, statPush } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
   buildStatusAlertMessage,
@@ -651,7 +652,24 @@ function seedTodayCount() {
   if (fromList > todayAlarmCount.value) todayAlarmCount.value = fromList
 }
 
-const todayCount = computed(() => todayAlarmCount.value)
+/*
+ * 「今日报警」对外暴露的值。
+ *
+ * ⚠️ 优先读 **useDailyStats 里的持久化计数**（localStorage，每次报警 statAlarm 就写一次），
+ * 而不是下面那个内存 ref：
+ *   - 内存 ref 只从「当前列表里还留着的记录」补齐（见 seedTodayCount），
+ *     而列表会被 maxEvents 淘汰、也会被用户「清空」——
+ *     一清空就归零，等于把「今天一共报了多少次」这个事实抹掉了，
+ *     顶栏和设置页的数字会一起失真。
+ *   - 持久化那份与列表彻底解耦：清空事件不影响它，刷新页面也在。
+ * 读不到（localStorage 被清 / 首次运行还没记过）时退回内存 ref 兜底。
+ */
+const todayCount = computed(() => {
+  const d = dailyStats.days[dayKey()]
+  const persisted = d && Number(d.alarms)
+  if (Number.isFinite(persisted) && persisted > 0) return persisted
+  return todayAlarmCount.value
+})
 const lastEventAt = computed(() => (events.value.length ? events.value[0].time : 0))
 const lastEventText = computed(() => {
   const e = events.value[0]
@@ -1857,12 +1875,25 @@ function openStatusConfig() {
 /**
  * 清空事件（item 12）：支持「全部 / 今日 / 昨日」三种范围。
  * 按 key 精确删除要保留的记录，前端内存与 IndexedDB 同步收敛。
+ *
+ * ⚠️ 清的是**事件列表**，不是「今日报警」这类当日累计计数。
+ * 用户明确要求：清空后顶部的「今日报警 N 次」要留着 ——
+ * 那是「今天一共报了多少次」的事实统计，清一次列表就把当日战绩抹成 0，
+ * 既不合逻辑，也会让人以为监控今天一直没响过（明明刚清掉了几十条）。
+ * todayAlarmCount 与列表淘汰本就解耦（见它的注释），这里保持一致。
+ *
+ * 「通道」的掉线/恢复记录本来就在 events 里（isSystemEvent），
+ * 随列表一起清掉；「后台异常」来自 useErrorLog、不在 events 里，要单独清。
+ *
  * @param {'all'|'today'|'yesterday'} scope
  */
 function clearEvents(scope = 'all') {
+  // 后台异常是本次运行攒下来的错误，不带日期 —— 清「全部 / 今日」时一并清掉；
+  // 清「昨日」不动它（那些错误未必是昨天的，清了会误伤今天的状态）
+  if (scope === 'all' || scope === 'today') clearErrorLog()
+
   if (scope === 'all') {
     events.value = []
-    todayAlarmCount.value = 0
     dbClearEvents().catch(() => {})
     return
   }
@@ -1877,11 +1908,7 @@ function clearEvents(scope = 'all') {
   const removed = events.value.filter(inRange)
   if (!removed.length) return
   events.value = events.value.filter((e) => !inRange(e))
-  // 清掉今日记录时，当日累计计数一并回退（用户清空了就当没发生过）
-  if (scope === 'today') {
-    const removedAlarms = removed.filter((e) => !isSystemEvent(e)).length
-    bumpTodayCount(-removedAlarms)
-  }
+  // todayAlarmCount 刻意不动（见上方注释）
   dbDeleteEvents(removed.map((e) => e.key)).catch(() => {})
 }
 
