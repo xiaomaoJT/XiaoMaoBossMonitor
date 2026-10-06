@@ -320,6 +320,67 @@
           </p>
         </section>
 
+        <!-- ==================== 系统维护 ==================== -->
+        <section class="block" v-show="tab === 'maintain'">
+          <h3>流自愈（持续异常自动恢复）</h3>
+          <div class="opt col">
+            <span>
+              <strong>持续异常自动升级为系统重启</strong>
+              <em>被监控通道「解码中断 / 网络断连」后后端会先无限退避重连；若仍长时间起不来，超过阈值即自动重启系统彻底恢复（对应「持续异常 · 解码中断」这类告警）</em>
+            </span>
+            <label class="opt-inline">
+              <span class="switch" :class="{ on: opts.streamRecovery.enabled }" @click="opts.streamRecovery.enabled = !opts.streamRecovery.enabled"></span>
+              <span class="muted">{{ opts.streamRecovery.enabled ? '已开启' : '已关闭' }}</span>
+            </label>
+          </div>
+          <div class="opt" v-if="opts.streamRecovery.enabled">
+            <span>
+              <strong>触发阈值</strong>
+              <em>被监控通道持续异常多少分钟后触发系统重启（默认 30 分钟）</em>
+            </span>
+            <div class="time-row">
+              <input class="field mini" type="number" min="1" max="1440" step="1" v-model.number="opts.streamRecovery.restartSystemAfterMin" />
+              <span class="tilde">分钟</span>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <h3>定时重启系统</h3>
+          <div class="opt col">
+            <span>
+              <strong>按「天 + 小时」定时重启</strong>
+              <em>7x24 值守容易积累内存泄漏 / 解码器卡死，到间隔在后端点自愈式重启（重新拉起所有流与前端服务）。重启前会先推送一条通知</em>
+            </span>
+            <label class="opt-inline">
+              <span class="switch" :class="{ on: opts.autoRestart.enabled }" @click="opts.autoRestart.enabled = !opts.autoRestart.enabled"></span>
+              <span class="muted">{{ opts.autoRestart.enabled ? '已开启' : '已关闭' }}</span>
+            </label>
+          </div>
+          <div class="opt" v-if="opts.autoRestart.enabled">
+            <span>
+              <strong>重启间隔</strong>
+              <em>每过「N 天 + M 小时」重启一次（例如 1 天 0 小时 = 每天重启；0 天 6 小时 = 每 6 小时重启）</em>
+            </span>
+            <div class="time-row">
+              <input class="field mini" type="number" min="0" max="365" step="1" v-model.number="opts.autoRestart.days" />
+              <span class="tilde">天</span>
+              <input class="field mini" type="number" min="0" max="23" step="1" v-model.number="opts.autoRestart.hours" />
+              <span class="tilde">小时</span>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="opt col">
+            <span>
+              <strong>立即重启系统</strong>
+              <em>桌面端走原生重启；浏览器 / 后端模式下向后端发重启请求（后端进程自愈式重启）</em>
+            </span>
+            <button class="btn tiny danger" @click="restartSystemNow">立即重启</button>
+          </div>
+        </section>
+
         <!-- ==================== 关于系统 ==================== -->
         <section class="block" v-show="tab === 'about'">
           <AboutSystem
@@ -383,14 +444,7 @@
               <em>不自动播放的话，每路都要点击画面才加载（最省资源）；选了精确路数后用右侧数字框自己填</em>
             </span>
             <div class="num-field">
-              <select class="field mini" :value="autoCountCustom ? 'custom' : opts.autoPlayCount" @change="onAutoCountChange">
-                <option :value="0">不自动播放</option>
-                <option :value="1">仅第一路</option>
-                <option :value="2">前 2 路</option>
-                <option :value="4">前 4 路</option>
-                <option :value="99">全部</option>
-                <option value="custom">自定义…</option>
-              </select>
+              <SelectField cls="mini" :model-value="autoCountCustom ? 'custom' : opts.autoPlayCount" :options="OPT_AUTO_PLAY" @update:model-value="onAutoCountSelect" />
               <input
                 v-if="autoCountCustom"
                 class="field mini num"
@@ -409,15 +463,7 @@
               <em>H.265 软解极吃 CPU，超限画面进入省流模式（0 = 不限制）</em>
             </span>
             <div class="num-field">
-              <select class="field mini" :value="maxDecodeCustom ? 'custom' : opts.maxDecode" @change="onMaxDecodeChange">
-                <option :value="1">1 路</option>
-                <option :value="2">2 路</option>
-                <option :value="4">4 路</option>
-                <option :value="6">6 路</option>
-                <option :value="9">9 路</option>
-                <option :value="0">不限制</option>
-                <option value="custom">自定义…</option>
-              </select>
+              <SelectField cls="mini" :model-value="maxDecodeCustom ? 'custom' : opts.maxDecode" :options="OPT_MAX_DECODE" @update:model-value="onMaxDecodeSelect" />
               <input
                 v-if="maxDecodeCustom"
                 class="field mini num"
@@ -532,13 +578,7 @@
               <strong>事件截图清晰度</strong>
               <em>详情窗与放大查看用的就是这个尺寸；直接从播放器原始画布截取，推荐「原图」</em>
             </span>
-            <select class="field mini" v-model.number="opts.alert.shotWidth">
-              <option :value="0">原图（最清晰，推荐）</option>
-              <option :value="2560">超清 2560px</option>
-              <option :value="1920">高清 1920px</option>
-              <option :value="1280">标清 1280px</option>
-              <option :value="960">省空间 960px</option>
-            </select>
+            <SelectField cls="mini" v-model.number="opts.alert.shotWidth" :options="OPT_SHOT_WIDTH" />
           </div>
 
           <label class="opt">
@@ -576,6 +616,54 @@
             </span>
             <span class="switch" :class="{ on: opts.alarmSound }" @click="opts.alarmSound = !opts.alarmSound"></span>
           </label>
+
+          <!-- ==================== 静默时段（免打扰推送） ==================== -->
+          <div class="divider"></div>
+          <div class="opt col">
+            <span>
+              <strong>夜间免打扰（静默推送）</strong>
+              <em>开启后，所选渠道在静默时段内<strong>不再逐条实时推送</strong>，改为在结束时刻发一条汇总</em>
+            </span>
+            <label class="opt-inline">
+              <span class="switch" :class="{ on: opts.silent.enabled }" @click="opts.silent.enabled = !opts.silent.enabled"></span>
+              <span class="muted">{{ opts.silent.enabled ? '已开启' : '已关闭' }}</span>
+            </label>
+          </div>
+
+          <div class="opt" v-if="opts.silent.enabled">
+            <span>
+              <strong>静默时段</strong>
+              <em>支持跨零点，例如 19:00 ~ 次日 08:00；到结束时刻自动发汇总</em>
+            </span>
+            <div class="time-row">
+              <input class="field mini" type="time" v-model="opts.silent.start" />
+              <span class="tilde">~</span>
+              <input class="field mini" type="time" v-model="opts.silent.end" />
+            </div>
+          </div>
+
+          <div class="opt col" v-if="opts.silent.enabled">
+            <span>
+              <strong>静默时暂停推送的渠道</strong>
+              <em>勾选的渠道在静默时段内不实时推送；结束时刻统一发汇总（默认三端都参与）</em>
+            </span>
+            <div class="ch-pick">
+              <label class="chip" :class="{ on: opts.silent.channels.includes('ding') }">
+                <input type="checkbox" value="ding" v-model="opts.silent.channels" /> 钉钉
+              </label>
+              <label class="chip" :class="{ on: opts.silent.channels.includes('wecom') }">
+                <input type="checkbox" value="wecom" v-model="opts.silent.channels" /> 企业微信
+              </label>
+              <label class="chip" :class="{ on: opts.silent.channels.includes('tg') }">
+                <input type="checkbox" value="tg" v-model="opts.silent.channels" /> TG
+              </label>
+            </div>
+          </div>
+
+          <p class="hint silent-state" v-if="opts.silent.enabled">
+            <b>当前状态：</b>{{ silentStatusText }}
+            <button class="btn tiny" @click="flushSilentNow">立即推送静默汇总</button>
+          </p>
 
           <!--
             Apple Watch：手腕上的事件查看器。
@@ -634,13 +722,7 @@
               <strong>变动档次</strong>
               <em>{{ motionLevelHint }}</em>
             </span>
-            <select class="field mini wide" v-model.number="opts.motionMinPercent">
-              <option :value="0.3">1 档 · 极轻微（0.3%）</option>
-              <option :value="1">2 档 · 轻微（1%）</option>
-              <option :value="2.5">3 档 · 一般（2.5%）</option>
-              <option :value="5">4 档 · 明显（5%）</option>
-              <option :value="10">5 档 · 剧烈（10%）</option>
-            </select>
+            <SelectField cls="mini wide" v-model.number="opts.motionMinPercent" :options="OPT_MOTION_LEVEL" />
           </div>
 
           <div class="opt">
@@ -648,12 +730,7 @@
               <strong>分析频率</strong>
               <em>每秒取样分析的帧数，越高越灵敏但更耗 CPU</em>
             </span>
-            <select class="field mini" v-model.number="opts.sampleFps">
-              <option :value="1">1 帧 / 秒</option>
-              <option :value="2">2 帧 / 秒</option>
-              <option :value="3">3 帧 / 秒</option>
-              <option :value="5">5 帧 / 秒</option>
-            </select>
+            <SelectField cls="mini" v-model.number="opts.sampleFps" :options="OPT_SAMPLE_FPS" />
           </div>
 
           <div class="opt">
@@ -661,11 +738,7 @@
               <strong>连续确认帧数</strong>
               <em>连续多少帧判定为移动才报警（抗噪）</em>
             </span>
-            <select class="field mini" v-model.number="opts.confirmFrames">
-              <option :value="1">1 帧</option>
-              <option :value="2">2 帧</option>
-              <option :value="3">3 帧</option>
-            </select>
+            <SelectField cls="mini" v-model.number="opts.confirmFrames" :options="OPT_CONFIRM_FRAMES" />
           </div>
 
           <div class="opt">
@@ -705,9 +778,7 @@
               <strong>识别模型</strong>
               <em>{{ modelDesc }}</em>
             </span>
-            <select class="field mini wide" v-model="opts.aiModel">
-              <option v-for="m in AI_MODELS" :key="m.key" :value="m.key">{{ m.label }}</option>
-            </select>
+            <SelectField cls="mini wide" v-model="opts.aiModel" :options="AI_MODELS_AS_OPTIONS" />
           </div>
 
           <div class="opt" v-if="opts.aiEnabled">
@@ -748,13 +819,7 @@
               <strong>识别间隔</strong>
               <em>越大越省 CPU</em>
             </span>
-            <select class="field mini" v-model.number="opts.aiIntervalMs">
-              <option :value="1000">1 秒</option>
-              <option :value="2000">2 秒</option>
-              <option :value="3000">3 秒</option>
-              <option :value="5000">5 秒</option>
-              <option :value="10000">10 秒</option>
-            </select>
+            <SelectField cls="mini" v-model.number="opts.aiIntervalMs" :options="OPT_AI_INTERVAL" />
           </div>
 
           <!-- ==================== AI 扩展分析 ==================== -->
@@ -814,12 +879,7 @@
               <strong>徘徊判定范围</strong>
               <em>这段时间内人的移动范围小于该值才算「原地徘徊」（占画面比例）</em>
             </span>
-            <select class="field mini" v-model.number="opts.zone.loiterRadius">
-              <option :value="0.04">很小（4%）· 几乎站定</option>
-              <option :value="0.08">小（8%）· 推荐</option>
-              <option :value="0.15">中（15%）· 小范围踱步</option>
-              <option :value="0.25">大（25%）· 宽松</option>
-            </select>
+            <SelectField cls="mini" v-model.number="opts.zone.loiterRadius" :options="OPT_LOITER_RADIUS" />
           </div>
 
           <label class="opt">
@@ -2224,7 +2284,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { BRAND, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, DEFAULT_BACKEND_URL, HIDDEN_PASSCODE } from '../config/defaults'
 import { resetPushStats } from '../composables/usePushStats'
 import {
@@ -2287,6 +2347,78 @@ import {
 } from '../composables/useSystemNotify'
 import AboutSystem from './AboutSystem.vue'
 import PushTemplatePanel from './PushTemplatePanel.vue'
+import SelectField from './SelectField.vue'
+
+/*
+ * ---------------- 下拉选项 ----------------
+ * 原来这一堆选项是写在 <option :value> 上的，换成自绘下拉后挪到这儿成常量数组：
+ * 数组本身不变（避免每次渲染都新建同一个数组），value 的类型与写进配置的完全一致
+ * （数字就是数字，不能 "3" 和 3 混着比）。
+ */
+const OPT_AUTO_PLAY = [
+  { value: 0, label: '不自动播放' },
+  { value: 1, label: '仅第一路' },
+  { value: 2, label: '前 2 路' },
+  { value: 4, label: '前 4 路' },
+  { value: 99, label: '全部' },
+  { value: 'custom', label: '自定义…' }
+]
+
+const OPT_MAX_DECODE = [
+  { value: 1, label: '1 路' },
+  { value: 2, label: '2 路' },
+  { value: 4, label: '4 路' },
+  { value: 6, label: '6 路' },
+  { value: 9, label: '9 路' },
+  { value: 0, label: '不限制' },
+  { value: 'custom', label: '自定义…' }
+]
+
+const OPT_SHOT_WIDTH = [
+  { value: 0, label: '原图（最清晰，推荐）' },
+  { value: 2560, label: '超清 2560px' },
+  { value: 1920, label: '高清 1920px' },
+  { value: 1280, label: '标清 1280px' },
+  { value: 960, label: '省空间 960px' }
+]
+
+const OPT_MOTION_LEVEL = [
+  { value: 0.3, label: '1 档 · 极轻微（0.3%）' },
+  { value: 1, label: '2 档 · 轻微（1%）' },
+  { value: 2.5, label: '3 档 · 一般（2.5%）' },
+  { value: 5, label: '4 档 · 明显（5%）' },
+  { value: 10, label: '5 档 · 剧烈（10%）' }
+]
+
+const OPT_SAMPLE_FPS = [
+  { value: 1, label: '1 帧 / 秒' },
+  { value: 2, label: '2 帧 / 秒' },
+  { value: 3, label: '3 帧 / 秒' },
+  { value: 5, label: '5 帧 / 秒' }
+]
+
+const OPT_CONFIRM_FRAMES = [
+  { value: 1, label: '1 帧' },
+  { value: 2, label: '2 帧' },
+  { value: 3, label: '3 帧' }
+]
+
+const OPT_AI_INTERVAL = [
+  { value: 1000, label: '1 秒' },
+  { value: 2000, label: '2 秒' },
+  { value: 3000, label: '3 秒' },
+  { value: 5000, label: '5 秒' },
+  { value: 10000, label: '10 秒' }
+]
+
+const OPT_LOITER_RADIUS = [
+  { value: 0.04, label: '很小（4%）· 几乎站定' },
+  { value: 0.08, label: '小（8%）· 推荐' },
+  { value: 0.15, label: '中（15%）· 小范围踱步' },
+  { value: 0.25, label: '大（25%）· 宽松' }
+]
+
+const AI_MODELS_AS_OPTIONS = AI_MODELS.map((m) => ({ value: m.key, label: m.label }))
 
 const props = defineProps({
   cameras: { type: Array, required: true },
@@ -2302,7 +2434,22 @@ const props = defineProps({
   openTab: { type: String, default: '' }
 })
 
-const emit = defineEmits(['close', 'save', 'reset', 'patrol', 'update:layoutKey', 'reset-free', 'update-cameras', 'update-theme', 'update-keepawake', 'force-exit', 'watch-sync', 'backend-sync'])
+const emit = defineEmits([
+  'close',
+  'save',
+  'reset',
+  'patrol',
+  'update:layoutKey',
+  'reset-free',
+  'update-cameras',
+  'update-theme',
+  'update-keepawake',
+  'force-exit',
+  'watch-sync',
+  'backend-sync',
+  'flush-silent',
+  'restart-system'
+])
 
 /* ---------- Apple Watch ---------- */
 /**
@@ -2479,6 +2626,12 @@ const TABS = [
     icon: 'M3 12h4l2.5-6 4 12 2.5-6h5'
   },
   {
+    key: 'maintain',
+    label: '系统维护',
+    desc: '流自愈（持续异常自动恢复）与定时重启系统',
+    icon: 'M12 4v3M12 17v3M4 12H1M23 12h-3M5.6 5.6 3.5 3.5M20.5 20.5l-2.1-2.1M18.4 5.6l2.1-2.1M3.5 20.5l2.1-2.1M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z'
+  },
+  {
     key: 'profiles',
     label: '配置方案',
     desc: '多套配置保存 / 切换 / 导入导出',
@@ -2569,6 +2722,60 @@ function resetFreeLayout() {
 const cams = ref([])
 // 深拷贝一份，未点「保存」前不影响正在运行的播放器
 const opts = reactive(JSON.parse(JSON.stringify({ ...cloneDefaultOptions(), ...props.options })))
+
+/* ==================== 静默时段（免打扰推送） ==================== */
+/* 本地实时时钟：让「当前状态」文案每秒刷新（距离静默结束还有多久） */
+const nowTs = ref(Date.now())
+let _silentTick = null
+onMounted(() => {
+  _silentTick = setInterval(() => (nowTs.value = Date.now()), 30000)
+})
+onUnmounted(() => {
+  if (_silentTick) clearInterval(_silentTick)
+})
+
+const CH_LABELS = { ding: '钉钉', wecom: '企业微信', tg: 'TG' }
+const silentActiveNow = computed(() => {
+  const c = opts.silent
+  if (!c || !c.enabled) return false
+  const toMin = (s) => {
+    const [h, m] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
+    return h * 60 + m
+  }
+  const start = toMin(c.start)
+  const end = toMin(c.end)
+  if (start === end) return false
+  const m = new Date(nowTs.value).getHours() * 60 + new Date(nowTs.value).getMinutes()
+  return start < end ? m >= start && m < end : m >= start || m < end
+})
+const silentStatusText = computed(() => {
+  const c = opts.silent
+  if (!c || !c.enabled) return '未开启'
+  const ch = (c.channels || []).map((id) => CH_LABELS[id] || id)
+  const base = `静默渠道：${ch.length ? ch.join(' / ') : '无'}（${c.start} ~ ${c.end}）`
+  if (!silentActiveNow.value) return `未进入静默 · ${base}`
+  const toMin = (s) => {
+    const [h, m] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
+    return h * 60 + m
+  }
+  const start = toMin(c.start)
+  const end = toMin(c.end)
+  const m = new Date(nowTs.value).getHours() * 60 + new Date(nowTs.value).getMinutes()
+  const endMin = end <= start ? end + 1440 : end
+  const diff = Math.max(0, endMin - m)
+  const hh = Math.floor(diff / 60)
+  const mm = diff % 60
+  const dur = hh ? `${hh} 小时 ${mm} 分` : `${mm} 分`
+  return `静默中 · 将于 ${c.end} 自动汇总推送（约 ${dur} 后）· ${base}`
+})
+function flushSilentNow() {
+  emit('flush-silent')
+}
+
+/** 设置页「立即重启系统」按钮：交给 App.vue 决定走 Electron 原生重启还是后端 API */
+function restartSystemNow() {
+  emit('restart-system')
+}
 
 /* ==================== 配置补齐 ==================== */
 /**
@@ -2892,8 +3099,7 @@ const MAX_DECODE_PRESETS = [0, 1, 2, 4, 6, 9]
 const autoCountCustom = ref(!AUTO_COUNT_PRESETS.includes(Number(opts.autoPlayCount)))
 const maxDecodeCustom = ref(!MAX_DECODE_PRESETS.includes(Number(opts.maxDecode)))
 
-function onAutoCountChange(e) {
-  const v = e.target.value
+function onAutoCountSelect(v) {
   if (v === 'custom') {
     autoCountCustom.value = true
     if (!Number(opts.autoPlayCount)) opts.autoPlayCount = 3
@@ -2903,8 +3109,7 @@ function onAutoCountChange(e) {
   opts.autoPlayCount = Number(v)
 }
 
-function onMaxDecodeChange(e) {
-  const v = e.target.value
+function onMaxDecodeSelect(v) {
   if (v === 'custom') {
     maxDecodeCustom.value = true
     if (!Number(opts.maxDecode)) opts.maxDecode = 3
@@ -4353,6 +4558,107 @@ function loadHidden() {
   align-items: stretch;
   gap: 8px;
   cursor: default;
+}
+
+/* 静默时段（免打扰推送）相关样式 */
+.divider {
+  height: 1px;
+  margin: 14px 0 4px;
+  background: var(--line);
+}
+
+.opt-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.opt-inline .muted {
+  font-size: 12px;
+  color: var(--text-dim-2);
+}
+
+.time-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.time-row .tilde {
+  color: var(--text-dim-2);
+  font-size: 13px;
+}
+
+.ch-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ch-pick .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.ch-pick .chip input {
+  display: none;
+}
+
+.ch-pick .chip.on {
+  color: var(--accent-text-strong);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.silent-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border-left: 2px solid color-mix(in srgb, #f5a623 60%, transparent);
+  padding-left: 10px;
+}
+
+.btn.tiny {
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.btn.tiny:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.btn.tiny:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn.tiny.danger {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err-text);
+}
+
+.btn.tiny.danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--err) 70%, transparent);
+  background: color-mix(in srgb, var(--err) 22%, transparent);
 }
 
 .range-row {

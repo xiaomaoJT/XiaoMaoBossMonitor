@@ -385,6 +385,155 @@ export function buildMergedMessage(list, cfg) {
   return { title, text: lines.join('\n') }
 }
 
+/**
+ * 静默时段汇总消息（在静默结束时一次性推送，代替期间被收存的所有实时报警）。
+ *
+ * 用户要求「汇总信息要详尽，比如人数」——所以这里把所有维度都摊开：
+ *   总览（总数 / 覆盖通道 / 时段跨度）
+ *   人员与识别（人形条数 / 人脸条数 / 已识别具体是谁 / 累计到访人次 / 峰值同时在线）
+ *   按通道（每路各多少条，细分类型）
+ *   按类型（人形 / 人脸 / 区域 / 移动…）
+ *   事件明细（前若干条，带时间 / 通道 / 类型 / 关键细节）
+ *
+ * @param {Array<object>} records 静默时段内收存的报警记录（见 useAlertPush 的 silentBuffer 快照）
+ * @param {object} cfg     options.silent（暂未用，预留给将来按渠道定制）
+ * @param {object} ctx     { startMs, endMs } 静默窗口的起止时间戳
+ * @returns {{ title:string, markdown:string, plain:string }}
+ *   markdown 给钉钉 / 企业微信；plain 给 Telegram（去掉 markdown 标记，避免乱码）
+ */
+export function buildSilentSummary(records, cfg, ctx = {}) {
+  const list = Array.isArray(records) ? records : []
+  const total = list.length
+  const startMs = ctx.startMs || (total ? Math.min(...list.map((r) => r.time || Date.now())) : Date.now())
+  const endMs = ctx.endMs || Date.now()
+
+  const p2 = (n) => String(n).padStart(2, '0')
+  const fmtClock = (ms) => {
+    const d = new Date(ms)
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  }
+  const fmtDateTime = (ms) => {
+    const d = new Date(ms)
+    return `${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`
+  }
+  const crossDay = new Date(endMs).getDate() !== new Date(startMs).getDate()
+  const rangeLabel = `${fmtDateTime(startMs)} ~ ${crossDay ? '次日 ' : ''}${fmtClock(endMs)}`
+
+  // 聚合
+  const byCamera = {}
+  const byType = {}
+  let personN = 0
+  let faceN = 0
+  const knownSet = new Set()
+  let totalIn = 0
+  let maxCur = 0
+  list.forEach((r) => {
+    const name = r.name || '未知通道'
+    if (!byCamera[name]) byCamera[name] = { count: 0, person: 0, face: 0, zone: 0, motion: 0, other: 0 }
+    const c = byCamera[name]
+    c.count += 1
+    const t = r.type || 'motion'
+    if (t === 'person') {
+      c.person += 1
+      personN += 1
+    } else if (t === 'face') {
+      c.face += 1
+      faceN += 1
+      if (r.faceName) knownSet.add(String(r.faceName))
+    } else if (t === 'zone' || t === 'enter' || t === 'exit' || t === 'loiter') {
+      c.zone += 1
+    } else if (t === 'motion') {
+      c.motion += 1
+    } else {
+      c.other += 1
+    }
+    byType[t] = (byType[t] || 0) + 1
+    const cnt = r.counts || null
+    if (cnt) {
+      totalIn += Number(cnt.totalIn) || 0
+      maxCur = Math.max(maxCur, Number(cnt.current) || 0)
+    }
+    if (r.faceName) knownSet.add(String(r.faceName))
+  })
+
+  const camNames = Object.keys(byCamera)
+  const typeLabel = (t) => alarmLabel(t) || t
+  const durMin = Math.max(1, Math.round((endMs - startMs) / 60000))
+  const durText = durMin >= 60 ? `${(durMin / 60).toFixed(durMin % 60 ? 1 : 0)} 小时` : `${durMin} 分钟`
+  const knownNames = [...knownSet]
+
+  const camLines = camNames.length
+    ? camNames
+        .map((n) => {
+          const c = byCamera[n]
+          const parts = [`人形 ${c.person}`, `人脸 ${c.face}`, `区域 ${c.zone}`, `移动 ${c.motion}`]
+            .filter((s) => !/ 0$/.test(s))
+            .join(' / ')
+          return `- **${n}**：${c.count} 条${parts ? `（${parts}）` : ''}`
+        })
+        .join('\n')
+    : '- 无'
+
+  const typeLines = Object.keys(byType).length
+    ? Object.keys(byType)
+        .map((t) => `- ${typeLabel(t)}：${byType[t]} 条`)
+        .join('\n')
+    : '- 无'
+
+  const detailLines = (() => {
+    const top = [...list].sort((a, b) => (a.time || 0) - (b.time || 0)).slice(0, 20)
+    return top
+      .map((r) => {
+        const detail = alarmDetail(r)
+        const extra = extraText(r) ? ` · ${extraText(r)}` : ''
+        const who = r.faceName ? ` · ${r.faceName}` : ''
+        return `- ${fmtClock(r.time || Date.now())} · **${r.name || ''}** · ${detail || r.type}${who}${extra}`
+      })
+      .join('\n')
+  })()
+  const detailNote = list.length > 20 ? `\n- …另有 ${list.length - 20} 条` : ''
+
+  const lines = [
+    `### 【监控静默时段汇总】${rangeLabel}`,
+    '',
+    `> 静默时段内共 **${total}** 条报警，已统一汇总于此。`,
+    '',
+    '**📊 概览**',
+    `- 报警总数：${total} 条`,
+    `- 覆盖通道：${camNames.join(' / ') || '无'}（${camNames.length} 路）`,
+    `- 时段跨度：${rangeLabel}（约 ${durText}）`,
+    '',
+    '**👤 人员与识别**',
+    `- 人形识别：${personN} 条`,
+    `- 人脸识别：${faceN} 条${knownNames.length ? `（已识别 ${knownNames.length} 人：${knownNames.join('、')}）` : ''}`,
+    `- 累计到访：${totalIn} 人次（区域计数）`,
+    `- 峰值同时在线：${maxCur} 人`,
+    '',
+    '**📋 按通道**',
+    camLines,
+    '',
+    '**📋 按类型**',
+    typeLines,
+    '',
+    `**📝 事件明细（前 ${Math.min(20, total)} 条）**`,
+    detailLines,
+    detailNote,
+    '',
+    `> 由 ${BRAND.fullName} 实时分析生成 · ${formatTime(endMs, false)}`
+  ]
+
+  const markdown = lines.join('\n')
+  // 纯文本（去 markdown 标记，给 Telegram 用）
+  const plain = lines
+    .join('\n')
+    .replace(/^###\s*/gm, '')
+    .replace(/\*\*/g, '')
+    .replace(/^[>]\s?/gm, '')
+    .trim()
+
+  return { title: `【监控静默汇总】${rangeLabel}`, markdown, plain }
+}
+
 /** 状态文案 */
 export const STATE_LABEL = {
   playing: '✅ 正常播放',

@@ -19,9 +19,9 @@ const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
  * rect 是「自定义摆放」布局下的百分比坐标（0~100，相对大屏可视区）。
  */
 const HIDDEN_CAMERA_PRESET = [
-  { id: 'cam-1', name: '大门外', motion: true, ai: true, blind: true, push: true, rect: { x: 1.29, y: 0.62, w: 31.29, h: 31.75 } },
+  { id: 'cam-1', name: '门口', motion: true, ai: true, blind: true, push: true, rect: { x: 1.29, y: 0.62, w: 31.29, h: 31.75 } },
   { id: 'cam-4', name: '电梯', motion: true, ai: true, blind: true, push: true, rect: { x: 1, y: 34, w: 32, h: 32 } },
-  { id: 'cam-6', name: '大门内', motion: true, ai: true, blind: true, push: true, rect: { x: 67, y: 34, w: 32, h: 32 } },
+  { id: 'cam-6', name: '大厅', motion: true, ai: true, blind: true, push: true, rect: { x: 67, y: 34, w: 32, h: 32 } },
   { id: 'cam-3', name: '厕所', motion: false, ai: false, blind: false, push: false, rect: { x: 34, y: 1, w: 32, h: 32 } },
   { id: 'cam-2', name: '通道1', motion: false, ai: false, blind: false, push: false, rect: { x: 67, y: 1, w: 32, h: 32 } },
   { id: 'cam-7', name: '通道2', motion: false, ai: false, blind: false, push: false, rect: { x: 1, y: 67, w: 32, h: 32 } },
@@ -30,7 +30,7 @@ const HIDDEN_CAMERA_PRESET = [
 
 /**
  * 内置隐藏配置里「默认不显示」的通道：厕所 / 通道1 / 通道2 / 楼梯。
- * 载入内置配置后大屏只留 大门外 / 电梯 / 大门内 三路在跑，
+ * 载入内置配置后大屏只留 门口 / 电梯 / 大厅 三路在跑，
  * 其余四路仍留在通道列表里（设置 → 监控通道 里把「显示」打开即可恢复）。
  */
 export const HIDDEN_HIDDEN_IDS = ['cam-3', 'cam-2', 'cam-7', 'cam-5']
@@ -193,8 +193,12 @@ export const HIDDEN_OPTIONS = {
    * 灵敏度 5 换算出来是 1.92%，低于这里的 2.5%，因此实际以本档位为准。
    */
   motionMinPercent: 2.5,
-  /** 每路每秒采样分析的帧数（画面变动是持续开销，降一档整体省约三分之一） */
-  sampleFps: 2,
+  /**
+   * 每路每秒采样分析的帧数（画面变动是持续开销，降一档整体省约三分之一）。
+   * 值守时定在 **3 帧/秒**：2 帧偶尔会漏掉一闪而过的人，5 帧又太费 CPU
+   * （多路同看时软解已经很紧张），3 是「不漏」和「跑得动」之间的平衡点。
+   */
+  sampleFps: 3,
   /** 同一通道两次报警的最小间隔（秒）：翻倍可直接砍掉一半的报警链路 */
   cooldownSec: 20,
   /** 需要连续多少帧判定为移动才报警（抗噪） */
@@ -371,6 +375,63 @@ export const HIDDEN_OPTIONS = {
     onlyWhenAbnormal: false,
     /** 报告里是否包含非监听通道 */
     includeAll: true
+  },
+
+  /* ---------------- 静默时段（免打扰推送） ----------------
+   * 全局「夜间免打扰」：在设定的时段内，被选中的渠道**不再实时逐条推送**，
+   * 而是把这段时间里的所有报警先收存起来，等时段结束（截止时刻）一次性
+   * 发一条**汇总消息**——既不被半夜的消息吵到，第二天早上也能一眼看全夜间发生了什么。
+   *
+   * 与每个渠道各自「静默时段」的区别：
+   *   - 渠道级 quiet 只是「这一个渠道在那段时间不推」，没有汇总；
+   *   - 这里的 silent 是**全局**的，跨三端统一收口，并且在结束时补一条详尽汇总。
+   *   两者可以同时开，但 silent 优先级更高（被 silent 收存的渠道不会再走渠道级 quiet）。
+   *
+   * 默认开启：晚上 7 点 ~ 次日早上 8 点；三端（钉钉 / 企微 / TG）默认全部参与。
+   * 汇总消息内容见 useDingTalk.buildSilentSummary：报警总数、按通道、按类型、
+   * 人员识别（已识别人数）、累计到访人次、峰值同时在线等，全部列清。
+   */
+  silent: {
+    /** 是否开启静默时段（默认开） */
+    enabled: true,
+    /** 静默开始时刻（HH:mm，支持跨零点） */
+    start: '19:00',
+    /** 静默结束时刻：到这一刻自动发汇总（HH:mm） */
+    end: '08:00',
+    /**
+     * 静默时段内暂停实时推送、改在结束时汇总的渠道。
+     * 空数组 = 不暂停任何渠道（等于没开）。默认三端都参与。
+     */
+    channels: ['ding', 'wecom', 'tg']
+  },
+
+  /* ---------------- 流自愈（持续异常自动恢复） ----------------
+   * 某路监控在「解码中断 / 网络断连」后，后端本身会无限退避重试（源级自愈）；
+   * 但若是较顽固的故障（如 TLS 握手卡死、后端进程卡住），单纯重连可能一直起不来。
+   * 这里提供「升级方案」：被监控的通道持续异常超过阈值分钟后，
+   * 直接触发一次「系统重启」来彻底恢复（见 autoRestart）——对应告警示例里
+   * "持续异常 · 解码中断：ws: Client network socket disconnected..." 这类问题。
+   */
+  streamRecovery: {
+    /** 是否启用：持续异常达到阈值后升级为系统重启 */
+    enabled: true,
+    /** 持续异常多少分钟（被监控通道）后触发系统重启恢复，默认 30 分钟 */
+    restartSystemAfterMin: 30
+  },
+
+  /* ---------------- 自动重启系统 ----------------
+   * 7x24 值守的监控大屏，长时间运行容易积累内存泄漏 / 解码器卡死 /
+   * 某路流僵死等「重启一下就好」的状态。这里支持按「天 + 小时」设置间隔，
+   * 到点在后端进程里自愈式重启（重新拉起所有流与前端服务）。
+   * 重启前会先推一条「系统即将重启」通知。
+   */
+  autoRestart: {
+    /** 是否启用定时重启（默认关，按需开启） */
+    enabled: false,
+    /** 每隔多少天触发一次（0 = 不按天计） */
+    days: 1,
+    /** 每隔多少小时触发一次（与 days 叠加，例如 1 天 0 小时 = 每天一次） */
+    hours: 0
   },
 
   /* ---------------- 报警提醒方式 ---------------- */

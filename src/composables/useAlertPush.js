@@ -19,6 +19,7 @@ import { ref } from 'vue'
 import {
   buildAlarmMessage,
   buildMergedMessage,
+  buildSilentSummary,
   formatTime,
   normalizeDingTalk,
   sendDingTalk,
@@ -165,8 +166,169 @@ export function useAlertPush(options, hooks = {}) {
     return start < end ? nowMin >= start && nowMin < end : nowMin >= start || nowMin < end
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 全局静默时段（免打扰推送）：收存报警，截止时刻统一发汇总              */
+  /* ------------------------------------------------------------------ */
+
+  const toMin = (s) => {
+    const [h, m] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
+    return h * 60 + m
+  }
+  const silentCfg = () => options.silent || {}
+
+  /**
+   * 当前是否处于全局静默时段，并给出窗口的起止时间戳 / 文案标签。
+   * 支持跨零点（例如 19:00 ~ 次日 08:00）。
+   * @returns {{active:boolean, startMs?:number, endMs?:number, rangeLabel?:string, endLabel?:string}}
+   */
+  function silentState(now) {
+    const c = silentCfg()
+    if (!c || !c.enabled) return { active: false }
+    const start = toMin(c.start)
+    const end = toMin(c.end)
+    if (start === end) return { active: false }
+    const d = new Date(now)
+    const m = d.getHours() * 60 + d.getMinutes()
+    const active = start < end ? m >= start && m < end : m >= start || m < end
+    if (!active) return { active: false }
+    const y = d.getFullYear()
+    const mo = d.getMonth()
+    const da = d.getDate()
+    const midnight = (off) => {
+      const x = new Date(now)
+      x.setFullYear(y, mo, da + off)
+      x.setHours(0, 0, 0, 0)
+      return x.getTime()
+    }
+    let startMs
+    let endMs
+    if (start < end) {
+      startMs = midnight(0) + start * 60000
+      endMs = midnight(0) + end * 60000
+    } else if (m >= start) {
+      startMs = midnight(0) + start * 60000
+      endMs = midnight(1) + end * 60000
+    } else {
+      startMs = midnight(-1) + start * 60000
+      endMs = midnight(0) + end * 60000
+    }
+    const p2 = (n) => String(n).padStart(2, '0')
+    const fmt = (ms) => {
+      const x = new Date(ms)
+      return `${p2(x.getHours())}:${p2(x.getMinutes())}`
+    }
+    const endDay = new Date(endMs).getDate() !== da ? '次日 ' : ''
+    return {
+      active: true,
+      startMs,
+      endMs,
+      rangeLabel: `${fmt(startMs)} ~ ${endDay}${fmt(endMs)}`,
+      endLabel: `${endDay}${fmt(endMs)}`
+    }
+  }
+
+  /** 下一个静默结束时刻的时间戳（用于排程汇总推送），不在静默时段也返回今晚/明早的结束点 */
+  function nextQuietEndMs(now) {
+    const c = silentCfg()
+    if (!c || !c.enabled) return null
+    const end = toMin(c.end)
+    if (end === toMin(c.start)) return null
+    const d = new Date(now)
+    const base = new Date(d)
+    base.setHours(0, 0, 0, 0)
+    const today = base.getTime() + end * 60000
+    const tomorrow = today + 1440 * 60000
+    if (today > now) return today
+    if (tomorrow > now) return tomorrow
+    return tomorrow
+  }
+
+  /** 某渠道此刻是否应被全局静默收存（不实时推） */
+  function isSilentSuppressed(id, now) {
+    const s = silentState(now)
+    return s.active && (silentCfg().channels || []).includes(id)
+  }
+
+  /** 静默时段内收存的报警快照（去重 by key） */
+  const silentBuffer = []
+  const silentSeen = new Set()
+  let silentTimer = null
+
+  /** 排程：在最近的静默结束时刻发一次汇总（同一窗口只排一个定时器） */
+  function scheduleSilentFlush() {
+    if (silentTimer) return
+    const endMs = nextQuietEndMs(Date.now())
+    if (!endMs) return
+    const wait = Math.max(1000, endMs - Date.now())
+    silentTimer = setTimeout(() => {
+      silentTimer = null
+      flushSilentSummary().catch(() => {})
+    }, wait)
+  }
+
+  /** 把汇总消息发到静默里被选中的、且当前可用的渠道，返回成功发出的渠道名 */
+  async function pushSilentSummary(ids, summary) {
+    const sent = []
+    if (ids.includes('tg')) {
+      try {
+        await sendTelegramText(readCfg('tg'), summary.plain)
+        recordPush('tg', true)
+        sent.push('TG')
+      } catch (e) {
+        recordPush('tg', false, (e && e.message) || '未知错误')
+      }
+    }
+    const rest = await Promise.all(
+      ids
+        .filter((id) => id !== 'tg')
+        .map(async (id) => {
+          const name = CHANNEL_DEFS.find((d) => d.id === id).name
+          try {
+            if (id === 'ding') {
+              const c = readCfg('ding')
+              await sendDingTalk(
+                { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy },
+                { title: summary.title, text: summary.markdown, msgType: 'markdown' }
+              )
+            } else {
+              const c = readCfg('wecom')
+              await sendWeCom(c, { msgType: 'markdown', content: summary.markdown, atAll: false })
+            }
+            recordPush(id, true)
+            return name
+          } catch (e) {
+            recordPush(id, false, (e && e.message) || '未知错误')
+            return null
+          }
+        })
+    )
+    rest.forEach((n) => n && sent.push(n))
+    return sent
+  }
+
+  /** 静默结束：把收存的报警汇成一条详尽消息发出去，然后清空缓冲 */
+  async function flushSilentSummary() {
+    const endMs = Date.now()
+    const buf = silentBuffer.splice(0, silentBuffer.length)
+    silentSeen.clear()
+    if (!buf.length) return
+    const ids = (silentCfg().channels || []).filter((id) => isReady(id))
+    if (!ids.length) return
+    const startMs = buf.reduce((m, r) => Math.min(m, r.time || endMs), endMs)
+    const summary = buildSilentSummary(buf, silentCfg(), { startMs, endMs })
+    const sent = await pushSilentSummary(ids, summary)
+    ids.forEach((id) => {
+      const st = chState[id]
+      if (st) {
+        st.windowTs.push(endMs)
+        st.lastGlobalAt = endMs
+      }
+    })
+    if (sent.length) notify(`静默时段汇总已推送（${sent.join(' + ')}）`)
+  }
+
   /** 单渠道预检 */
-  function checkChannel(id, record, now) {
+  function checkChannel(id, record, now, ignoreQuiet = false) {
     const def = CHANNEL_DEFS.find((x) => x.id === id)
     const c = def.read()
     if (!c.enabled) return { ok: false, off: true, reason: '未启用该渠道' }
@@ -191,7 +353,7 @@ export function useAlertPush(options, hooks = {}) {
     ) {
       return { ok: false, off: true, reason: '变动幅度低于阈值' }
     }
-    if (inQuietHours(c, now)) return { ok: false, off: true, reason: '静默时段' }
+    if (!ignoreQuiet && inQuietHours(c, now)) return { ok: false, off: true, reason: '静默时段' }
 
     const st = chState[id]
     const gap = Math.max(3, Number(c.minIntervalSec) || 30) * 1000
@@ -496,6 +658,13 @@ export function useAlertPush(options, hooks = {}) {
         flushTimers[d.id] = null
       }
     })
+    // 静默缓冲与定时汇总一并拆掉，避免「恢复初始化」之后还在静默结束时刻发旧汇总
+    if (silentTimer) {
+      clearTimeout(silentTimer)
+      silentTimer = null
+    }
+    silentBuffer.length = 0
+    silentSeen.clear()
     pendingCount.value = 0
   }
 
@@ -503,8 +672,52 @@ export function useAlertPush(options, hooks = {}) {
   async function handleAlarm(record) {
     const now = Date.now()
     const decisions = CHANNEL_DEFS.map((d) => ({ id: d.id, ...checkChannel(d.id, record, now) }))
-    const send = decisions.filter((d) => d.ok).map((d) => d.id)
-    const queue = decisions.filter((d) => d.overflow && readCfg(d.id).overflowMode === 'merge')
+    let send = decisions.filter((d) => d.ok).map((d) => d.id)
+    let queue = decisions.filter((d) => d.overflow && readCfg(d.id).overflowMode === 'merge')
+
+    /*
+     * 全局静默时段：被选中的渠道在时段内「不实时推」，改为收存到 silentBuffer，
+     * 等时段结束统一发一条汇总。判定「该渠道本应收到」时忽略渠道级 quiet，
+     * 避免和这里的全局收存打架（全局优先级更高）。
+     */
+    const sState = silentState(now)
+    const suppressIds =
+      sState.active && (silentCfg().channels || []).length
+        ? CHANNEL_DEFS.filter(
+            (d) => silentCfg().channels.includes(d.id) && checkChannel(d.id, record, now, true).ok
+          ).map((d) => d.id)
+        : []
+    let buffered = false
+    if (suppressIds.length) {
+      send = send.filter((id) => !suppressIds.includes(id))
+      queue = queue.filter((id) => !suppressIds.includes(id))
+      if (!silentSeen.has(record.key)) {
+        silentSeen.add(record.key)
+        silentBuffer.push({
+          key: record.key,
+          time: record.time,
+          name: record.name,
+          type: record.type,
+          ratio: record.ratio,
+          faceName: record.faceName,
+          counts: record.counts,
+          zoneName: record.zoneName,
+          dwellMs: record.dwellMs,
+          text: record.text
+        })
+      }
+      scheduleSilentFlush()
+      buffered = true
+    }
+
+    // 完全被静默收存（没有任何渠道在本条事件上实时发送 / 排队）→ 标记「静默待推送」
+    if (buffered && !send.length && !queue.length) {
+      onState(
+        record.key,
+        'silent',
+        `静默时段（${sState.rangeLabel}）已收存，将于 ${sState.endLabel} 自动汇总推送`
+      )
+    }
 
     if (send.length) await deliver([record], false, send)
 
@@ -519,7 +732,7 @@ export function useAlertPush(options, hooks = {}) {
       return
     }
 
-    if (!send.length) {
+    if (!send.length && !buffered) {
       const reasons = decisions
         .filter((d) => !d.ok && !d.off)
         .map((d) => `${CHANNEL_DEFS.find((x) => x.id === d.id).name}：${d.reason}`)
@@ -644,6 +857,8 @@ export function useAlertPush(options, hooks = {}) {
       // 人脸分组没勾 → 用户不想要人脸类消息，特写也不发
       if (normalizeEvents(c.events).face === false) return false
       if (inQuietHours(c, now)) return false
+      // 全局静默时段内被收存的渠道，人脸特写也不实时发（避免漏出单条推送）
+      if (isSilentSuppressed(id, now)) return false
       const st = chState[id]
       prune(st, now)
       return st.windowTs.length < rateLimit(c, id)
@@ -817,6 +1032,8 @@ export function useAlertPush(options, hooks = {}) {
       if (record.channels && record.channels[d.id] === false) return false
       if (normalizeEvents(c.events).person === false) return false
       if (inQuietHours(c, now)) return false
+      // 全局静默时段内被收存的渠道，补图也不实时发
+      if (isSilentSuppressed(d.id, now)) return false
       const st = chState[d.id]
       prune(st, now)
       return st.windowTs.length < rateLimit(c, d.id)
@@ -914,7 +1131,23 @@ export function useAlertPush(options, hooks = {}) {
     return { ok: !!sent.length, sent, reason }
   }
 
-  return { handleAlarm, sendDirect, pushExtraShot, pendingCount, rateLimit, channels, stopAll }
+  /*
+   * 启动时若已处于静默时段，提前排程好结束时刻的汇总（即便这段时间还没报警，
+   * 定时器也会到点尝试一次；无缓冲则直接返回，不骚扰）。
+   */
+  if (silentState(Date.now()).active) scheduleSilentFlush()
+
+  return {
+    handleAlarm,
+    sendDirect,
+    pushExtraShot,
+    /** 立即把当前静默缓冲汇总发出去（设置页可挂「立即推送」按钮） */
+    flushSilentSummary,
+    pendingCount,
+    rateLimit,
+    channels,
+    stopAll
+  }
 }
 
 /** 把 markdown 里的标记去掉，得到一个可读的纯文本（Telegram 兜底用） */

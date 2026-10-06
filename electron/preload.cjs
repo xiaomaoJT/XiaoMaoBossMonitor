@@ -38,6 +38,14 @@ contextBridge.exposeInMainWorld('__MONITOR_NATIVE__', {
   quitApp: () => ipcRenderer.invoke('monitor:quit'),
 
   /**
+   * 重启整个桌面端（设置 → 系统维护 → 立即重启）。
+   * 主进程先 app.relaunch() 登记重启，再 quit（1.2s 兜底 exit(0)），
+   * 保证一定重启。后端若是独立进程，则由后端自己的定时/手动重启负责。
+   * @returns {Promise<boolean>}
+   */
+  restartApp: () => ipcRenderer.invoke('monitor:restart'),
+
+  /**
    * 发一条系统通知（主进程 Notification 模块）。
    * @param {{title:string, body:string, tag?:string, silent?:boolean}} payload
    * @returns {Promise<{supported:boolean, error?:string}>}

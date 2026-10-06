@@ -115,6 +115,8 @@
       @force-exit="onForceExit"
       @watch-sync="onWatchSync"
       @backend-sync="onBackendSyncNow"
+      @flush-silent="onFlushSilent"
+      @restart-system="onRestartSystem"
     />
 
     <EventPanel
@@ -936,29 +938,69 @@ function pushStateOf(ev) {
   if (!ev) return []
   const camCh = ev.channels || null
   const masterOff = ev.push === 'off'
+  const silenced = ev.push === 'silent'
   const pushed = String(ev.pushChannels || '')
+
+  /*
+   * ⚠️ 判断「这条事件到底推到哪些渠道」必须以**实际结果**为准，不能拿当前配置反推。
+   * 以前先查 enabled / 凭据 / 渠道勾选，只要配置里有一项不满足就显示 off，
+   * 于是「明明三条都推送成功了、详情里却全是 off」。
+   * pushChannels 是推送时真正发出的渠道列表（形如「钉钉 + 企微」），
+   * 命中了的渠道一律按「已送达」展示，配置里的那些 off 只作为补充说明。
+   */
+  const sentNames = pushed
+    .split(/[+、,，\/]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 1)
 
   const defs = [
     ['ding', '钉钉', options.dingtalk],
     ['wecom', '企微', options.wecom],
     ['tg', 'TG', options.telegram]
   ]
+  // 静默时段收存的事件：三个渠道都不实时推，结束时刻统一汇总。单独标一种状态。
+  if (silenced) {
+    return defs.map(([id, label, cfg]) => ({
+      id,
+      label,
+      sent: false,
+      on: false,
+      silenced: true,
+      why: '静默时段已收存，结束时刻统一汇总推送'
+    }))
+  }
   return defs.map(([id, label, cfg]) => {
     const c = cfg || {}
-    const base = { id, label, sent: !!pushed && pushed.includes(label) }
+    const sent = sentNames.some((n) => n.includes(label) || label.includes(n))
+    const base = { id, label, sent }
+    const cfgReason = cfgBlockReason(id, c, ev, camCh)
+    // 1) 已经送达的渠道：直接认账，别再拿配置去"劝退"它
+    if (sent) return { ...base, on: true, why: '已推送成功' }
     if (masterOff) return { ...base, on: false, why: '该通道已关闭「推送总开关」' }
-    if (!c.enabled) return { ...base, on: false, why: '渠道未启用' }
-    if (camCh && camCh[id] === false) return { ...base, on: false, why: '该通道未勾选此渠道' }
-    const ready =
-      id === 'tg'
-        ? !!String(c.token || '').trim() && !!String(c.chatId || '').trim()
-        : !!String(c.webhook || '').trim()
-    if (!ready) return { ...base, on: false, why: '凭据未配置完整' }
-    if (Array.isArray(c.cameras) && !c.cameras.includes(ev.id)) {
-      return { ...base, on: false, why: '该通道未在渠道里勾选' }
+    // 2) 本次推送有结果、只是没轮到这个渠道
+    if (ev.push === 'ok' || ev.push === 'merged') {
+      return { ...base, on: false, why: '本次推送未包含该渠道' }
     }
-    return { ...base, on: true, why: '已开启' }
+    if (ev.push === 'fail') return { ...base, on: false, why: cfgReason || '推送失败' }
+    // 3) 还没出结果（或很老的记录）：按当前配置预览
+    return cfgReason ? { ...base, on: false, why: cfgReason } : { ...base, on: true, why: '已开启' }
   })
+}
+
+/** 按当前配置算「这个渠道为什么推不了」，能推就返回空串 */
+function cfgBlockReason(id, c, ev, camCh) {
+  if (!c || !c.enabled) return '渠道未启用'
+  const ready =
+    id === 'tg'
+      ? !!String(c.token || '').trim() && !!String(c.chatId || '').trim()
+      : !!String(c.webhook || '').trim()
+  if (!ready) return '凭据未配置完整'
+  if (camCh && camCh[id] === false) return '该通道未勾选此渠道'
+  // 渠道里没勾选任何通道时按「全部通道」处理，避免配置一改就全挂
+  if (Array.isArray(c.cameras) && c.cameras.length && !c.cameras.includes(ev.id)) {
+    return '该通道未在渠道里勾选'
+  }
+  return ''
 }
 
 function onRequestPlay(id) {
@@ -2246,6 +2288,47 @@ async function runPatrol(reason = 'auto') {
   if (!res.ok) showToast(`巡检推送失败：${res.reason}`)
   else if (res.reason) showToast(res.reason)
   else if (reason === 'manual') showToast('巡检报告已推送')
+}
+
+/** 设置页「立即推送静默汇总」按钮：把当前静默时段收存的报警立刻汇总发出去 */
+function onFlushSilent() {
+  if (backendActive.value) {
+    showToast('后端模式下推送在服务端，请到后端机器查看')
+    return
+  }
+  if (typeof push.flushSilentSummary === 'function') {
+    push
+      .flushSilentSummary()
+      .then(() => showToast('静默汇总已尝试推送'))
+      .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
+  }
+}
+
+/**
+ * 设置页「立即重启系统」按钮。
+ * - 桌面客户端（Electron）：走原生桥 app.relaunch() 重启整个 App；
+ * - 浏览器 / 后端模式：向后端发 POST /api/restart，由后端进程自愈式重启
+ *   （重新拉起所有流与前端服务）。未配置后端地址则提示。
+ */
+async function onRestartSystem() {
+  const native = window.__MONITOR_NATIVE__
+  if (native && typeof native.restartApp === 'function') {
+    showToast('正在重启桌面端…')
+    native.restartApp()
+    return
+  }
+  const url = options.backend && options.backend.url
+  if (!url) {
+    showToast('未配置后端地址，无法远程重启（请到检测识别 → 后端检测服务里填写）')
+    return
+  }
+  showToast('已请求后端重启系统')
+  try {
+    const r = await fetch(`${url}/api/restart`, { method: 'POST' })
+    if (!r.ok) showToast('重启请求失败（HTTP ' + r.status + '）')
+  } catch (e) {
+    showToast('重启请求失败：' + ((e && e.message) || '网络错误'))
+  }
 }
 
 function schedulePatrol() {

@@ -30,6 +30,15 @@
   --field-bg: rgba(255, 255, 255, 0.06);
   --switch-bg: rgba(255, 255, 255, 0.12);
   --scrollbar: rgba(255, 255, 255, 0.18);
+  /*
+   * 浮层（下拉弹层等自绘浮层）的配色。
+   * 这类浮层要浮在毛玻璃之上，背景必须比 --panel 更实一点，
+   * 否则底下的画面会透过列表糊成一片，字看不清。
+   */
+  --pop-bg: rgba(15, 22, 34, 0.95);
+  --pop-line: rgba(160, 190, 230, 0.22);
+  --pop-hi: rgba(255, 255, 255, 0.07);
+  --pop-hover: rgba(255, 255, 255, 0.08);
   --radius: 10px;
   --topbar-h: 58px;
   /* 刘海屏 / 灵动岛安全区，移动端用 env() 覆盖 */
@@ -80,6 +89,10 @@
   --field-bg: #0a0a0d;
   --switch-bg: #2a2a33;
   --scrollbar: #33333d;
+  --pop-bg: #1c1c23;
+  --pop-line: #3a3a46;
+  --pop-hi: rgba(255, 255, 255, 0.05);
+  --pop-hover: rgba(255, 255, 255, 0.07);
   color-scheme: dark;
 }
 
@@ -116,6 +129,11 @@
   --field-bg: #f7f9fc;
   --switch-bg: #ccd6e3;
   --scrollbar: #c2ccd9;
+  /* 亮色下浮层必须纯白不透明，半透明会看见底下的画面透上来 */
+  --pop-bg: #ffffff;
+  --pop-line: #ccd7e6;
+  --pop-hi: rgba(255, 255, 255, 1);
+  --pop-hover: rgba(22, 40, 63, 0.07);
   color-scheme: light;
 }
 
@@ -433,6 +451,23 @@ html[data-theme='liquid'] .field {
   background: rgba(255, 255, 255, 0.06);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
+}
+
+/* 下拉弹层（自绘的那个）：跟顶栏 / 抽屉同一套玻璃语言 */
+html[data-theme='liquid'] .sf-pop {
+  background: rgba(16, 24, 37, 0.9);
+  -webkit-backdrop-filter: blur(22px) saturate(1.7);
+  backdrop-filter: blur(22px) saturate(1.7);
+}
+
+/*
+ * 兜底：万一还有没换掉的原生 <select>，至少让它的展开列表跟着主题走 ——
+ * Win 上 Chrome 的 option 列表会读 color-scheme，但 Firefox / 部分 linux 桌面
+ * 仍然是白底黑字，这里显式给上背景与文字色（列表在 Windows 上能用）。
+ */
+select.field option {
+  background: var(--pop-bg);
+  color: var(--text);
 }
 
 /* 设置抽屉：大块毛玻璃（遮罩也加一层薄 blur，抽屉像浮在虚化的页面上） */

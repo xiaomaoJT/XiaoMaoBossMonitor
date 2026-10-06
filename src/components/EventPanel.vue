@@ -339,23 +339,28 @@
                 <dt>推送通道</dt>
                 <dd>
                   <div class="ch-list">
+                    <!--
+                      标签上写「实际结果」而不是「配置开关」：
+                      推到了就显示 已送达，没轮到这个渠道才亮 off。
+                      以前只认 c.on（配置判定），导致「三条都推送成功了、这里全是 off」。
+                    -->
                     <span
                       v-for="c in pushRows"
                       :key="c.id"
                       class="ch-tag"
-                      :class="{ on: c.on }"
+                      :class="{ on: c.on || c.sent, silenced: c.silenced }"
                       :title="c.why"
                     >
                       <i class="ch-dot"></i>
                       {{ c.label }}
-                      <em>{{ c.on ? 'on' : 'off' }}</em>
+                      <em>{{ c.silenced ? '待汇总' : c.sent ? '已送达' : c.on ? 'on' : 'off' }}</em>
                     </span>
                     <span class="ch-note" v-if="!pushRows.length">
                       该通道已关闭「推送总开关」，三个渠道都不会推送
                     </span>
                   </div>
-                  <ul class="ch-why" v-if="pushRows.some((c) => !c.on)">
-                    <li v-for="c in pushRows.filter((x) => !x.on)" :key="c.id">
+                  <ul class="ch-why" v-if="pushRows.some((c) => !c.sent)">
+                    <li v-for="c in pushRows.filter((x) => !x.sent)" :key="c.id">
                       {{ c.label }}：{{ c.why }}
                     </li>
                   </ul>
@@ -861,6 +866,7 @@ const pushRows = computed(() => {
     }
   }
   const camCh = ev.channels || null
+  const pushed = String(ev.pushChannels || '')
   return [
     ['ding', '钉钉'],
     ['wecom', '企微'],
@@ -869,7 +875,8 @@ const pushRows = computed(() => {
     id,
     label,
     on: camCh ? camCh[id] !== false : true,
-    sent: false,
+    // 兜底也要认实际结果，别再一律写 false 让标签全亮 off
+    sent: pushed.includes(label),
     why: camCh && camCh[id] === false ? '该通道未勾选此渠道' : '已开启'
   }))
 })
@@ -1236,6 +1243,8 @@ header {
   overflow: hidden;
   cursor: zoom-in;
   min-height: 180px;
+  /* 同上：别被 flex 压扁，截图区域该占多大就占多大，超出部分由 .dt-body 滚 */
+  flex: 0 0 auto;
   display: grid;
   place-items: center;
 }
@@ -1311,6 +1320,15 @@ header {
   border-radius: 10px;
   overflow: hidden;
   background: var(--line-soft);
+  /*
+   * ⚠️ 这里必须锁死 flex-shrink。
+   * `overflow: hidden` 会把这个元素变成滚动容器，flex 布局下它的「内容最小高度」
+   * 会按 0 算，于是父级 .dt-body 一挤压，网格就被压成只剩一截，
+   * 后面的行全部被 overflow 裁掉 —— 界面上就是「详情弹窗滚不动、下面的看不了」，
+   * 而 .dt-body 反而量出来 scrollHeight === clientHeight（没有可滚区域）。
+   * 锁住之后，超出的部分交给 .dt-body 的 overflow:auto 去滚。
+   */
+  flex: 0 0 auto;
 }
 
 .dt-row {
@@ -1380,6 +1398,17 @@ header {
   color: #bfe9d1;
   border-color: color-mix(in srgb, var(--ok) 40%, transparent);
   background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+
+.ch-tag.silenced {
+  color: #ffd9a3;
+  border-color: color-mix(in srgb, #f5a623 45%, transparent);
+  background: color-mix(in srgb, #f5a623 12%, transparent);
+}
+
+.ch-tag.silenced .ch-dot {
+  background: #f5a623;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #f5a623 18%, transparent);
 }
 
 .ch-tag em {

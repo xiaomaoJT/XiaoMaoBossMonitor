@@ -41,7 +41,7 @@ export const LINE = '━━━━━━━━━━━━━━'
 export const TEMPLATE_VARS = [
   { key: 'icon', label: '事件图标', sample: '🚶', desc: '按事件类型自动变化' },
   { key: 'title', label: '报警标题', sample: '【监控报警】人形识别', desc: '含自定义前缀' },
-  { key: 'channel', label: '通道名称', sample: '大门外' },
+  { key: 'channel', label: '通道名称', sample: '门口' },
   { key: 'channelId', label: '通道编号', sample: 'cam-1' },
   { key: 'time', label: '时间', sample: '2026-09-30 20:33:05 周三' },
   { key: 'type', label: '事件类型', sample: '人形识别（AI）', desc: '含人脸姓名 / 区域名等详情' },

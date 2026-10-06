@@ -69,7 +69,7 @@
       <div v-else class="tg-view" v-html="previewText"></div>
     </div>
     <p class="hint">
-      预览用的是示例数据（大门外 · 人形识别 87%）；实际推送时变量会换成真实内容。
+      预览用的是示例数据（门口 · 人形识别 87%）；实际推送时变量会换成真实内容。
       {{ active === 'tg' ? 'Telegram 支持 <b>粗体</b> <i>斜体</i> <a>链接</a> 标签。' : '加粗、引用、链接等 Markdown 语法在群里会正常渲染。' }}
     </p>
   </div>
@@ -140,7 +140,7 @@ function resetTpl() {
 /** 示例数据：尽量覆盖所有变量，让人看清每一行长什么样 */
 const SAMPLE_RECORD = {
   id: 'cam-1',
-  name: '大门外',
+  name: '门口',
   type: 'person',
   ratio: 0.87,
   time: Date.now(),

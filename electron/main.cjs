@@ -278,6 +278,33 @@ function registerNotifyIpc() {
       return false
     }
   })
+
+  /**
+   * 重启整个桌面端：先 app.relaunch() 登记「退出后重启」，再 quit。
+   * 1.2s 兜底 app.exit(0) 保证一定重启（与 monitor:quit 同款保险）。
+   * ⚠️ 后端若是独立 node 进程（非主进程托管），它的重启由后端自身负责，
+   * 这里只重启桌面端 GUI。
+   */
+  ipcMain.handle('monitor:restart', () => {
+    try {
+      try {
+        app.relaunch()
+      } catch (e) {
+        /* 某些平台 relaunch 可能抛，忽略后走 exit 兜底 */
+      }
+      app.quit()
+      setTimeout(() => {
+        try {
+          app.exit(0)
+        } catch (e) {
+          /* 进程都要没了，忽略 */
+        }
+      }, 1200)
+      return true
+    } catch (e) {
+      return false
+    }
+  })
 }
 
 /* ------------------------------------------------------------------ */
