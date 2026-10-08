@@ -149,7 +149,7 @@ Monitor/
 │  └─ workers/aiWorker.js      ONNX 推理 Worker（前端用）
 │
 ├─ server/                     ★ 常驻后端（Node，无框架）
-│  ├─ headless-monitor.mjs     主服务：HTTP API / 配置热更新 / 全链路编排（约 1770 行）
+│  ├─ headless-monitor.mjs     主服务：HTTP API / 配置热更新 / 全链路编排（约 2120 行）
 │  ├─ analyzer.mjs             每路一个分析器：跟踪 / 区域 / 人脸 / 姿态 / 计数
 │  ├─ detector.mjs             ONNX 推理（onnxruntime-node），按「槽位」区分模型
 │  ├─ source.mjs               流 → JPEG 帧管道（ffmpeg；ws-flv 走 ws 灌 stdin）
@@ -159,7 +159,8 @@ Monitor/
 │  ├─ face-lib.mjs             人脸库（512 维向量 + 内存缓存 + 余弦比对）
 │  ├─ imageops.mjs             纯 JS 位图 + 最小 Canvas 2D 实现（给 alignFace 用）
 │  ├─ compat.mjs               Node 兼容层（window / document / localStorage）
-│  ├─ tg-remote.mjs            Telegram 远程控制（指令表 / 解析 / 长轮询）
+│  ├─ tg-remote.mjs            Telegram 远程控制（指令表 / 解析 / 长轮询 / 游标落盘）
+│  ├─ tg-guard.mjs             远程重启熔断（落盘计数，防重启死循环）
 │  ├─ duty-check.mjs           静默查岗（/check duty）
 │  ├─ restart.mjs              自愈重启器（端口释放 → spawn → 自检 → 回滚）
 │  ├─ hard-reboot.mjs          系统级硬重启（三平台命令 + 权限检测）
@@ -171,6 +172,8 @@ Monitor/
 │     ├─ monitor.db            SQLite：事件 / 人脸库 / 待录入 / kv
 │     ├─ shots/                事件快照 JPEG
 │     ├─ restart.log / .json   重启日志与台账
+│     ├─ tg-offset.json        TG 指令游标（重启不重放积压，见 5.12）
+│     ├─ tg-reboot.json        远程重启熔断台账（见 5.12）
 │     └─ localstorage.json     推送统计的持久化（shim 出来的 localStorage）
 │
 ├─ public/                     构建期静态素材
@@ -426,6 +429,28 @@ analyzer.mjs（每路一个实例）
 
 危险指令（`/reboot`、`/hardreboot`）额外要 `allowReboot` 开关，且默认关闭。每条指令都写一行审计日志（时间 / 来源 id / 指令 / 结果）。
 
+### 5.12 启动重放与积压（为什么「一启动就反复重启」）
+
+`getUpdates` 是**确认式**的：Telegram 只有在收到「**下一次带更大 offset** 的 `getUpdates`」时，才认为之前那批已送达并真正删除。如果服务在确认之前就退出/重启了，那批 update 会**原封不动留在队列里**；而**不带 `offset`** 调用 `getUpdates` 会返回**全部未确认的积压**，并且不删除。
+
+而 `/reboot` 恰好就是「执行完立刻把进程换掉」的指令 —— 于是三件事叠加成死循环：
+
+1. 取到积压里的 `/reboot confirm` → 执行重启 → 进程被换掉，`offset` 没来得及确认；
+2. 指令游标原先**只在内存里**，重启就归零；
+3. 远程 `/reboot` 走 `force: true`，**故意跳过**重启风暴保护（那条保护统计的是「失败的自动重启」，而循环里每一次重启都是「成功」的，转多久都不会触发）。
+
+⇒ 新进程不带 `offset` 再取一遍 → 同一条 `/reboot confirm` 被重放 → 再重启 → 无限循环。
+
+三处修复：
+
+| 修复 | 位置 | 作用 |
+|---|---|---|
+| **指令游标落盘** `server/data/tg-offset.json` | `tg-remote.mjs` | 重启后从上次位置继续，**不重放**。关键：**先把游标落盘、再执行业务** —— `/reboot` 会在执行过程中把进程换掉，只有提前落盘才来得及 |
+| **远程重启熔断** | `tg-guard.mjs` | 10 分钟内因 TG 指令重启超过 3 次就拒绝并告警（回执里直接说明原因与解除时间）。台账**落盘**，否则每轮重启都把内存计数清零 |
+| **`--drop-pending` 启动参数** | `headless-monitor.mjs` | 手动清一次积压：启动时**先清空、再开始收指令**，日志报出清掉几条 |
+
+游标落盘带来的是 **at-most-once** 语义：若在「落盘之后、执行之前」崩溃，这条指令会**丢失**。对 `/reboot` 这类危险指令这正是想要的偏向 —— 宁可漏执行一次，也绝不重复执行。
+
 ---
 
 ## 六、各端运行方式
@@ -463,8 +488,13 @@ npm run preview      # 起 vite preview：http://127.0.0.1:4173
 ```bash
 npm run server                               # 按 server/config.json 启动，默认 8787
 node server/headless-monitor.mjs --port=9000 # 换端口
+node server/headless-monitor.mjs --drop-pending   # 启动时先清空 Telegram 侧积压的指令
 npm run server:status                        # curl 一下 /api/status 看状态
 ```
+
+> **`--drop-pending` 什么时候用**：如果服务**一启动就反复重启**，多半是 Telegram 那边积压了旧的
+> `/reboot confirm`（详见下面「反复重启」小节）。带上这个参数启动一次即可清除，日志会报出
+> 清掉了几条；下次正常启动就不用再带。它只作用于本次启动，不会被自重启的子进程继承。
 
 Windows 上直接**双击 `start-windows.bat`**（会自动开浏览器并启动服务，窗口保持打开即代表在跑）。
 
@@ -699,6 +729,9 @@ ffmpeg 版本问题。市面 ws-flv 大量使用增强型 FLV（`codecId=0` + Fo
 **Q：远程 `/reboot` 没反应？**
 先看 `allowReboot` 开了没；再看是不是连败触发了风暴保护（手动/远程 `force` 不受限，但自动重启会被暂停）；最后看 `GET /api/restart-status` 的 `consecFailures`。
 
+**Q：后端服务一启动就一直在反复重启？**
+Telegram 侧积压了旧的 `/reboot confirm`，被反复重放执行。用 `node server/headless-monitor.mjs --drop-pending` 启动一次即可（日志会报出清掉了几条），之后正常启动就行。根因与三处修复见 [5.12](#512-启动重放与积压为什么一启动就反复重启)。附带症状：连续远程重启超过 3 次会被**熔断**拒绝，回执里会直接说明还要等多久。
+
 **Q：硬重启之后监控没回来？**
 硬重启只负责重启机器，**不会**帮你把服务拉起来。必须先配开机自启。
 
@@ -712,7 +745,7 @@ Windows 需管理员；macOS 需给本进程「辅助功能」授权；Linux 需
 不会。每日统计走 `useDailyStats` 独立存储，不受事件条数淘汰与清空影响。
 
 **Q：想彻底重置后端？**
-删掉 `server/data/` 即重置（数据库 + 快照 + 重启台账全在里面）。只清事件不清配置的话，用设置里的「清空事件」。
+删掉 `server/data/` 即重置（数据库 + 快照 + 重启台账 + TG 指令游标 `tg-offset.json` + 远程重启熔断台账 `tg-reboot.json` 全在里面）。只清事件不清配置的话，用设置里的「清空事件」。
 
 ---
 

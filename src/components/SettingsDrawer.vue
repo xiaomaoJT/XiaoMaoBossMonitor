@@ -2193,6 +2193,10 @@
                     {{ tgDiag.allowCount ? tgDiag.allowCount + ' 个用户' : '为空 —— 任何人发指令都会被静默丢弃' }}
                   </span>
                 </div>
+                <div class="diag-row">
+                  <span class="diag-k">积压指令</span>
+                  <span class="diag-v" :class="tgPendingClass">{{ tgPendingText }}</span>
+                </div>
                 <div class="diag-row" v-if="tgDiag.lastRejectAt">
                   <span class="diag-k">最近被拒</span>
                   <span class="diag-v err-text">{{ tgDiag.lastRejectId }} · {{ tgDiag.lastRejectReason }}</span>
@@ -4637,6 +4641,31 @@ const tgWebhookSet = computed(() => {
   const b = tgBotInfo.value
   return !!(b && b.webhook && b.webhook.set)
 })
+/**
+ * 「Telegram 侧还有多少条指令没被处理」—— 直接回答「是不是有积压的指令」。
+ *
+ * 数据来自 `getWebhookInfo.pending_update_count`（后端自检时取的），所以它是
+ * **上次自检那一刻**的快照，不是实时值。判读方式：
+ *   - 恒为 0          → 一切正常；
+ *   - 持续不为 0      → 监听器没在消费（或刚从一大堆积压里启动），可用
+ *                       `--drop-pending` 启动一次清空；
+ *   - 未知（-1）      → 还没自检过 / 自检失败，点「测试连接」查一次。
+ * 「确定 0 条」和「没查到」必须区分开，否则用户会把"没查到"当成"没问题"。
+ */
+const tgPending = computed(() => Number(tgDiag.value.pendingUpdates))
+const tgPendingText = computed(() => {
+  const n = tgPending.value
+  if (!tgDiag.value.running) return '—（监听器未运行）'
+  if (!Number.isFinite(n) || n < 0) return '未知 —— 点「测试连接」查一次'
+  if (n === 0) return '0 条（正常）'
+  return `${n} 条待处理 —— 长期不降可用 --drop-pending 启动一次清空`
+})
+const tgPendingClass = computed(() => {
+  const n = tgPending.value
+  if (!Number.isFinite(n) || n < 0) return 'muted'
+  return n > 0 ? 'err-text' : 'ok-text'
+})
+
 const tgTesting = ref(false)
 /** 自检结果文本（贴着按钮显示，不弹 toast —— 排障时更需要能反复看） */
 const tgProbeMsg = ref('')
