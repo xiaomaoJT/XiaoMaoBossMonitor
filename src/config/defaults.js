@@ -437,9 +437,17 @@ export const HIDDEN_OPTIONS = {
       { start: '12:00', end: '13:30' }
     ],
     /**
-     * 每个免打扰时段「开启前」是否先推送一条提醒（默认开）。
-     * 提醒会告诉：本次免打扰的时长、期间仍持续统计但不实时推送、结束时间，
-     * 以及结束后会自动汇总推送本时段内捕获的全部报警。可在设置里关掉。
+     * 免打扰「开始 / 结束」是否都推一条提醒（默认开）。
+     *
+     * 开始那条告诉：本次免打扰的时长、期间仍持续统计但不实时推送、结束时间，
+     * 以及结束后会推送结束提醒 + 汇总本时段内捕获的全部报警；
+     * 结束那条告诉：本时段结束了、期间收存了多少条报警（没有就说没有），
+     * 并附上详尽汇总 —— **即使一条报警都没捕获到，结束提醒也照发**，
+     * 否则用户会以为静默卡住了。
+     *
+     * ⚠️ 提醒发给**已配置好的三端**（钉钉 / 企微 / TG），
+     * 不受下面 channels（静默期间暂停实时推送的渠道）勾选影响。
+     * 关掉这个开关只保留「有报警才发的汇总」，开始 / 结束都不再通知。
      */
     preNotify: true,
     /**
@@ -449,7 +457,7 @@ export const HIDDEN_OPTIONS = {
     start: '20:00',
     end: '08:00',
     /**
-     * 静默时段内暂停实时推送、改在结束时汇总的渠道。
+     * 静默时段内暂停**实时逐条推送**的渠道（注意：不是「提醒发去哪」）。
      * 空数组 = 不暂停任何渠道（等于没开）。默认三端都参与。
      */
     channels: ['ding', 'wecom', 'tg'],
@@ -457,10 +465,14 @@ export const HIDDEN_OPTIONS = {
     /* ---- 临时静默（item 112）：手动「接下来 N 小时别吵我」 ----
      * 与上面的定时静默并存，且**优先级更高**：
      *   - tempUntil    截止时间戳（毫秒），0 / 缺省 = 未开启
+     *   - tempSince    本次静默的**开始时刻**（毫秒）。只用于「静默查岗」（远程 /check duty）
+     *                  划查询区间：第一次查岗要看的就是「静默开始 → 现在」。参与静默判定
+     *                  的仍是 tempUntil，这个字段丢了不影响静默本身。
      *   - tempChannels 覆盖的渠道；空数组则沿用上面的 channels
      *   - tempLabel    用途备注（会出现在状态文案里，便于回头看当时为什么静默）
      * 用于会议、演示、临时排查这类"这段时间别给我发消息"的场景。 */
     tempUntil: 0,
+    tempSince: 0,
     tempChannels: [],
     tempLabel: ''
   },
@@ -492,6 +504,25 @@ export const HIDDEN_OPTIONS = {
     days: 1,
     /** 每隔多少小时触发一次（与 days 叠加，例如 1 天 0 小时 = 每天一次） */
     hours: 0
+  },
+
+  /* ---------------- 系统级硬重启（最后手段，默认关） ----------------
+   * ⚠️ 注意：这不是「重启 BossMonitor 进程」，而是重启**整台机器**。
+   *    - 机器会下线几分钟；
+   *    - 重启后 BossMonitor **不会自己回来**，除非另外配了开机自启
+   *      （Windows 任务计划程序 / NSSM 服务、macOS launchd、Linux systemd）；
+   *    - 需要管理员 / root 权限（Windows 的 shutdown、Linux 的 systemctl；
+   *      macOS 走 osascript 需要给本进程授予「辅助功能」权限）。
+   *
+   * 它的定位是「自愈重启这条正常路子确实走不通了」时的兜底：
+   * 只有 enabled 打开、且 onFailure 也打开时，才会在
+   * 「拉起新进程失败 + 回滚也失败」的情况下自动执行。
+   */
+  systemReboot: {
+    /** 是否允许执行系统级硬重启（默认关） */
+    enabled: false,
+    /** 允许在自愈重启与回滚都失败时自动执行，作为兜底（默认关） */
+    onFailure: false
   },
 
   /* ---------------- 报警提醒方式 ---------------- */
@@ -551,8 +582,12 @@ export const HIDDEN_OPTIONS = {
      */
     proxyBase: '',
 
-    /** 需要推送的通道 id 列表，默认只推第一个 */
-    cameras: ['cam-1'],
+    /**
+     * 「需要推送的通道」—— 由「监控通道」页的推送开关派生（见 syncChannelCameras），
+     * 不要当成第二个独立开关来理解/编辑。
+     * 内置配置里给的就是 HIDDEN_CAMERAS 中 push 为 true 的那三路：门口 / 电梯 / 大厅。
+     */
+    cameras: ['cam-1', 'cam-4', 'cam-6'],
 
     /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
     events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
@@ -668,8 +703,8 @@ export const HIDDEN_OPTIONS = {
     /** 报警截图是否也作为文件再发一份原图（想看无损原图时开启） */
     alsoSendOriginal: false,
 
-    /* ---- 需要推送的通道 id 列表 ---- */
-    cameras: ['cam-1'],
+    /* ---- 需要推送的通道 id 列表（由通道级推送开关派生，见 syncChannelCameras） ---- */
+    cameras: ['cam-1', 'cam-4', 'cam-6'],
     /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
     events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
 
@@ -701,7 +736,19 @@ export const HIDDEN_OPTIONS = {
        * 是否允许 /reboot（重启系统）。
        * 危险动作单独一档开关：调试远程功能时先关掉，确认无误再开。
        */
-      allowReboot: false
+      allowReboot: false,
+      /**
+       * 静默查岗（/check duty）单次最多推几张截图。
+       * 0 = 不限（只受代码里 200 张的防呆上限约束）—— 默认就是这个，因为用户要的是
+       * 「图片全部推送过来」。觉得刷屏就调小，超出的部分可在事件面板里回看。
+       */
+      dutyMaxImages: 0,
+      /**
+       * 静默查岗：两张截图之间的间隔（毫秒）。
+       * Telegram 对同一会话的连续 sendPhoto 有频率限制，并发发图大概率被 429 拒掉，
+       * 所以刻意串行 + 留间隔。网络差 / 图大时可以调大到 1200~2000。
+       */
+      dutyImageGapMs: 700
     }
   },
 
@@ -723,8 +770,8 @@ export const HIDDEN_OPTIONS = {
      */
     proxyBase: '',
 
-    /** 需要推送的通道 id 列表 */
-    cameras: ['cam-1'],
+    /** 需要推送的通道 id 列表（由通道级推送开关派生，见 syncChannelCameras） */
+    cameras: ['cam-1', 'cam-4', 'cam-6'],
     /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
     events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
     /** 画面移动的变动幅度低于该百分比时不推送（0 = 不限制） */
@@ -888,11 +935,15 @@ export const HIDDEN_PASSCODE = '***REMOVED-passcode***'
  * 载入后大屏只留 HIDDEN_HIDDEN_IDS 之外的三路，其余四路在通道列表里但默认不显示。
  */
 export function cloneHiddenConfig() {
-  return {
-    cameras: JSON.parse(JSON.stringify(HIDDEN_CAMERAS)),
-    options: JSON.parse(JSON.stringify(HIDDEN_OPTIONS)),
-    hiddenIds: [...HIDDEN_HIDDEN_IDS]
-  }
+  const cameras = JSON.parse(JSON.stringify(HIDDEN_CAMERAS))
+  const options = JSON.parse(JSON.stringify(HIDDEN_OPTIONS))
+  /*
+   * 渠道级「需要推送的监控」名单直接从通道级推送开关派生一次 ——
+   * 免得 HIDDEN_CAMERA_PRESET 里改了哪几路要推，这边忘了跟着改，
+   * 又出现「监控通道里开了推送、实际推不出去」的那种不一致。
+   */
+  syncChannelCameras(cameras, options)
+  return { cameras, options, hiddenIds: [...HIDDEN_HIDDEN_IDS] }
 }
 
 /**
@@ -933,6 +984,51 @@ export function cloneDefaultCameras() {
     aiExt: { ...c.aiExt },
     zones: (c.zones || []).map((z) => ({ ...z, rect: { ...z.rect } }))
   }))
+}
+
+/**
+ * 三个推送渠道：`id` = 通道级 channels 的字段名，`cfgKey` = options 里的配置块名。
+ * 顺序 = 界面上展示的顺序。
+ */
+export const PUSH_CHANNEL_KEYS = [
+  { id: 'ding', cfgKey: 'dingtalk', label: '钉钉' },
+  { id: 'wecom', cfgKey: 'wecom', label: '企微' },
+  { id: 'tg', cfgKey: 'telegram', label: 'TG' }
+]
+
+/**
+ * 由「通道级推送配置」派生各渠道的「需要监听的监控」名单（渠道配置里的 cameras）。
+ * ----------------------------------------------------------------------------
+ * 唯一权威是「监控通道」页那一份：cam.push（总开关）+ cam.channels[渠道]。
+ * 渠道配置里的 cameras 只是它的**镜像**，服务两类消费方：
+ *   - 后端 watchdog 判断「哪几路掉线要提醒」（isWatchedCamera）
+ *   - 后端 headless-monitor 判断「哪几路要保活拉流」、状态页展示
+ *
+ * ⚠️ 历史坑：这份镜像以前是**独立可编辑**的第二道闸，而 checkChannel 把
+ * 「通道级」和「渠道级」做 AND —— 于是渠道配置里默认只有第一个通道（cam-1）时，
+ * 「监控通道」页把门口/电梯/大厅 三路推送都打开也没用，只有门口能推出来。
+ * 现在镜像由通道级单向派生，两边不可能再打架。
+ *
+ * ⚠️ 只在内容真的变了才赋值：调用方（App.vue）会把它挂在 options 的深度监听上，
+ * 无条件赋新数组会「写 → 触发监听 → 再写」造成死循环。
+ *
+ * @param {Array}  cameras 当前通道列表
+ * @param {object} opts    options 配置对象（会原地更新 dingtalk/wecom/telegram.cameras）
+ */
+export function syncChannelCameras(cameras, opts) {
+  if (!opts || typeof opts !== 'object') return
+  const list = Array.isArray(cameras) ? cameras : []
+  PUSH_CHANNEL_KEYS.forEach(({ id, cfgKey }) => {
+    const cfg = opts[cfgKey]
+    if (!cfg || typeof cfg !== 'object') return
+    const want = list
+      .filter((cam) => cam && cam.push !== false && !(cam.channels && cam.channels[id] === false))
+      .map((cam) => cam.id)
+    const cur = Array.isArray(cfg.cameras) ? cfg.cameras : null
+    // 内容一致就一个字节都不动（幂等）
+    if (cur && cur.length === want.length && cur.every((x, i) => x === want[i])) return
+    cfg.cameras = want
+  })
 }
 
 /** 补齐历史配置里缺失的通道级推送开关，避免旧存档读进来是 undefined */

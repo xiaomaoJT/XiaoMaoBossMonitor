@@ -19,7 +19,7 @@ import { ref } from 'vue'
 import {
   buildAlarmMessage,
   buildMergedMessage,
-  buildSilentSummary,
+  buildSilentEndMessages,
   formatTime,
   normalizeDingTalk,
   sendDingTalk,
@@ -254,6 +254,8 @@ export function useAlertPush(options, hooks = {}) {
    *
    * 配置字段：
    *   tempUntil    临时静默截止时间戳（毫秒），0 / 缺省 = 未开启
+   *   tempSince    临时静默的**开始时刻**（毫秒）。只用来回答「这段静默是从什么时候算起」
+   *                （远程 /check duty 查岗要按它划查询区间），参与静默判定的仍是 tempUntil。
    *   tempChannels 临时静默覆盖的渠道；为空则沿用 channels（三端）
    *   tempLabel    可选的用途备注，会写进状态文案
    */
@@ -268,11 +270,37 @@ export function useAlertPush(options, hooks = {}) {
     if (!chans.length) return { active: false, expired: true, endMs: until }
     return {
       active: true,
-      startMs: now,
+      startMs: tempStartMs(c, now),
       endMs: until,
       channels: chans,
       reason: String(c.tempLabel || '').trim()
     }
+  }
+
+  /**
+   * 临时静默的**真实开始时刻**。
+   *
+   * 以前这里恒返回 `now`（调用时刻），对「还剩多久」这种展示没影响，
+   * 但「静默查岗」要按开始时刻划区间 —— 恒返回 now 就永远查不到任何积压事件。
+   *
+   * 取不到 tempSince 的情况只有一种：这条静默是**本版本之前**开启的（那时还没这个字段）。
+   * 这时退而求其次用「静默缓冲里最早的那条报警」当作开始时刻；缓冲也是空的话，
+   * 就只能退回 now —— 即这一次查岗看到的区间是空的。
+   *
+   * 刻意**不**用「截止时刻往前推 N 天」之类的估计：临时静默最长 7 天，一旦估计过大，
+   * 第一次查岗会把一周的积压一次性全推出去，比「那一次查不到」糟糕得多。
+   * 而且这只是升级那一刻的过渡态：静默结束提醒照旧会把本时段所有报警汇总送达，
+   * 下一次开启静默就会带上准确的 tempSince。
+   */
+  function tempStartMs(c, now) {
+    const since = Number(c.tempSince) || 0
+    if (since > 0 && since <= now) return since
+    let earliest = Infinity
+    silentBuffer.forEach((r) => {
+      const t = Number(r && r.time) || 0
+      if (t > 0 && t < earliest) earliest = t
+    })
+    return Number.isFinite(earliest) && earliest <= now ? earliest : now
   }
 
   /**
@@ -307,6 +335,8 @@ export function useAlertPush(options, hooks = {}) {
         startMs: temp.startMs,
         endMs: temp.endMs,
         channels: temp.channels,
+        // 用途备注要一路带到提醒文案里，否则「临时静默已开启」看不出是为什么静默的
+        reason: temp.reason || '',
         rangeLabel: `临时静默（至 ${p2t(e.getHours())}:${p2t(e.getMinutes())}）`,
         endLabel: `${p2t(e.getHours())}:${p2t(e.getMinutes())}`,
         leftLabel
@@ -333,38 +363,7 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /**
-   * 下一个静默结束时刻的时间戳（用于排程汇总推送）。
-   * 现在不在任何时段里 → 返回最近一个即将到来的结束点（多时段里取最早的那个）。
-   */
-  function nextQuietEndMs(now) {
-    /*
-     * 临时静默正在进行 → 汇总就排在这个窗口的末尾（不能排到夜里的固定时刻，
-     * 否则临时窗口内的报警要一直等到夜里才汇总；也不能排到固定时刻之后，
-     * 否则用户明明设了 2 小时，结果 20 小时后才收到汇总）。
-     */
-    const temp = tempSilentState(now)
-    if (temp.active) return temp.endMs
-
-    const c = silentCfg()
-    if (!c || !c.enabled) return null
-    const slots = readSlots()
-    if (!slots.length) return null
-
-    // 已经在某个时段里 → 它的结束点就是最近的（重叠时 matchSlot 已取最宽的）
-    const cur = matchSlot(now)
-    if (cur) return cur.endMs
-
-    // 不在任何时段里 → 今天/明天最早到来的那个结束点
-    let best = null
-    slots.forEach((s) => {
-      const todayEnd = slotBoundary(now, s.end, 0)
-      const cand = todayEnd > now ? todayEnd : todayEnd + 1440 * 60000
-      if (best === null || cand < best) best = cand
-    })
-    return best
-  }
-
-  /** 某渠道此刻是否应被全局静默收存（不实时推） */
+   * 某渠道此刻是否应被全局静默收存（不实时推） */
   function isSilentSuppressed(id, now) {
     const s = silentState(now)
     if (!s.active) return false
@@ -378,24 +377,100 @@ export function useAlertPush(options, hooks = {}) {
   const silentSeen = new Set()
   let silentTimer = null
 
-  /** 排程：在最近的静默结束时刻发一次汇总（同一窗口只排一个定时器） */
-  function scheduleSilentFlush() {
-    if (silentTimer) return
-    const endMs = nextQuietEndMs(Date.now())
-    if (!endMs) return
-    const wait = Math.max(1000, endMs - Date.now())
+  /** 当前所处的静默窗口（开始/结束提醒、收尾文案都靠它定位）；null = 不在静默中 */
+  let activeWin = null
+  /** 已经发过「结束」提醒的窗口结束时刻：定时器与心跳都想去收尾，靠它只发一次 */
+  let flushedEndMs = 0
+  /**
+   * 被临时静默「顶掉」的那个定时时段签名。
+   * 临时静默到期时，如果底下那个定时时段还在跑，就不该再补一条
+   * 「免打扰时段已开启」——用户会以为是新开了个窗口。
+   */
+  let coveredSlotKey = ''
+
+  /**
+   * 静默相关消息（开始提醒 / 结束提醒 / 汇总）发给哪些渠道。
+   *
+   * 用户要求：只要静默提醒开着，就推给**现有已配置的三端**（钉钉 / 企微 / TG）。
+   * 注意这里刻意不看 silent.channels —— 那个勾选决定的是「静默期间哪些渠道
+   * 暂停实时推送」，跟「提醒本身发去哪」不是一回事：只对钉钉静默的人，
+   * 一样应该在企业微信 / TG 上看到「免打扰已开启 / 已结束」。
+   */
+  function noticeIds() {
+    return CHANNEL_DEFS.filter((d) => isReady(d.id)).map((d) => d.id)
+  }
+
+  /**
+   * 由当前时间推出所处窗口的信息对象；不在静默中返回 null。
+   * 这里把 silentState 的结果整理成后续排程 / 文案统一要用的形状。
+   */
+  function currentWindow(now) {
+    const st = silentState(now)
+    if (!st.active) return null
+    return {
+      key: `${st.temp ? 'temp' : 'slot'}:${st.endMs}`,
+      temp: !!st.temp,
+      startMs: st.startMs,
+      endMs: st.endMs,
+      rangeLabel: st.rangeLabel,
+      endLabel: st.endLabel,
+      channels: st.channels || null,
+      reason: st.reason || ''
+    }
+  }
+
+  /** 定时时段的稳定签名（不含时间戳），用于识别「临时静默顶掉的那个时段」 */
+  function slotSignature(now) {
+    const hit = matchSlot(now)
+    return hit ? `${hit.start}-${hit.end}` : ''
+  }
+
+  /** 已排上结束提醒的窗口末尾（同一个窗口不重复排，避免每条报警都重排定时器） */
+  let armedEndMs = 0
+
+  /**
+   * 排程本窗口的「结束提醒」。
+   *
+   * 关键：**不管窗口里有没有报警都要排**（用户要求结束后也有推送）。
+   * 原来只在有报警被收存时才排定时器，于是「静默了一晚什么都没发生」
+   * 就永远收不到结束通知。
+   */
+  function armSilentEnd(win) {
+    if (!win || !win.endMs) {
+      if (silentTimer) {
+        clearTimeout(silentTimer)
+        silentTimer = null
+      }
+      armedEndMs = 0
+      return
+    }
+    if (silentTimer && armedEndMs === win.endMs) return
+    if (silentTimer) {
+      clearTimeout(silentTimer)
+      silentTimer = null
+    }
+    armedEndMs = win.endMs
+    // +800ms 让「到点」这件事在内层判定里也真的算过了（matchSlot 用的是左闭右开）
+    const wait = Math.max(1000, win.endMs - Date.now() + 800)
     silentTimer = setTimeout(() => {
       silentTimer = null
-      flushSilentSummary().catch(() => {})
+      armedEndMs = 0
+      flushSilentSummary({ endMs: win.endMs, window: win }).catch(() => {})
     }, wait)
   }
 
-  /** 把汇总消息发到静默里被选中的、且当前可用的渠道，返回成功发出的渠道名 */
+  /** 兼容入口：按当前状态补排一次结束提醒（handleAlarm / startTempSilent 都会调） */
+  function scheduleSilentFlush() {
+    const win = currentWindow(Date.now())
+    if (win) armSilentEnd(win)
+  }
+
+  /** 把汇总消息发到给定渠道，返回成功发出的渠道名 */
   async function pushSilentSummary(ids, summary) {
     const sent = []
     if (ids.includes('tg')) {
       try {
-        await sendTelegramText(readCfg('tg'), summary.plain)
+        await sendTelegramText(readCfg('tg'), summary.plain || summary.html || '')
         recordPush('tg', true)
         sent.push('TG')
       } catch (e) {
@@ -430,64 +505,128 @@ export function useAlertPush(options, hooks = {}) {
     return sent
   }
 
-  /** 静默结束：把收存的报警汇成一条详尽消息发出去，然后清空缓冲 */
-  async function flushSilentSummary() {
-    const endMs = Date.now()
-    const buf = silentBuffer.splice(0, silentBuffer.length)
-    silentSeen.clear()
-    if (!buf.length) return
+  /**
+   * 静默收尾：发一条「免打扰时段已结束」提醒（含本时段汇总），然后清空缓冲。
+   *
+   * 三种触发来源：
+   *   1) 窗口到点（定时器 / 心跳兜底）；
+   *   2) 用户手动结束临时静默；
+   *   3) 设置页「立即推送静默汇总」按钮（kind='manual'：缓冲为空时不必打扰）。
+   *
+   * @param {object} [opts]
+   * @param {number} [opts.endMs]   本次结束对应的时间戳（默认现在）
+   * @param {object} [opts.window]  正在结束的那个窗口（有则用它写时段文案）
+   * @param {boolean}[opts.manual]  手动触发：没收到报警就不发（纯提醒按钮场景）
+   * @param {boolean}[opts.test]    设置页试发：只生成并发送，不动真实缓冲
+   */
+  async function flushSilentSummary(opts = {}) {
+    const now = Date.now()
+    const endMs = Number(opts.endMs) > 0 ? Number(opts.endMs) : now
+    // test（设置页试发）用副本，别把真正待汇总的事件提前掏空
+    const buf = opts.test ? silentBuffer.slice() : silentBuffer.splice(0, silentBuffer.length)
+    if (!opts.test) {
+      silentSeen.clear()
+      // 记下来：定时器与心跳都想来收尾，谁先到谁发，后面那个看到这个值就不再发
+      flushedEndMs = Math.max(flushedEndMs, endMs)
+      const closedWin = opts.window || null
+      if (closedWin && activeWin && activeWin.key === closedWin.key) activeWin = null
+      coveredSlotKey = ''
+    }
+
     /*
-     * 汇总发给谁：临时静默期间收存的就发给临时静默覆盖的渠道，
-     * 否则回落到夜间定时的 channels —— 不能一律用 channels，
-     * 否则「只对钉钉临时静默 1 小时」会把汇总也发给没被静默的企微。
+     * 什么情况下不发：
+     *   - 手动汇总（设置页按钮）且一无所有 → 没有可讲的内容，不打扰；
+     *   - preNotify 关闭 → 不再发状态提醒（有报警的汇总仍然要发）；
+     *   - 本进程不负责发提醒（后端模式下前端页面只被动跟随）且自己没有待汇总 →
+     *     不能跟着后端一起推「已结束」，否则同一条提醒会被两个进程各发一遍。
+     * 试发（test）不受这些限制，否则文案永远看不到效果。
      */
-    const temp = tempSilentState(endMs)
-    const tempLeft = temp.active || temp.expired ? temp.channels || null : null
-    const targetCfg = tempLeft || silentCfg().channels || []
-    const ids = targetCfg.filter((id) => isReady(id))
+    if (!buf.length && !opts.test && (opts.manual || silentCfg().preNotify === false || !preAllowed())) return
+
+    const ids = noticeIds()
     if (!ids.length) return
-    const startMs = buf.reduce((m, r) => Math.min(m, r.time || endMs), endMs)
-    const summary = buildSilentSummary(buf, silentCfg(), { startMs, endMs })
-    const sent = await pushSilentSummary(ids, summary)
-    ids.forEach((id) => {
-      const st = chState[id]
-      if (st) {
-        st.windowTs.push(endMs)
-        st.lastGlobalAt = endMs
-      }
+
+    const closedWin = opts.window || null
+    const startMs = closedWin
+      ? closedWin.startMs
+      : (buf.length ? buf.reduce((m, r) => Math.min(m, r.time || endMs), endMs) : endMs)
+    // 结束后是否还压在另一个免打扰窗口里（临时静默到期、夜间时段还在）
+    const next = currentWindow(endMs + 60000)
+    const summary = buildSilentEndMessages(buf, silentCfg(), {
+      startMs,
+      endMs,
+      rangeLabel: closedWin ? closedWin.rangeLabel : '',
+      stillSilent: !!next,
+      stillLabel: next ? next.rangeLabel : ''
     })
-    if (sent.length) notify(`静默时段汇总已推送（${sent.join(' + ')}）`)
+
+    const sent = await pushSilentSummary(ids, summary)
+    if (!opts.test) {
+      ids.forEach((id) => {
+        const st = chState[id]
+        if (st) {
+          st.windowTs.push(endMs)
+          st.lastGlobalAt = endMs
+        }
+      })
+      if (sent.length) {
+        notify(
+          buf.length
+            ? `静默结束提醒已推送（含 ${buf.length} 条汇总 · ${sent.join(' + ')}）`
+            : `静默结束提醒已推送（${sent.join(' + ')}）`
+        )
+      }
+    }
+    return summary
   }
 
-  /* ---------------- 免打扰时段「开启前」提醒（preNotify，默认开） ---------------- */
+  /* ---------------- 免打扰「开启 / 结束」提醒（preNotify，默认开） ---------------- */
 
-  /** 'HH:MM' → 当天第几分钟 */
+  /**
+   * 把配置里的时间写法统一成「当天第几分钟」。
+   *
+   * 两种都收：'20:00'（界面输入框给的字符串）与 1200（readSlots / matchSlot
+   * 内部就是分钟数）。**这里以前只认字符串**，而心跳传进来的是 matchSlot 的
+   * 数字结果 → hm2min 返回 null → buildPreSilenceMessages 恒返回 null →
+   * 开始提醒那条「时段格式无效」直接返回，从来没真正发出去过。
+   */
   function hm2min(hm) {
+    if (typeof hm === 'number' && Number.isFinite(hm)) return ((Math.round(hm) % 1440) + 1440) % 1440
     const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm || '').trim())
     if (!m) return null
     return Number(m[1]) * 60 + Number(m[2])
   }
 
+  /** 当天第几分钟 → 'HH:MM' */
+  function min2hm(min) {
+    const m = ((Math.round(Number(min) || 0) % 1440) + 1440) % 1440
+    const p2 = (n) => String(n).padStart(2, '0')
+    return `${p2(Math.floor(m / 60))}:${p2(m % 60)}`
+  }
+
+  /** 分钟数 → 「X 小时 Y 分」 */
+  function durMinutesText(durMin) {
+    const dh = Math.floor(durMin / 60)
+    const dm = durMin % 60
+    return dh ? (dm ? `${dh} 小时 ${dm} 分` : `${dh} 小时`) : `${dm} 分钟`
+  }
+
   /**
-   * 生成「免打扰时段开启前」提醒的三种文案（markdown / html / 纯文本）。
+   * 「免打扰时段开启」提醒的三种文案（markdown / html / 纯文本）。
    * 内容按用户要求讲清四件事：本次免打扰时长、期间仍持续统计、结束时间、
    * 结束后会推送什么。
+   * @param {object} slot 时段 { start, end }，值可以是 '20:00' 或分钟数
    */
   function buildPreSilenceMessages(slot) {
     const s = hm2min(slot && slot.start)
     const e = hm2min(slot && slot.end)
     if (s === null || e === null || s === e) return null
 
-    const p2 = (n) => String(n).padStart(2, '0')
-    const fmt = (min) => `${p2(Math.floor(min / 60))}:${p2(min % 60)}`
     // 结束时间早于开始时间 = 跨零点（夜里那场都是）
     const cross = e < s
-    const startLabel = fmt(s)
-    const endLabel = (cross ? '次日 ' : '') + fmt(e)
-    const durMin = cross ? 1440 - s + e : e - s
-    const dh = Math.floor(durMin / 60)
-    const dm = durMin % 60
-    const durText = dh ? (dm ? `${dh} 小时 ${dm} 分` : `${dh} 小时`) : `${dm} 分钟`
+    const startLabel = min2hm(s)
+    const endLabel = (cross ? '次日 ' : '') + min2hm(e)
+    const durText = durMinutesText(cross ? 1440 - s + e : e - s)
     const rangeText = `${startLabel} ~ ${endLabel}`
 
     return {
@@ -498,7 +637,7 @@ export function useAlertPush(options, hooks = {}) {
         `> **时段**：${rangeText}　（时长约 ${durText}）`,
         '>',
         '> 这段时间内**不再实时逐条推送**，但监控与事件**统计照常进行**，不会漏记。',
-        `> 到 **${endLabel}** 自动结束，届时会**汇总推送**本时段内捕获的全部报警。`
+        `> 到 **${endLabel}** 自动结束，届时会**推送结束提醒 + 汇总**本时段内捕获的全部报警。`
       ].join('\n'),
       html: [
         '🔕 <b>免打扰时段已开启</b>',
@@ -506,21 +645,69 @@ export function useAlertPush(options, hooks = {}) {
         `时段：<b>${rangeText}</b>（时长约 ${durText}）`,
         '',
         '这段时间内<b>不再实时逐条推送</b>，但监控与事件<b>统计照常进行</b>，不会漏记。',
-        `到 <b>${endLabel}</b> 自动结束，届时会<b>汇总推送</b>本时段内捕获的全部报警。`
+        `到 <b>${endLabel}</b> 自动结束，届时会<b>推送结束提醒 + 汇总</b>本时段内捕获的全部报警。`
       ].join('\n'),
       plain: [
         '🔕 免打扰时段已开启',
         `时段：${rangeText}（时长约 ${durText}）`,
         '这段时间内不再实时逐条推送，但监控与事件统计照常进行。',
-        `到 ${endLabel} 自动结束，届时会汇总推送本时段内捕获的全部报警。`
+        `到 ${endLabel} 自动结束，届时会推送结束提醒并汇总本时段内捕获的全部报警。`
       ].join('\n')
     }
   }
 
-  /** 发一条「免打扰时段开启前」提醒；preNotify 关着、或没配渠道时静默跳过 */
-  async function pushPreSilenceNotice(slot) {
-    if (silentCfg().preNotify === false) return { ok: false, reason: 'preNotify 已关闭' }
-    const msg = buildPreSilenceMessages(slot)
+  /**
+   * 「临时静默已开启」提醒（与结束提醒配对）。
+   * 临时静默是用户/远程主动开启的，文案里带上截止时刻与用途备注，
+   * 免得过后想不起来当时为什么静默。
+   */
+  function buildTempSilentMessages(win) {
+    const p2 = (n) => String(n).padStart(2, '0')
+    const e = new Date(win.endMs)
+    const endLabel = `${p2(e.getHours())}:${p2(e.getMinutes())}`
+    const durText = durMinutesText(Math.max(1, Math.round((win.endMs - win.startMs) / 60000)))
+    const reason = String(win.reason || '').trim()
+    const reasonMd = reason ? [`> **用途**：${reason}`] : []
+    const reasonPlain = reason ? [`用途：${reason}`] : []
+
+    return {
+      title: '🔕 临时静默已开启',
+      markdown: [
+        '### 🔕 临时静默已开启',
+        '>',
+        `> **截止**：${endLabel}　（时长约 ${durText}）`,
+        ...reasonMd,
+        '>',
+        '> 这段时间内**不再实时逐条推送**，但监控与事件**统计照常进行**，不会漏记。',
+        `> 到 **${endLabel}** 自动结束，届时会**推送结束提醒 + 汇总**本时段内捕获的全部报警。`
+      ].join('\n'),
+      html: [
+        '🔕 <b>临时静默已开启</b>',
+        '',
+        `截止：<b>${endLabel}</b>（时长约 ${durText}）`,
+        ...reasonPlain.map((s) => s.replace('用途：', '用途：<b>') + '</b>'),
+        '',
+        '这段时间内<b>不再实时逐条推送</b>，但监控与事件<b>统计照常进行</b>，不会漏记。',
+        `到 <b>${endLabel}</b> 自动结束，届时会<b>推送结束提醒 + 汇总</b>本时段内捕获的全部报警。`
+      ].join('\n'),
+      plain: [
+        '🔕 临时静默已开启',
+        `截止：${endLabel}（时长约 ${durText}）`,
+        ...reasonPlain,
+        '这段时间内不再实时逐条推送，但监控与事件统计照常进行。',
+        `到 ${endLabel} 自动结束，届时会推送结束提醒并汇总本时段内捕获的全部报警。`
+      ].join('\n')
+    }
+  }
+
+  /**
+   * 发一条「免打扰开始」提醒。
+   * @param {object} win  窗口信息（currentWindow 的产物；win.temp 决定用哪套文案）
+   * @param {object} slot 定时时段的 { start, end }（分钟数，来自 matchSlot）
+   */
+  async function pushStartNotice(win, slot) {
+    if (silentCfg().preNotify === false) return { ok: false, reason: '静默提醒已关闭' }
+    const msg = win && win.temp ? buildTempSilentMessages(win) : buildPreSilenceMessages(slot)
     if (!msg) return { ok: false, reason: '时段格式无效' }
     const r = await sendDirect({
       title: msg.title,
@@ -529,27 +716,106 @@ export function useAlertPush(options, hooks = {}) {
       kind: 'silent'
     })
     // sendDirect 成功时返回 { ok, reason }（reason 为空=全渠道成功，非空=部分失败说明），没有 sent 字段
-    if (r && r.ok) notify(r.reason ? `免打扰提醒已推送（${r.reason}）` : '免打扰提醒已推送')
+    if (r && r.ok) notify(r.reason ? `免打扰开始提醒已推送（${r.reason}）` : '免打扰开始提醒已推送')
     return r
   }
 
-  /*
-   * 进入时段的那一刻发提醒。
-   *
-   * 用一个 30 秒心跳比对「当前命中的时段签名」：签名从空变成某个时段，
-   * 说明刚踏进一个新的免打扰窗口，这时发一条提醒。原来打算用定时器
-   * 精确卡在 start，但那样一改配置就得重排一堆定时器，边界上（改时段、
-   * 跨零点、休眠唤醒）反而更容易漏发；心跳比对简单且不会重复。
-   */
-  let preHeartbeat = null
-  let lastPreKey = ''
-  function silentKeyOf(now) {
-    const s = silentState(now)
-    if (!s.active) return ''
-    if (s.temp) return `temp:${s.endMs}` // 临时静默不在这里提醒（只提醒定时时段）
-    const hit = matchSlot(now)
-    return hit ? `slot:${hit.start}-${hit.end}` : ''
+  /** 设置页「试发一条开始提醒」用的入口（不受 preNotify 开关限制，改完文案先看效果） */
+  function pushPreSilenceNotice(slot) {
+    const slots = readSlots()
+    const hit = matchSlot(Date.now())
+    const useSlot = slot || hit || slots[0] || null
+    // 试发时若正处在临时静默里，用临时静默的文案更贴近真实
+    const win = currentWindow(Date.now())
+    return pushStartNotice(win && win.temp ? win : { temp: false }, useSlot)
   }
+
+  /**
+   * 设置页「试发一条结束提醒」用的入口。
+   * 不走真实的缓冲清理（test 模式），所以随便点也不会把待汇总的事件弄丢。
+   */
+  function pushPostSilenceNotice() {
+    const now = Date.now()
+    let win = currentWindow(now)
+    if (!win) {
+      // 不在窗口里就拿最近一个时段造一个，方便看清楚「结束提醒」长什么样
+      const s = readSlots()[0]
+      if (s) {
+        const endMs = s.start < s.end ? slotBoundary(now, s.end, 0) : slotBoundary(now, s.end, 1)
+        win = {
+          key: `slot:${endMs}`,
+          temp: false,
+          startMs: slotBoundary(now, s.start, 0),
+          endMs,
+          rangeLabel: `${min2hm(s.start)} ~ ${s.end < s.start ? '次日 ' : ''}${min2hm(s.end)}`,
+          endLabel: min2hm(s.end),
+          channels: null,
+          reason: ''
+        }
+      }
+    }
+    return flushSilentSummary({ endMs: win ? win.endMs : now, window: win, test: true })
+  }
+
+  /*
+   * 免打扰窗口心跳（30 秒一次）。
+   *
+   * 一次签名比对同时管三件事：
+   *   1) 刚踏进一个新窗口 → 发「免打扰已开启」提醒，并把**结束提醒排到窗口末尾**；
+   *   2) 窗口已结束但定时器没跑到（休眠 / 卡顿 / 进程重启 / 到点被系统睡过去）
+   *      → 在这里补发结束提醒；
+   *   3) 窗口被替换（临时静默顶掉定时时段）→ 按新窗口重排，结束后不重复报「已开启」。
+   *
+   * 用签名比对而不是给每个时段排一堆定时器：改配置、跨零点、休眠唤醒都不会漏发。
+   */
+  let silentHeartbeat = null
+  function tickSilentWindow(now = Date.now()) {
+    const win = currentWindow(now)
+    const prev = activeWin
+    const key = win ? win.key : ''
+    if (key === (prev ? prev.key : '')) return
+
+    if (!win) {
+      activeWin = null
+      coveredSlotKey = ''
+      /*
+       * 窗口刚结束，但结束定时器还没收尾 → 兜底补一条。
+       * `!silentTimer` 这个条件很关键：定时器是**故意**排在 endMs+800ms 的，
+       * 心跳完全可能先一步在 endMs 整点跑到这里，那时定时器马上就会发，
+       * 不拦一下就会连着发两条一模一样的结束提醒。
+       */
+      if (prev && prev.endMs > flushedEndMs && !silentTimer && preAllowed()) {
+        flushSilentSummary({ endMs: prev.endMs, window: prev }).catch(() => {})
+      }
+      return
+    }
+
+    /*
+     * 临时静默会「顶掉」底下的定时时段：先把那个时段签名记下来，
+     * 等临时静默结束时如果它还在跑，就不再补一条「时段已开启」——
+     * 它不是新窗口，只是一直在那里。
+     */
+    const underKey = win.temp ? slotSignature(now) : ''
+    const resumed = !win.temp && ((coveredSlotKey && slotSignature(now) === coveredSlotKey) || (prev && prev.temp))
+    /*
+     * 上一个窗口在时间上已经走完、但还没收尾（典型：临时静默到期，正好被
+     * 底下的夜间时段接管）→ 先把它的结束提醒发掉再换窗口。
+     * 否则 armSilentEnd 会把它的结束定时器清掉，那段时间攒下的报警和
+     * 「已结束」这条提醒就再也不会发出去了。
+     */
+    if (prev && prev.key !== win.key && prev.endMs <= now && prev.endMs > flushedEndMs && preAllowed()) {
+      flushSilentSummary({ endMs: prev.endMs, window: prev }).catch(() => {})
+    }
+    coveredSlotKey = underKey
+    activeWin = win
+    armSilentEnd(win)
+    // 从「临时静默」回到它底下那个定时时段 → 不是新窗口，不重复报「已开启」
+    if (resumed) return
+    // 临时静默的开始提醒由 startTempSilent / 远程指令自己发（那边带着用途备注）
+    if (win.temp) return
+    if (preAllowed()) pushStartNotice(win, matchSlot(now)).catch(() => {})
+  }
+
   /**
    * 是否允许由「本进程」发免打扰提醒。
    * 后端模式下前端和后端都会跑这套推送，若两边都发提醒会重复，
@@ -563,23 +829,17 @@ export function useAlertPush(options, hooks = {}) {
     if (h === false) return false
     return true
   }
-  function startPreSilenceWatcher() {
-    if (preHeartbeat) return
-    // 先记一次当前状态：启动时若已经处在时段里，不补发一条"即将开始"
-    lastPreKey = silentKeyOf(Date.now())
-    preHeartbeat = setInterval(() => {
-      const now = Date.now()
-      const key = silentKeyOf(now)
-      if (!key) {
-        lastPreKey = ''
-        return
-      }
-      if (key === lastPreKey) return
-      lastPreKey = key
-      if (key.startsWith('slot:') && preAllowed()) {
-        pushPreSilenceNotice(matchSlot(now)).catch(() => {})
-      }
-    }, 30000)
+
+  /** 启动心跳，并把当前窗口状态对齐（启动时已经在窗口里 → 只排结束提醒，不补发「已开启」） */
+  function startSilentWatcher() {
+    if (silentHeartbeat) return
+    const now = Date.now()
+    activeWin = currentWindow(now)
+    if (activeWin) {
+      coveredSlotKey = activeWin.temp ? slotSignature(now) : ''
+      armSilentEnd(activeWin)
+    }
+    silentHeartbeat = setInterval(() => tickSilentWindow(Date.now()), 30000)
   }
 
   /**
@@ -614,14 +874,31 @@ export function useAlertPush(options, hooks = {}) {
 
     const c = silentCfg()
     c.tempUntil = until
+    /*
+     * 记下本次静默的**开始时刻**。两个用途：
+     *   - 「静默查岗」（/check duty）要按它划第一次查询的区间；
+     *   - 重复下发 /silent（延长静默）时一并重置 —— 用户说的是「从现在起再静默 2 小时」，
+     *     窗口是重新开始算的，查岗也应该跟着从新起点算。
+     */
+    c.tempSince = now
     if (Array.isArray(channels) && channels.length) c.tempChannels = channels.slice()
     if (label) c.tempLabel = String(label).slice(0, 40)
-    // 重排汇总：把夜里的定时器换成这条临时窗口的
-    if (silentTimer) {
-      clearTimeout(silentTimer)
-      silentTimer = null
+
+    /*
+     * 对齐窗口状态并发「临时静默已开启」提醒：
+     * 结束提醒排到窗口末尾；开始提醒在这里发（而不是等心跳 30 秒后补），
+     * 这样手动 / 远程 /silent 一开就能立刻收到确认。
+     */
+    const win = currentWindow(now)
+    if (win) {
+      coveredSlotKey = slotSignature(now)
+      activeWin = win
+      armSilentEnd(win)
+      if (preAllowed()) pushStartNotice(win).catch(() => {})
+    } else {
+      scheduleSilentFlush()
     }
-    scheduleSilentFlush()
+
     const p2 = (n) => String(n).padStart(2, '0')
     const e = new Date(until)
     const span = until - now
@@ -630,23 +907,31 @@ export function useAlertPush(options, hooks = {}) {
     const hh = Math.floor(totalMin / 60)
     const mm = totalMin % 60
     const how = hh ? `${hh} 小时 ${mm} 分后` : `${mm} 分后`
-    notify(`已开启临时静默，至 ${p2(e.getHours())}:${p2(e.getMinutes())}（${how}）自动汇总推送`)
+    notify(`已开启临时静默，至 ${p2(e.getHours())}:${p2(e.getMinutes())}（${how}）自动推送结束提醒 + 汇总`)
     return { ok: true, until }
   }
 
-  /** 提前结束临时静默：立即把已收存的报警汇总发出去（不等到期） */
+  /**
+   * 提前结束临时静默：发一条「免打扰已结束」提醒，并把已收存的报警汇总带上。
+   * flush=false 时不发消息，但同样要收尾（否则心跳 30 秒后会再补一条结束提醒）。
+   */
   function endTempSilent(flush = true) {
     const c = silentCfg()
     if (!Number(c.tempUntil)) return { ok: false, reason: '当前没有临时静默' }
+    const win = currentWindow(Date.now()) // 先取：清掉 tempUntil 就取不到了
     c.tempUntil = 0
     c.tempLabel = ''
+    // 开始时刻一并清掉：留着会让下一次静默的下界错判（查岗会多推一段本不属于它的区间）
+    c.tempSince = 0
     if (silentTimer) {
       clearTimeout(silentTimer)
       silentTimer = null
     }
+    coveredSlotKey = ''
     if (flush) {
-      return flushSilentSummary().then(() => ({ ok: true }))
+      return flushSilentSummary({ endMs: Date.now(), window: win }).then(() => ({ ok: true }))
     }
+    activeWin = null
     return { ok: true }
   }
 
@@ -681,18 +966,55 @@ export function useAlertPush(options, hooks = {}) {
     }
   }
 
+  /**
+   * 当前静默窗口信息 —— 远程「静默查岗」（/check duty）的判据。
+   *
+   * 和 tempSilentInfo 的分工：
+   *   - tempSilentInfo 只讲临时静默、且面向设置页展示（剩余多久、截止几点）；
+   *   - 这里讲的是**当前生效的那个窗口**（临时静默或夜间定时时段），
+   *     带 key / startMs / endMs —— 查岗要靠 startMs 划区间、靠 key 判断「是不是同一个窗口」。
+   *
+   * @returns {{active:true, key:string, temp:boolean, startMs:number, endMs:number,
+   *            rangeLabel:string, endLabel:string, channels:string[]|null, reason:string}
+   *          | {active:false}}
+   */
+  function silentWindowInfo(now = Date.now()) {
+    const win = currentWindow(now)
+    if (!win) return { active: false }
+    return { active: true, ...win }
+  }
+
   /** 单渠道预检 */
   function checkChannel(id, record, now, ignoreQuiet = false) {
     const def = CHANNEL_DEFS.find((x) => x.id === id)
     const c = def.read()
     if (!c.enabled) return { ok: false, off: true, reason: '未启用该渠道' }
     if (!def.ready(c)) return { ok: false, off: true, reason: '凭据未配置完整' }
-    if (!Array.isArray(c.cameras) || !c.cameras.includes(record.id)) {
-      return { ok: false, off: true, reason: '该通道未勾选' }
-    }
-    // 通道级渠道开关：某一路可以在设置里单独关掉某个渠道
+
+    /*
+     * 该不该推这一路 —— 以「监控通道」页里的**通道级**配置为唯一权威：
+     *   总开关 cam.push 关掉 → 三个渠道都不推
+     *   这一路的某个渠道小勾关掉 → 只不推那个渠道
+     *
+     * ⚠️ 这里以前还有第二道闸（渠道配置里的 cameras，即渠道页的「需要监听的监控」），
+     * 而且是 AND 关系。渠道配置的默认值只有第一个通道（['cam-1'] 门口），
+     * 于是「监控通道」页把门口/电梯/大厅 三路的推送都打开也没用 ——
+     * 电梯和大厅被那道看不见的闸静默挡掉，用户只收到门口的通知。
+     * 现在渠道名单退化为通道级配置的**派生镜像**（见 defaults.syncChannelCameras），
+     * 只给后端判断「哪几路掉线要提醒 / 哪几路要保活」用，不再参与放行判断。
+     */
+    if (record.push === false) return { ok: false, off: true, reason: '该通道已关闭推送' }
     if (record.channels && record.channels[id] === false) {
       return { ok: false, off: true, reason: `该通道已关闭「${def.name}」推送` }
+    }
+    /*
+     * 兜底：极少数没带通道级信息的 record（老事件回放、外部直接调 handleAlarm），
+     * 仍按渠道名单判断，保持与旧行为一致。
+     */
+    if (!record.channels && record.push === undefined) {
+      if (Array.isArray(c.cameras) && c.cameras.length && !c.cameras.includes(record.id)) {
+        return { ok: false, off: true, reason: '该通道未勾选' }
+      }
     }
     const evt = normalizeEvents(c.events)
     const group = TYPE_GROUP[record.type] || record.type
@@ -1042,12 +1364,15 @@ export function useAlertPush(options, hooks = {}) {
       clearTimeout(silentTimer)
       silentTimer = null
     }
+    armedEndMs = 0
     // 免打扰提醒心跳同理：配置被洗掉后不该再按旧时段发提醒
-    if (preHeartbeat) {
-      clearInterval(preHeartbeat)
-      preHeartbeat = null
+    if (silentHeartbeat) {
+      clearInterval(silentHeartbeat)
+      silentHeartbeat = null
     }
-    lastPreKey = ''
+    activeWin = null
+    coveredSlotKey = ''
+    flushedEndMs = 0
     silentBuffer.length = 0
     silentSeen.clear()
     pendingCount.value = 0
@@ -1104,7 +1429,7 @@ export function useAlertPush(options, hooks = {}) {
       onState(
         record.key,
         'silent',
-        `静默时段（${sState.rangeLabel}）已收存，将于 ${sState.endLabel} 自动汇总推送`
+        `静默时段（${sState.rangeLabel}）已收存，将于 ${sState.endLabel} 推送结束提醒 + 汇总`
       )
     }
 
@@ -1127,7 +1452,7 @@ export function useAlertPush(options, hooks = {}) {
         .map((d) => `${CHANNEL_DEFS.find((x) => x.id === d.id).name}：${d.reason}`)
       const offs = decisions.filter((d) => d.off)
       if (reasons.length) onState(record.key, 'off', reasons.join('；'))
-      else if (offs.length === decisions.length) onState(record.key, 'off', '所有渠道都未监听该通道')
+      else if (offs.length === decisions.length) onState(record.key, 'off', '三个渠道都没有推送该通道（未启用 / 凭据不全 / 该通道未勾选）')
     }
   }
 
@@ -1145,8 +1470,10 @@ export function useAlertPush(options, hooks = {}) {
       // 巡检 / 状态异常在各渠道里可以单独关掉
       if (kind === 'patrol') return !(c.patrol && c.patrol.enabled === false)
       if (kind === 'status') return !(c.statusAlerts && c.statusAlerts.enabled === false)
-      // 'silent'：免打扰提醒，只发给「静默渠道集合」里已就绪的渠道（跟静默汇总同一批）
-      if (kind === 'silent') return (silentCfg().channels || []).includes(d.id)
+      // 'silent'：免打扰开始/结束提醒。发给**所有已配置的渠道**（三端），
+      // 刻意不看 silent.channels —— 那是「静默期间暂停实时推送的渠道」，
+      // 跟「提醒发去哪」不是一回事（只对钉钉静默，也该在企微/TG 上看到提醒）
+      if (kind === 'silent') return true
       return true
     }).map((d) => d.id)
     if (!ids.length) return { ok: false, reason: '没有渠道接收这类通知' }
@@ -1523,13 +1850,12 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /*
-   * 启动时若已处于静默时段，提前排程好结束时刻的汇总（即便这段时间还没报警，
-   * 定时器也会到点尝试一次；无缓冲则直接返回，不骚扰）。
+   * 启动：
+   *   1) 若已处在静默窗口里，只把「结束提醒」排到窗口末尾（不补发一条「已开启」，
+   *      否则每次重启进程都会给用户刷一遍重复的开始提醒）；
+   *   2) 起 30 秒心跳，负责「进入窗口 → 发开始提醒 + 排结束提醒」与「窗口到点兜底」。
    */
-  if (silentState(Date.now()).active) scheduleSilentFlush()
-
-  // 每个免打扰时段「开启前」的提醒心跳（preNotify，默认开）
-  startPreSilenceWatcher()
+  startSilentWatcher()
 
   return {
     handleAlarm,
@@ -1538,22 +1864,26 @@ export function useAlertPush(options, hooks = {}) {
     /** 立即把当前静默缓冲汇总发出去（设置页可挂「立即推送」按钮） */
     flushSilentSummary,
     /**
-     * 手动发一条「免打扰时段开启前」提醒。
-     * 心跳检测到进入新时段时会自动调；设置页的「试发一条」按钮也走这里，
-     * 方便在改动文案后先看一眼效果（不受 preNotify 开关限制，刻意如此）。
+     * 手动发一条「免打扰已开始」提醒（设置页「试发一条开始提醒」按钮）。
+     * 心跳检测到进入新窗口时会自动调，这里只是给人工预览用，不受 preNotify 开关限制。
      */
-    pushPreSilenceNotice: (slot) => {
-      const slots = readSlots()
-      return pushPreSilenceNotice(slot || matchSlot(Date.now()) || slots[0] || null)
-    },
-    /** 临时静默（item 112）：从现在起 N 小时免打扰，到期自动汇总 */
+    pushPreSilenceNotice,
+    /** 手动发一条「免打扰已结束」提醒（设置页「试发一条结束提醒」按钮，不动真实缓冲） */
+    pushPostSilenceNotice,
+    /** 临时静默（item 112）：从现在起 N 小时免打扰，到期自动推送结束提醒 + 汇总 */
     startTempSilent,
     /** 提前结束临时静默（默认立刻把已收存的汇总发出去） */
     endTempSilent,
     /** 临时静默状态查询（设置页 / 事件面板显示剩余时长用） */
     tempSilentInfo,
+    /**
+     * 当前静默窗口（含开始时刻）。远程「静默查岗」用它划查询区间 ——
+     * 不在静默时段时返回 { active: false }。
+     */
+    silentWindowInfo,
     /** 生成免打扰提醒文案（导出来方便单测与调试文案，不参与推送） */
     buildPreSilenceMessages,
+    buildTempSilentMessages,
     pendingCount,
     rateLimit,
     channels,

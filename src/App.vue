@@ -119,6 +119,7 @@
       @backend-sync="onBackendSyncNow"
       @flush-silent="onFlushSilent"
       @test-pre-silent="onTestPreSilence"
+      @test-post-silent="onTestPostSilence"
       @restart-system="onRestartSystem"
       @start-temp-silent="onStartTempSilent"
       @end-temp-silent="onEndTempSilent"
@@ -228,7 +229,8 @@ import {
   STORAGE_KEY,
   cloneDefaultCameras,
   cloneDefaultOptions,
-  normalizeCameraChannels
+  normalizeCameraChannels,
+  syncChannelCameras
 } from './config/defaults'
 import { useAlertPush } from './composables/useAlertPush'
 import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
@@ -341,6 +343,20 @@ migrateShotWidthToOriginal(options)
 migrateDingShotMode(options)
 // 计数推送间隔：老默认 60 秒太密，一次性升级为 4 小时
 migrateCountInterval(options)
+
+/*
+ * 「渠道级监听名单」（dingtalk / wecom / telegram 的 cameras）从通道级推送配置派生。
+ *
+ * 老存档里那份名单很可能已经和「监控通道」页的开关脱节（隐藏配置的默认值是
+ * 只有 cam-1 门口），而它以前是推送的第二道硬闸 —— 结果就是电梯/大厅 明明
+ * 开了推送却一条都收不到。这里统一在载入时纠正一次，之后每次落盘都会再对齐。
+ *
+ * ⚠️ 必须紧跟一次 writeStorage()：这里发生在 watch(options, …) 注册**之前**，
+ * 改了 options 不会触发那个监听，不主动写一次的话「纠正过的名单」只活在内存里，
+ * 存档里还是旧的那份（下次打开又要再纠一遍）。
+ */
+syncChannelCameras(cameras.value, options)
+writeStorage()
 
 /**
  * 老版本 localStorage 里保存的配置没有新增字段（例如 alert.topNotify / alert.shotWidth），
@@ -730,6 +746,8 @@ function fixLegacyDingTalk(dt) {
 function writeStorage() {
   // 写盘前自愈一次，确保 localStorage 里的凭据始终有效
   fixLegacyDingTalk(options.dingtalk)
+  // 渠道级监听名单跟着通道级推送配置走（写盘 / 同步后端前再兜一次，幂等）
+  syncChannelCameras(cameras.value, options)
   try {
     localStorage.setItem(
       STORAGE_KEY,
@@ -773,6 +791,16 @@ function persistNow() {
 
 watch([cameras, hiddenIds, layoutKey], schedulePersist, { deep: true })
 watch(options, schedulePersist)
+
+/*
+ * 「渠道级监听名单」的重算点全部集中在三处显式调用，**不额外挂监听**：
+ *   1) writeStorage()   —— 上面两个监听最终都会走到它（且带 300ms 防抖），覆盖
+ *                          一切 cameras / options 改动；
+ *   2) applyConfig()    —— 保存并应用时立即对齐，不用等防抖；
+ *   3) 载入配置那一次    —— 纠正老存档里跟通道级开关脱节的那份名单。
+ * 不挂监听的原因：设置抽屉里改的是「本地副本 + 共享 options」两种东西，
+ * 保存前并不一致；如果这里挂个监听跟着重算，会和抽屉里的即时预览互相覆盖。
+ */
 
 /*
  * 节流带来一个风险：刚改完配置就关页面，最后 300ms 的改动可能没落盘。
@@ -1080,7 +1108,7 @@ function pushStateOf(ev) {
       called: false,
       on: false,
       silenced: true,
-      why: '静默时段已收存，结束时刻统一汇总推送'
+      why: '静默时段已收存，结束时刻推送结束提醒 + 汇总'
     }))
   }
   return defs.map(([id, label, cfg]) => {
@@ -1129,8 +1157,14 @@ function cfgBlockReason(id, c, ev, camCh) {
       : !!String(c.webhook || '').trim()
   if (!ready) return '凭据未配置完整'
   if (camCh && camCh[id] === false) return '该通道未勾选此渠道'
-  // 渠道里没勾选任何通道时按「全部通道」处理，避免配置一改就全挂
-  if (Array.isArray(c.cameras) && c.cameras.length && !c.cameras.includes(ev.id)) {
+  /*
+   * ⚠️ 这里原来还要看渠道配置里的 cameras（渠道页的「需要监听的监控」），
+   * 于是电梯/大厅明明在「监控通道」页开了推送，详情里也会被解释成
+   * 「该通道未在渠道里勾选」，与 useAlertPush.checkChannel 的真实行为对不上。
+   * 那份名单现在只是通道级配置的派生镜像，不参与放行，这里也不再看它。
+   * 只有 record 完全没带通道级信息时（老事件）才回落到它。
+   */
+  if (!camCh && Array.isArray(c.cameras) && c.cameras.length && !c.cameras.includes(ev.id)) {
     return '该通道未在渠道里勾选'
   }
   return ''
@@ -2163,6 +2197,8 @@ async function toggleAppFullscreen() {
 function applyConfig({ cameras: cams, options: opts, hiddenIds: hidden }) {
   cameras.value = cams.map((c) => normalizeCameraChannels({ ...c }))
   Object.assign(options, opts)
+  // 渠道级监听名单始终跟着通道级推送开关走（用户可能只改了「监控通道」那页）
+  syncChannelCameras(cameras.value, options)
   hiddenIds.value = hidden
   settingsOpen.value = false
   zoomIndex.value = null
@@ -2540,14 +2576,14 @@ function onFlushSilent() {
   }
   if (typeof push.flushSilentSummary === 'function') {
     push
-      .flushSilentSummary()
+      .flushSilentSummary({ manual: true })
       .then(() => showToast('静默汇总已尝试推送'))
       .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
   }
 }
 
 /**
- * 设置页「试发一条免打扰提醒」按钮。
+ * 设置页「试发一条免打扰开始提醒」按钮。
  * 走与自动提醒完全相同的文案与发送路径（pushPreSilenceNotice），
  * 改完文案可以先看一眼效果，确认没问题再等下一个时段自动触发。
  */
@@ -2562,9 +2598,29 @@ function onTestPreSilence() {
       .then((r) =>
         showToast(
           r && r.ok
-            ? `免打扰提醒已推送${r.reason ? '（' + r.reason + '）' : ''}`
+            ? `开始提醒已推送${r.reason ? '（' + r.reason + '）' : ''}`
             : `未推送：${(r && (r.reason || '没有可用渠道')) || '未知原因'}`
         )
+      )
+      .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
+  }
+}
+
+/**
+ * 设置页「试发一条免打扰结束提醒」按钮。
+ * 用真实窗口（不在窗口里就取最近一个时段）造一条结束提醒，
+ * 但**不动**待汇总的缓冲 —— 随便点几次都不会把事件弄丢。
+ */
+function onTestPostSilence() {
+  if (backendActive.value) {
+    showToast('后端模式下推送在服务端，请到后端机器查看')
+    return
+  }
+  if (typeof push.pushPostSilenceNotice === 'function') {
+    push
+      .pushPostSilenceNotice()
+      .then((summary) =>
+        showToast(summary ? `结束提醒已推送（${summary.title}）` : '未推送：没有可用渠道')
       )
       .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
   }
@@ -2588,13 +2644,52 @@ async function onRestartSystem() {
     showToast('未配置后端地址，无法远程重启（请到检测识别 → 后端检测服务里填写）')
     return
   }
-  showToast('已请求后端重启系统')
+  const base = String(url).replace(/\/+$/, '')
+  showToast('已请求后端重启，正在确认结果…')
+  const sentAt = Date.now()
   try {
-    const r = await fetch(`${url}/api/restart`, { method: 'POST' })
-    if (!r.ok) showToast('重启请求失败（HTTP ' + r.status + '）')
+    const r = await fetch(`${base}/api/restart`, { method: 'POST' })
+    const data = await r.json().catch(() => ({}))
+    if (!r.ok || data.ok === false) {
+      showToast('重启请求失败（HTTP ' + r.status + '）')
+      return
+    }
   } catch (e) {
-    showToast('重启请求失败：' + ((e && e.message) || '网络错误'))
+    /* 端口可能已被释放（说明重启真的开始了），不算失败 */
   }
+  /*
+   * 轮询结果。后端重启会「先释放端口 → 拉起新进程 → 确认接管」，
+   * 所以前几秒请求失败是**预期行为**；用 lastAt 区分「本次」与「上次」的记录。
+   */
+  const deadline = Date.now() + 90000
+  let lastErr = ''
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1500))
+    try {
+      const res = await fetch(`${base}/api/restart-status`)
+      const st = await res.json()
+      if (Number(st.lastAt) < sentAt - 2000) continue // 还是上一次的记录，继续等
+      if (st.lastResult === 'ok') {
+        showToast('✅ 重启成功：新进程已接管端口')
+        return
+      }
+      if (st.lastResult === 'rollback-ok') {
+        showToast(`⚠️ 重启失败，但已自动回滚：${st.lastError || ''}`)
+        return
+      }
+      if (st.lastResult === 'rollback-failed') {
+        showToast('❌ 重启失败且回滚失败，请查看后端重启日志')
+        return
+      }
+      if (st.lastResult) {
+        showToast(`重启结果：${st.lastResult}${st.lastError ? ' · ' + st.lastError : ''}`)
+        return
+      }
+    } catch (e) {
+      lastErr = (e && e.message) || '网络错误'
+    }
+  }
+  showToast(`未能在 90 秒内确认重启结果（${lastErr || '连接不上'}），请到后端查看 restart.log`)
 }
 
 /* ---------------- 临时静默（item 112） ---------------- */

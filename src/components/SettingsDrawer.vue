@@ -448,9 +448,98 @@
           <div class="opt col">
             <span>
               <strong>立即重启系统</strong>
-              <em>桌面端走原生重启；浏览器 / 后端模式下向后端发重启请求（后端进程自愈式重启）</em>
+              <em>
+                桌面端走原生重启；浏览器 / 后端模式下向后端发重启请求。
+                后端重启的流程是「先释放端口 → 拉起新进程 → 确认新进程真的接管端口才退出」，
+                失败会自动回滚，不会把服务重启成停机。
+              </em>
             </span>
             <button class="btn tiny danger" @click="restartSystemNow">立即重启</button>
+          </div>
+
+          <!-- 重启诊断：把「上一次重启到底怎么样了」摆出来。
+               用户报过「自动重启没成功、直接停机」，根子就是以前没有可观测性 ——
+               失败在日志里完全看不出来。 -->
+          <div class="opt col restart-diag">
+            <span>
+              <strong>重启诊断</strong>
+              <em v-if="!restartInfo">点右侧「刷新」查看后端上一次重启的结果与日志位置</em>
+              <em v-else-if="!restartInfo.ok">
+                未配置后端地址（浏览器 / 桌面端本地模式），或后端未响应；本地模式不需要看这个
+              </em>
+              <em v-else>
+                {{
+                  restartInfo.lastAt
+                    ? `上次：${fmtRestartTime(restartInfo.lastAt)} · ${restartResultText(restartInfo.lastResult)}`
+                    : '还没有重启记录'
+                }}
+              </em>
+            </span>
+            <button class="btn tiny" @click="refreshRestartInfo">刷新</button>
+          </div>
+          <div class="restart-detail" v-if="restartInfo && restartInfo.ok && restartInfo.lastAt">
+            <div class="kv"><span>结果</span><b>{{ restartResultText(restartInfo.lastResult) }}</b></div>
+            <div class="kv" v-if="restartInfo.lastReason"><span>原因</span><b>{{ restartInfo.lastReason }}</b></div>
+            <div class="kv" v-if="restartInfo.lastError"><span>详情</span><b>{{ restartInfo.lastError }}</b></div>
+            <div class="kv" v-if="restartInfo.consecFailures">
+              <span>连续失败</span><b class="warn">{{ restartInfo.consecFailures }} 次（连续失败会自动暂停自动重启）</b>
+            </div>
+            <div class="kv" v-if="restartInfo.logFile"><span>日志</span><b class="mono">{{ restartInfo.logFile }}</b></div>
+            <div class="kv" v-if="restartInfo.restartedBy">
+              <span>本进程</span><b>由自愈重启拉起（上游 pid={{ restartInfo.restartedBy }}）</b>
+            </div>
+            <div class="restart-history" v-if="restartInfo.history && restartInfo.history.length > 1">
+              <div class="sub-label">最近几次</div>
+              <div class="hrow" v-for="(h, i) in restartInfo.history.slice().reverse()" :key="i">
+                <span class="mono">{{ fmtRestartTime(h.at) }}</span>
+                <span>{{ restartResultText(h.result) }}</span>
+                <span class="muted ellip">{{ h.reason }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <h3>系统级硬重启（最后手段）</h3>
+          <div class="opt col">
+            <span>
+              <strong>允许重启整台电脑</strong>
+              <em>
+                ⚠️ 这不是重启 BossMonitor 进程，而是<strong>重启整台机器</strong>：会下线几分钟，
+                且<strong>重启后服务不会自己回来</strong>——除非你另配了开机自启
+                （Windows 任务计划程序 / NSSM、macOS launchd、Linux systemd）。
+                另外需要管理员 / root 权限（Windows 走 shutdown、Linux 走 systemctl、
+                macOS 走 osascript 需「辅助功能」授权）。
+                <template v-if="restartInfo && restartInfo.hardReboot">
+                  <br />本机将执行：<code>{{ restartInfo.hardReboot.command }}</code>
+                </template>
+              </em>
+            </span>
+            <label class="opt-inline">
+              <span
+                class="switch"
+                :class="{ on: opts.systemReboot && opts.systemReboot.enabled }"
+                @click="opts.systemReboot.enabled = !(opts.systemReboot && opts.systemReboot.enabled)"
+              ></span>
+              <span class="muted">{{ opts.systemReboot && opts.systemReboot.enabled ? '已开启' : '已关闭' }}</span>
+            </label>
+          </div>
+          <div class="opt col" v-if="opts.systemReboot && opts.systemReboot.enabled">
+            <span>
+              <strong>自愈重启失败时自动兜底</strong>
+              <em>
+                只有当「拉起新进程失败 <b>且</b> 回滚也失败」（服务确实已经停机）时才会执行。
+                默认关：因为硬重启会把整台机器带走，误触代价大。
+              </em>
+            </span>
+            <label class="opt-inline">
+              <span
+                class="switch"
+                :class="{ on: opts.systemReboot.onFailure }"
+                @click="opts.systemReboot.onFailure = !opts.systemReboot.onFailure"
+              ></span>
+              <span class="muted">{{ opts.systemReboot.onFailure ? '已开启' : '已关闭' }}</span>
+            </label>
           </div>
         </section>
 
@@ -730,6 +819,7 @@
                 <em>
                   静默时段内{{ '' }}
                   <b>不再逐条实时推送</b>，改为在结束时刻发一条汇总；
+                  时段<b>开始前与结束后各推一条提醒</b>到已配置的三端；
                   临时静默则用来「接下来几小时别吵我」，优先级更高。
                 </em>
               </div>
@@ -770,7 +860,7 @@
                 <button class="btn tiny" @click="addSlot">+ 添加时段</button>
               </div>
 
-              <div class="sub-label mt">静默时暂停推送的渠道</div>
+              <div class="sub-label mt">静默期间暂停实时推送的渠道</div>
               <div class="ch-pick">
                 <label class="chip" :class="{ on: opts.silent.channels.includes('ding') }">
                   <input type="checkbox" value="ding" v-model="opts.silent.channels" /> 钉钉
@@ -783,11 +873,16 @@
                 </label>
               </div>
 
-              <!-- 时段开启前的提醒推送（preNotify，默认开） -->
+              <!-- 免打扰「开始 / 结束」提醒推送（preNotify，默认开） -->
               <div class="opt pre-notify">
                 <span>
-                  <strong>时段开启前先推送提醒</strong>
-                  <em>每个免打扰时段开始的瞬间，先推一条说明：本次免打扰的时长、期间仍持续统计、结束时间，以及结束后会汇总推送本时段内的全部报警</em>
+                  <strong>免打扰开始 / 结束时都推送提醒</strong>
+                  <em>
+                    进入每个免打扰时段的瞬间推一条「已开启」（时长、期间仍持续统计、结束时间）；
+                    时段结束时再推一条「已结束」，并附上本时段捕获的报警汇总 ——
+                    即使这段时间一条报警都没有，也会推一条结束提醒。
+                    提醒一律发到<b>已配置好的钉钉 / 企业微信 / TG</b>（不受上面「暂停推送的渠道」勾选影响）。
+                  </em>
                 </span>
                 <label class="opt-inline">
                   <span
@@ -798,9 +893,13 @@
                   <span class="muted">{{ opts.silent.preNotify !== false ? '已开启' : '已关闭' }}</span>
                 </label>
               </div>
-              <div class="test-row" v-if="opts.silent.preNotify !== false">
-                <button class="btn tiny" @click="testPreSilence">试发一条提醒</button>
-                <span class="muted">按第一个时段立即发一条，看看文案效果</span>
+              <div class="test-row">
+                <template v-if="opts.silent.preNotify !== false">
+                  <button class="btn tiny" @click="testPreSilence">试发开始提醒</button>
+                  <button class="btn tiny" @click="testPostSilence">试发结束提醒</button>
+                  <span class="muted">按第一个时段立即发一条，看看文案效果</span>
+                </template>
+                <span class="muted" v-else>关闭后只保留「静默期间有报警才发汇总」，开始 / 结束都不再通知</span>
               </div>
 
               <p class="silent-state">
@@ -1781,22 +1880,26 @@
 
           <div class="opt col">
             <span>
-              <strong>需要监听的监控</strong>
-              <em>勾选的通道报警时才会推送（默认第一个）</em>
+              <strong>需要推送的监控</strong>
+              <em>
+                和「监控通道」页里每一路的「推送 / 钉钉」小勾是<b>同一份设置</b>，改哪边都一样
+                （这里增删会自动写回那一路的通道级开关）。
+                「监控通道」里开了推送的每一路，检测到之后都会推送出来。
+              </em>
             </span>
             <div class="cam-tags">
               <button
                 v-for="cam in cams"
                 :key="cam.id"
                 class="tag"
-                :class="{ on: dt.cameras.includes(cam.id) }"
+                :class="{ on: camPushOn(cam, 'ding') }"
                 @click="togglePushCamera(cam.id)"
               >
                 {{ cam.name || '未命名' }}
               </button>
-              <button class="tag ghost" @click="dt.cameras = cams.map((c) => c.id)">全选</button>
-              <button class="tag ghost" @click="dt.cameras = []">清空</button>
-              <span class="tag-text" v-if="!dt.cameras.length">未选择通道，不会推送</span>
+              <button class="tag ghost" @click="setAllPushCameras(true)">全选</button>
+              <button class="tag ghost" @click="setAllPushCameras(false)">清空</button>
+              <span class="tag-text" v-if="!pushCamCount">没有通道会推送到钉钉</span>
             </div>
           </div>
 
@@ -2092,10 +2195,41 @@
               <div class="sub-label mt">危险操作</div>
               <div class="opt">
                 <span>
-                  <strong>允许 /reboot 重启服务</strong>
-                  <em>还要再发一次 <code>/reboot confirm</code> 才会真正执行</em>
+                  <strong>允许远程重启（/reboot、/hardreboot）</strong>
+                  <em>
+                    /reboot 重启检测服务（先释放端口→拉起新进程→确认接管，失败自动回滚）；
+                    /hardreboot 重启整台电脑，另需在「系统维护」里打开开关。
+                    两者都还要再发一次 <code>confirm</code> 才真正执行。
+                  </em>
                 </span>
                 <span class="switch" :class="{ on: tg.remote.allowReboot }" @click="tg.remote.allowReboot = !tg.remote.allowReboot"></span>
+              </div>
+
+              <!-- ---------- 静默查岗（/check duty）调参 ---------- -->
+              <div class="sub-label mt">静默查岗</div>
+              <p class="hint tight">
+                静默期间私聊机器人发 <code>/check duty</code>，会把「静默开始到现在」积压的事件汇总推过来，
+                并把区间内<b>所有截图</b>逐张发过去；再发一次只看上次查岗之后的新事件。
+              </p>
+              <div class="opt">
+                <span>
+                  <strong>单次截图张数上限</strong>
+                  <em>0 = 不限（仍受 200 张的防呆上限约束）。觉得刷屏就调小，超出的可在事件面板回看。</em>
+                </span>
+                <div class="time-row">
+                  <input class="field mini" type="number" min="0" max="200" v-model.number="tg.remote.dutyMaxImages" />
+                  <span class="tilde">张</span>
+                </div>
+              </div>
+              <div class="opt">
+                <span>
+                  <strong>截图发送间隔（毫秒）</strong>
+                  <em>Telegram 对同一会话连续发图有限流，串行 + 留间隔才不会被拒。网络差可调大到 1200~2000。</em>
+                </span>
+                <div class="time-row">
+                  <input class="field mini" type="number" min="0" max="5000" step="100" v-model.number="tg.remote.dutyImageGapMs" />
+                  <span class="tilde">ms</span>
+                </div>
               </div>
 
               <!-- ---------- 指令清单 ---------- -->
@@ -2630,7 +2764,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { BRAND, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, DEFAULT_BACKEND_URL, HIDDEN_PASSCODE } from '../config/defaults'
+import { BRAND, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, DEFAULT_BACKEND_URL, HIDDEN_PASSCODE, syncChannelCameras } from '../config/defaults'
 import { resetPushStats } from '../composables/usePushStats'
 import {
   backendState,
@@ -2801,6 +2935,7 @@ const emit = defineEmits([
   'backend-sync',
   'flush-silent',
   'test-pre-silent',
+  'test-post-silent',
   'restart-system',
   /* 临时静默（item 112） */
   'start-temp-silent',
@@ -3019,10 +3154,14 @@ const TABS = [
 ]
 
 const tab = ref('cams')
+/** 重启诊断数据（后端模式下由 /api/restart-status 拉取） */
+const restartInfo = ref(null)
 // 切到「报警提醒」时顺手刷一次手表状态：抽屉是常驻组件，
 // 只在打开时查一次的话，用户中途配对好手表再切过来看到的还是旧状态。
 watch(tab, (t) => {
   if (t === 'alert') refreshWatch()
+  // 切到「系统维护」时拉一次重启诊断，「上次重启到底怎么样了」一眼可见
+  if (t === 'maintain') refreshRestartInfo()
 })
 
 /*
@@ -3280,15 +3419,20 @@ const silentStatusText = computed(() => {
   // 结束时刻可能落在次日，标出来更清楚
   const p2 = (n) => String(n).padStart(2, '0')
   const endText = endMin >= 1440 ? `次日 ${p2(endMin - 1440)}` : p2(endMin % 1440)
-  return `静默中 · 将于 ${endText} 自动汇总推送（约 ${dur} 后）· ${base}`
+  return `静默中 · 将于 ${endText} 自动推送结束提醒 + 汇总（约 ${dur} 后）· ${base}`
 })
 function flushSilentNow() {
   emit('flush-silent')
 }
 
-/** 试发一条「免打扰时段开启前」提醒（调完文案先看一眼效果） */
+/** 试发一条「免打扰已开启」提醒（调完文案先看一眼效果） */
 function testPreSilence() {
   emit('test-pre-silent')
+}
+
+/** 试发一条「免打扰已结束」提醒（不动真实缓冲，随便点都不会丢事件） */
+function testPostSilence() {
+  emit('test-post-silent')
 }
 
 /* ---------------- 统计页重置回调（item 111） ---------------- */
@@ -3435,6 +3579,75 @@ function endTempNow(flush) {
 /** 设置页「立即重启系统」按钮：交给 App.vue 决定走 Electron 原生重启还是后端 API */
 function restartSystemNow() {
   emit('restart-system')
+  // 顺手盯一下结果：后端会先释放端口，前几秒请求失败是预期行为
+  pollRestartResult()
+}
+
+/* ---------------- 重启诊断（后端模式） ---------------- */
+
+function backendBase() {
+  return String((props.options.backend && props.options.backend.url) || '').replace(/\/+$/, '')
+}
+
+/** 重启结果码 → 人话 */
+function restartResultText(r) {
+  const map = {
+    ok: '成功（新进程已接管端口）',
+    'rollback-ok': '失败，但已自动回滚（服务未中断）',
+    'rollback-failed': '失败且回滚失败（服务已停止）',
+    storm: '被「重启风暴保护」拦下（连续失败过多次）',
+    busy: '已有一次重启在进行中'
+  }
+  if (!r) return '暂无记录'
+  return map[r] || String(r)
+}
+
+function fmtRestartTime(ts) {
+  try {
+    return new Date(Number(ts)).toLocaleString('zh-CN', { hour12: false })
+  } catch (e) {
+    return ''
+  }
+}
+
+async function refreshRestartInfo() {
+  const base = backendBase()
+  if (!base) {
+    // 本地模式（浏览器直跑 / 桌面端）没有后端可问，不必显示成错误
+    restartInfo.value = { ok: false }
+    return null
+  }
+  try {
+    const r = await fetch(`${base}/api/restart-status`)
+    const data = await r.json()
+    restartInfo.value = { ok: true, ...data }
+    return restartInfo.value
+  } catch (e) {
+    restartInfo.value = { ok: false, error: (e && e.message) || '网络错误' }
+    return null
+  }
+}
+
+/**
+ * 重启后轮询结果。
+ * 后端重启会先释放端口，所以前几秒请求失败是**预期行为**而不是错误。
+ * 用 lastAt 判断「这条记录是不是本次重启产生的」，免得读到上一次的旧结果。
+ */
+let restartPolling = false
+async function pollRestartResult() {
+  if (restartPolling || !backendBase()) return
+  restartPolling = true
+  const sentAt = Date.now()
+  const deadline = sentAt + 90000
+  try {
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500))
+      const data = await refreshRestartInfo()
+      if (data && Number(data.lastAt) >= sentAt - 2000) return
+    }
+  } finally {
+    restartPolling = false
+  }
 }
 
 /* ==================== 配置补齐 ==================== */
@@ -3976,9 +4189,45 @@ const notifyLine = computed(() => {
 const dt = computed(() => opts.dingtalk)
 const testState = reactive({ kind: '', text: '' })
 
+/**
+ * 这一路当前是否会推送到渠道 ch。
+ * = 通道级总开关（cam.push）+ 该渠道小勾（cam.channels[ch]）—— 唯一权威口径，
+ * 与 useAlertPush.checkChannel 完全一致。
+ */
+function camPushOn(cam, ch) {
+  return cam.push !== false && channelOn(cam, ch)
+}
+
+/** 当前会推送到钉钉的通道数（用于「没有通道会推送」这句提示） */
+const pushCamCount = computed(() => cams.value.filter((c) => camPushOn(c, 'ding')).length)
+
+/**
+ * 渠道页的「需要推送的监控」标签 —— 写回**通道级**开关，而不是改那份派生名单。
+ * 关：只取消这一路对钉钉的勾（总开关与其他渠道不受影响）；
+ * 开：把这一路对钉钉打开，并顺带抬起总开关（否则小勾是灰的、等于没开）。
+ *
+ * ⚠️ 这里刻意**不去改** `opts.dingtalk.cameras` ——
+ * 那份名单是通道级配置的派生结果，抽屉里改的是「本地副本 + 共享 options」两样东西，
+ * 保存前两者并不同步；在这里顺手写名单只会和 App 侧落盘时的重算互相覆盖。
+ * 统一由 save() / 落盘 / 载入时的 syncChannelCameras 一次性对齐。
+ */
 function togglePushCamera(id) {
-  const list = dt.value.cameras
-  dt.value.cameras = list.includes(id) ? list.filter((x) => x !== id) : [...list, id]
+  const cam = cams.value.find((c) => c.id === id)
+  if (!cam) return
+  if (camPushOn(cam, 'ding')) {
+    ensureChannels(cam).ding = false
+  } else {
+    ensureChannels(cam).ding = true
+    cam.push = true
+  }
+}
+
+/** 全选 / 清空：批量改通道级的钉钉小勾 */
+function setAllPushCameras(on) {
+  cams.value.forEach((cam) => {
+    ensureChannels(cam).ding = on
+    if (on) cam.push = true
+  })
 }
 
 async function testPush() {
@@ -4280,12 +4529,14 @@ async function testTelegram() {
  * 免得用户还要去翻后端代码才知道有哪些指令。
  */
 const TG_COMMANDS = [
-  { cmd: 'silent', usage: '/silent <小时数>', desc: '临时静默 N 小时，到点自动汇总推送' },
+  { cmd: 'silent', usage: '/silent <小时数>', desc: '临时静默 N 小时，开启/结束各推一条提醒，到点附带汇总' },
   { cmd: 'until', usage: '/until <HH:MM>', desc: '静默到指定时刻（已过则顺延到明天）' },
-  { cmd: 'resume', usage: '/resume', desc: '立刻结束静默并马上汇总推送' },
+  { cmd: 'resume', usage: '/resume', desc: '立刻结束静默，并推送结束提醒 + 汇总' },
   { cmd: 'patrol', usage: '/patrol', desc: '立即推送一次巡检报告' },
   { cmd: 'status', usage: '/status', desc: '查看在线路数 / 静默状态 / 事件数' },
-  { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）' }
+  { cmd: 'check', usage: '/check duty', desc: '静默查岗：把静默期间积压的事件汇总推过来（含全部截图）' },
+  { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）' },
+  { cmd: 'hardreboot', usage: '/hardreboot', desc: '重启整台电脑（最后手段，需两次开启 + 二次确认）' }
 ]
 
 const newAllowId = ref('')
@@ -4381,6 +4632,11 @@ function save() {
   const cleaned = cams.value
     .filter((c) => c.url && c.url.trim())
     .map((c, i) => ({ ...c, name: c.name || `画面 ${i + 1}` }))
+  /*
+   * 派生名单按**保存后的**通道重算一遍 ——
+   * 删掉/隐藏某一路之后，名单里不能还留着它的 id（否则后端会去盯一个不存在的通道）。
+   */
+  syncChannelCameras(cleaned, opts)
   emit('save', { cameras: cleaned, options: { ...opts }, hiddenIds: hidden.value })
 }
 
@@ -4512,6 +4768,8 @@ function importConfig(e) {
         Object.assign(opts, merged)
       }
       hidden.value = Array.isArray(data.hiddenIds) ? data.hiddenIds : []
+      // 导入进来的名单可能是旧格式（跟通道级开关对不上），按通道级重算一次
+      syncChannelCameras(cams.value, opts)
       syncCustomFlags()
       pruneAutoPlayIds(cams.value)
       testState.kind = 'ok'
@@ -6013,6 +6271,64 @@ function loadHidden() {
   justify-content: flex-end;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+/* ---------- 重启诊断 ---------- */
+.restart-detail {
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1, rgba(128, 128, 128, 0.22));
+  border-radius: 10px;
+  background: var(--panel-2, rgba(128, 128, 128, 0.06));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.restart-detail .kv {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.restart-detail .kv > span {
+  flex: 0 0 62px;
+  color: var(--text-dim-2);
+}
+.restart-detail .kv > b {
+  font-weight: 500;
+  color: var(--text-1);
+  word-break: break-all;
+}
+.restart-detail .kv > b.warn {
+  color: var(--warn-text, #d98a2b);
+}
+.restart-detail .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.restart-history {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.restart-history .hrow {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.restart-history .hrow .mono {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.restart-history .hrow .muted {
+  color: var(--text-dim-2);
+}
+.restart-history .hrow .ellip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .test-state {

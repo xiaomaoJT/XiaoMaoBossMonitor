@@ -47,6 +47,10 @@ export function normalizeTelegram(tg) {
   if (!Array.isArray(r.allowUserIds)) r.allowUserIds = []
   if (r.pollMs === undefined) r.pollMs = 3000
   if (r.allowReboot === undefined) r.allowReboot = false
+  // 静默查岗（/check duty）：单次最多推几张截图（0 = 不限，仍受代码内的防呆上限约束）
+  if (r.dutyMaxImages === undefined) r.dutyMaxImages = 0
+  // 两张截图之间的间隔，避免连续 sendPhoto 触发 Telegram 限流
+  if (r.dutyImageGapMs === undefined) r.dutyImageGapMs = 700
   return tg
 }
 

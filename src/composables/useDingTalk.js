@@ -534,6 +534,81 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   return { title: `【监控静默汇总】${rangeLabel}`, markdown, plain }
 }
 
+/**
+ * 「免打扰时段已结束」提醒（时段结束时一律发一条，与开始提醒配对）。
+ *
+ * 和 buildSilentSummary 的分工：
+ *   - 汇总正文只在「时段内真的收存到报警」时才有内容，缓冲为空就没得汇总；
+ *   - 结束提醒是**状态通知**：本时段结束了、期间收存了多少条、接下来是恢复实时推送
+ *     还是仍在另一个免打扰时段里，一眼看清。
+ *   所以这条不能因为缓冲为空被跳过 —— 否则「静默结束了没有报警」时用户什么都收不到，
+ *   反而以为静默卡住了（用户明确要求：静默开始前与结束后都要有推送）。
+ *
+ * @param {Array<object>} records 时段内收存的报警快照（可为空数组）
+ * @param {object} cfg   options.silent（暂未用，预留给将来按渠道定制）
+ * @param {object} ctx   { startMs, endMs, rangeLabel, stillSilent, stillLabel }
+ * @returns {{ title:string, markdown:string, html:string, plain:string }}
+ */
+export function buildSilentEndMessages(records, cfg, ctx = {}) {
+  const list = Array.isArray(records) ? records : []
+  const endMs = Number(ctx.endMs) || Date.now()
+  const times = list.map((r) => Number(r.time) || 0).filter(Boolean)
+  const startMs = Number(ctx.startMs) || (times.length ? Math.min(...times) : endMs)
+
+  const clock = (ms) => {
+    const d = new Date(ms)
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  const crossDay = new Date(endMs).getDate() !== new Date(startMs).getDate()
+  const rangeLabel = ctx.rangeLabel || `${clock(startMs)} ~ ${crossDay ? '次日 ' : ''}${clock(endMs)}`
+  const durMin = Math.max(1, Math.round((endMs - startMs) / 60000))
+  const durText = durMin >= 60 ? `${(durMin / 60).toFixed(durMin % 60 ? 1 : 0)} 小时` : `${durMin} 分钟`
+  const total = list.length
+
+  /*
+   * 结束后是不是还处在另一个免打扰窗口里（典型场景：临时静默到期，夜里那场还在跑）。
+   * 这时候写「实时推送已恢复」就是错的 —— 会让人以为消息马上就来。
+   */
+  const stillText = ctx.stillSilent
+    ? `免打扰仍在生效${ctx.stillLabel ? `（${ctx.stillLabel}）` : ''}，期间的报警继续收存，结束后再汇总。`
+    : '实时逐条推送已恢复。'
+
+  const mdLines = [
+    '### 🔔 免打扰时段已结束',
+    '>',
+    `> **时段**：${rangeLabel}　（时长约 ${durText}）`,
+    `> **本时段报警**：${total} 条　·　${stillText}`
+  ]
+  const plainLines = [
+    '🔔 免打扰时段已结束',
+    `时段：${rangeLabel}（时长约 ${durText}）`,
+    `本时段报警：${total} 条 · ${stillText}`
+  ]
+  const htmlLines = [
+    '🔔 <b>免打扰时段已结束</b>',
+    `时段：<b>${rangeLabel}</b>（时长约 ${durText}）`,
+    `本时段报警：<b>${total}</b> 条 · ${stillText}`
+  ]
+
+  const summary = total ? buildSilentSummary(list, cfg, { startMs, endMs }) : null
+  if (summary) {
+    mdLines.push('', summary.markdown)
+    plainLines.push('', summary.plain)
+    htmlLines.push('', summary.plain)
+  } else {
+    mdLines.push('>', '> 本时段内**没有捕获到报警**，无需汇总。', '', `> 由 ${BRAND.fullName} 自动通知 · ${formatTime(endMs, false)}`)
+    plainLines.push('本时段内没有捕获到报警，无需汇总。', '', `由 ${BRAND.fullName} 自动通知 · ${formatTime(endMs, false)}`)
+    htmlLines.push('本时段内<b>没有捕获到报警</b>，无需汇总。', '', `由 ${BRAND.fullName} 自动通知 · ${formatTime(endMs, false)}`)
+  }
+
+  return {
+    title: total ? `🔔 免打扰结束 · 本时段 ${total} 条报警汇总` : '🔔 免打扰时段已结束',
+    markdown: mdLines.join('\n'),
+    html: htmlLines.join('\n'),
+    plain: plainLines.join('\n')
+  }
+}
+
 /** 状态文案 */
 export const STATE_LABEL = {
   playing: '✅ 正常播放',
