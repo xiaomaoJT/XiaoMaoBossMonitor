@@ -881,7 +881,8 @@
                     进入每个免打扰时段的瞬间推一条「已开启」（时长、期间仍持续统计、结束时间）；
                     时段结束时再推一条「已结束」，并附上本时段捕获的报警汇总 ——
                     即使这段时间一条报警都没有，也会推一条结束提醒。
-                    提醒一律发到<b>已配置好的钉钉 / 企业微信 / TG</b>（不受上面「暂停推送的渠道」勾选影响）。
+                    提醒一律发到<b>已配置好的钉钉 / 企业微信 / TG</b>（不受上面「暂停推送的渠道」勾选影响）；
+                    下面两个「试发」按钮则只发到<b>上面勾选的渠道</b>，方便单独验证某一个。
                   </em>
                 </span>
                 <label class="opt-inline">
@@ -897,7 +898,7 @@
                 <template v-if="opts.silent.preNotify !== false">
                   <button class="btn tiny" @click="testPreSilence">试发开始提醒</button>
                   <button class="btn tiny" @click="testPostSilence">试发结束提醒</button>
-                  <span class="muted">按第一个时段立即发一条，看看文案效果</span>
+                  <span class="muted">立即发一条到上方勾选的渠道，看看文案效果（后端模式下由服务端发）</span>
                 </template>
                 <span class="muted" v-else>关闭后只保留「静默期间有报警才发汇总」，开始 / 结束都不再通知</span>
               </div>
@@ -2166,6 +2167,48 @@
                 </span>
               </div>
 
+              <!--
+                诊断：把「为什么没响应」直接摆在这儿。
+                以前只能靠翻后端日志，而这条链路恰好有六种成因，现象却都是"没反应"。
+              -->
+              <div class="tg-diag" v-if="tg.remote.enabled">
+                <div class="diag-row">
+                  <span class="diag-k">机器人</span>
+                  <span class="diag-v">
+                    <template v-if="tgBotInfo">
+                      {{ tgBotInfo.username ? '@' + tgBotInfo.username : '已连接' }}{{ tgBotInfo.name ? ' · ' + tgBotInfo.name : '' }}
+                    </template>
+                    <span v-else class="muted">未自检（点下方「测试连接」）</span>
+                  </span>
+                </div>
+                <div class="diag-row">
+                  <span class="diag-k">Token</span>
+                  <span class="diag-v" :class="tgDiag.tokenSet ? 'ok-text' : 'err-text'">
+                    {{ tgDiag.tokenSet ? '已填写' : '未填写 —— 监听器起不来' }}
+                  </span>
+                </div>
+                <div class="diag-row">
+                  <span class="diag-k">白名单</span>
+                  <span class="diag-v" :class="tgDiag.allowCount ? '' : 'err-text'">
+                    {{ tgDiag.allowCount ? tgDiag.allowCount + ' 个用户' : '为空 —— 任何人发指令都会被静默丢弃' }}
+                  </span>
+                </div>
+                <div class="diag-row" v-if="tgDiag.lastRejectAt">
+                  <span class="diag-k">最近被拒</span>
+                  <span class="diag-v err-text">{{ tgDiag.lastRejectId }} · {{ tgDiag.lastRejectReason }}</span>
+                </div>
+                <p class="diag-note" v-if="tgDiag.note">💡 {{ tgDiag.note }}</p>
+                <div class="test-row">
+                  <button class="btn tiny" :disabled="tgTesting" @click="testTgConnection">
+                    {{ tgTesting ? '测试中…' : '测试连接' }}
+                  </button>
+                  <button class="btn tiny danger" v-if="tgWebhookSet" :disabled="tgTesting" @click="deleteTgWebhookNow">
+                    删除 Webhook
+                  </button>
+                  <span class="muted" v-if="tgProbeMsg">{{ tgProbeMsg }}</span>
+                </div>
+              </div>
+
             <template v-if="tg.remote.enabled">
               <!-- ---------- 安全：授权用户 ---------- -->
               <div class="sub-label">授权用户</div>
@@ -2771,8 +2814,10 @@ import {
   backendStateText,
   backendStatus,
   backendWatchdog,
+  deleteBackendTgWebhook,
   refreshBackendStatus,
-  refreshBackendWatchdog
+  refreshBackendWatchdog,
+  testBackendTgRemote
 } from '../composables/useBackendEvents'
 import { syncState, syncStateText } from '../composables/useBackendSync'
 import { refreshWatchStatus, watchState, watchStatusText } from '../composables/useWatchBridge'
@@ -4535,6 +4580,7 @@ const TG_COMMANDS = [
   { cmd: 'patrol', usage: '/patrol', desc: '立即推送一次巡检报告' },
   { cmd: 'status', usage: '/status', desc: '查看在线路数 / 静默状态 / 事件数' },
   { cmd: 'check', usage: '/check duty', desc: '静默查岗：把静默期间积压的事件汇总推过来（含全部截图）' },
+  { cmd: 'duty', usage: '/duty', desc: '静默查岗（/check duty 的短别名，两者等效）' },
   { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）' },
   { cmd: 'hardreboot', usage: '/hardreboot', desc: '重启整台电脑（最后手段，需两次开启 + 二次确认）' }
 ]
@@ -4565,18 +4611,82 @@ function removeAllowId(i) {
  * 后端监听状态。
  * 直接读 /api/status 里的 tgRemote —— 用户最怕的是"配好了但不知道有没有生效"，
  * 所以必须把「后端到底有没有在听」如实显示出来。
+ *
+ * running 为 false 时不再只说一句「后端未运行」：把后端算出来的原因（note）
+ * 直接拼进去（比如"没填 Token""白名单为空"），否则用户只能看到一个否定结论，
+ * 不知道该去改哪儿。
  */
 const tgRemoteChip = computed(() => {
   const st = backendStatus.value && backendStatus.value.tgRemote
   if (!st) return { cls: '', text: '未连接后端', running: false }
   if (!st.enabled) return { cls: '', text: '未开启', running: false }
-  if (!st.running) return { cls: 'err', text: '后端未运行', running: false }
+  if (!st.running) return { cls: 'err', text: st.note ? `未运行 · ${st.note}` : '后端未运行', running: false }
   const parts = [`已监听 · 收到 ${st.received} 条`]
   if (st.executed) parts.push(`已执行 ${st.executed}`)
   if (st.rejected) parts.push(`拒绝 ${st.rejected}`)
   if (st.lastCmd) parts.push(`最近 ${st.lastCmd}`)
   return { cls: 'ready', text: parts.join(' · '), running: true }
 })
+
+/* ---------------- Telegram 远程控制：连接自检 ---------------- */
+
+/** 后端算出的诊断快照（/api/status.tgRemote） */
+const tgDiag = computed(() => (backendStatus.value && backendStatus.value.tgRemote) || {})
+const tgBotInfo = computed(() => tgDiag.value.bot || null)
+const tgWebhookSet = computed(() => {
+  const b = tgBotInfo.value
+  return !!(b && b.webhook && b.webhook.set)
+})
+const tgTesting = ref(false)
+/** 自检结果文本（贴着按钮显示，不弹 toast —— 排障时更需要能反复看） */
+const tgProbeMsg = ref('')
+
+/**
+ * 「测试连接」：让后端真去打一次 Telegram（getMe + getWebhookInfo）。
+ * 状态片只能反映本地怎么看，连不上外网 / Token 错了 / 被 Webhook 挡着，
+ * 都只有真打一次接口才知道。
+ */
+async function testTgConnection() {
+  if (tgTesting.value) return
+  const base = backendBase()
+  if (!base) {
+    tgProbeMsg.value = '未配置后端地址'
+    return
+  }
+  tgTesting.value = true
+  tgProbeMsg.value = ''
+  try {
+    const r = await testBackendTgRemote(base)
+    const p = (r && r.probe) || {}
+    if (r && r.ok && p.ok) {
+      tgProbeMsg.value = `✅ 连接正常 · @${p.username || '?'}${p.webhook && p.webhook.set ? ' · ⚠️ 该机器人设置了 Webhook' : ''}`
+    } else {
+      tgProbeMsg.value = `❌ ${p.error || (r && r.reason) || '自检失败'}${p.hint ? ' · ' + p.hint : ''}`
+    }
+    await refreshBackendStatus(props.options)
+  } catch (e) {
+    tgProbeMsg.value = `❌ ${(e && e.message) || '自检失败'}`
+  } finally {
+    tgTesting.value = false
+  }
+}
+
+/** 删除 Webhook（getUpdates 与它互斥，不清掉就永远收不到指令） */
+async function deleteTgWebhookNow() {
+  if (tgTesting.value) return
+  const base = backendBase()
+  if (!base) return
+  tgTesting.value = true
+  try {
+    const r = await deleteBackendTgWebhook(base)
+    tgProbeMsg.value = r && r.ok ? '✅ Webhook 已删除，现在应该能收到指令了' : `❌ 删除失败：${(r && r.reason) || '未知原因'}`
+    await refreshBackendStatus(props.options)
+  } catch (e) {
+    tgProbeMsg.value = `❌ ${(e && e.message) || '删除失败'}`
+  } finally {
+    tgTesting.value = false
+  }
+}
 
 function remove(i) {
   const id = cams.value[i].id
@@ -5804,6 +5914,49 @@ function loadHidden() {
 .remote-status .muted {
   font-size: 11px;
   color: var(--text-dim-2);
+}
+
+/* ---------- Telegram 远程控制：诊断面板 ---------- */
+/*
+ * 排障面板而不是装饰：每条 diag-row 都是一个「可能出错的地方」，
+ * 用等宽字体对齐键值，扫一眼就能看出是哪一项断了。
+ */
+.tg-diag {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px dashed var(--line);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diag-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.diag-k {
+  flex: 0 0 62px;
+  color: var(--text-dim-2);
+}
+
+.diag-v {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.diag-note {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
 }
 
 .id-list {

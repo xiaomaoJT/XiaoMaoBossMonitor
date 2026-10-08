@@ -630,12 +630,15 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 | `/patrol` | 立即推送一次巡检报告（各通道状态与功能开关） |
 | `/status` | 查看当前状态：在线路数、静默情况、今日报警与推送统计 |
 | `/check duty` | **静默查岗**：推静默期间积压事件的汇总 + 全部截图；再发一次只看增量 |
+| `/duty` | 同上（短别名，**也单独注册进了命令菜单**，手机上手打更省事） |
 | `/reboot` | 重启检测服务（需另开 `allowReboot`） |
 | `/hardreboot` | 重启整台电脑（需 `allowReboot` + `systemReboot.enabled` + 回复 `confirm`） |
 
-别名：`/duty`、`/checkduty` 等价于 `/check duty`。
+`/checkduty` 与 `/check duty`、`/duty` 三者等效。
 
-> 指令菜单通过 `setMyCommands` 注册进 Telegram，输入 `/` 会自动弹出候选，不用背。
+> 指令菜单通过 `setMyCommands` 注册进 Telegram，输入 `/` 会自动弹出候选，不用背。`check` 与 `duty` 都注册，两条都会出现在候选里。
+>
+> **远程控制是热生效的**：在设置里打开开关并保存，监听器会立刻起来，不需要重启后端。设置页「远程控制」区还有诊断面板（机器人身份 / Token / 白名单 / 最近被拒原因）和「测试连接」「删除 Webhook」两个按钮 —— 「配好了却没响应」的六种成因都能在那里直接看到结论。
 
 ---
 
@@ -654,6 +657,10 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 | `POST` | `/api/restart` | 立即重启服务（立刻返回 `accepted`，非阻塞） |
 | `GET` | `/api/restart-status` | 上次重启结果 / 连续失败次数 / 历史 / 日志路径 / 硬重启可用性 |
 | `GET` `POST` `DELETE` | `/api/temp-silent` | 查询 / 开启 / 结束临时静默 |
+| `POST` | `/api/silent-notice` | 由后端发一条静默提醒：`kind=pre`（开始）/ `post`（结束，不动缓冲）/ `flush`（真实汇总）。可带 `channels` 限定渠道 |
+| `GET` | `/api/tg-remote` | Telegram 远程控制诊断（是否在听、机器人身份、白名单数量、最近被拒原因、为什么没运行） |
+| `POST` | `/api/tg-remote/test` | 主动打一次 Telegram（`getMe` + `getWebhookInfo`）做连接自检 |
+| `POST` | `/api/tg-remote/webhook` | `{action:'delete'}` 删除 Webhook（它与 `getUpdates` 互斥，不清掉就收不到指令） |
 | `POST` | `/api/read` | 已读回写（保持前后端一致） |
 | `POST` | `/api/shot` | 补图 / 人脸信息回写 |
 | `GET` | `/api/pending-faces` | 未录入人员队列 |

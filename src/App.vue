@@ -262,6 +262,7 @@ import {
   markReadOnBackend,
   refreshBackendWatchdog,
   runBackendPatrol,
+  sendBackendSilentNotice,
   startBackendPolling,
   stopBackendPolling
 } from './composables/useBackendEvents'
@@ -2568,16 +2569,36 @@ async function runPatrol(reason = 'auto') {
   else if (reason === 'manual') showToast('巡检报告已推送')
 }
 
+/**
+ * 免打扰提醒的「试发」走哪几个渠道。
+ *
+ * 用户口径：试发应该发到**静默里勾选的那几个渠道**（「静默期间暂停实时推送的渠道」）。
+ * 勾了哪个就只测哪个，不用为了看一眼文案被三端同时轰炸。
+ * 一个都没勾（或都还没配凭据）时返回 undefined，交给推送层退回「全部已配置渠道」——
+ * 宁可多发，也不能让按钮点了等于没点。
+ */
+function silentTestChannels() {
+  const chans = (options.silent && options.silent.channels) || []
+  return Array.isArray(chans) && chans.length ? chans.slice() : undefined
+}
+
 /** 设置页「立即推送静默汇总」按钮：把当前静默时段收存的报警立刻汇总发出去 */
 function onFlushSilent() {
   if (backendActive.value) {
-    showToast('后端模式下推送在服务端，请到后端机器查看')
+    /*
+     * 后端模式下推送在服务端跑，前端连待汇总的缓冲都没有，必须委托后端发。
+     * 这是真实汇总（会掏空服务端的静默缓冲），所以不限定渠道 —— 攒下来的报警
+     * 该让所有已配置渠道都看到。
+     */
+    sendBackendSilentNotice(options.backend.url, 'flush').then((r) =>
+      showToast(r.ok ? r.reason || '静默汇总已推送' : `未推送：${r.reason || '未知原因'}`)
+    )
     return
   }
   if (typeof push.flushSilentSummary === 'function') {
     push
       .flushSilentSummary({ manual: true })
-      .then(() => showToast('静默汇总已尝试推送'))
+      .then((summary) => showToast(summary ? '静默汇总已推送' : '当前没有待汇总的报警'))
       .catch((e) => showToast(`推送失败：${(e && e.message) || '未知错误'}`))
   }
 }
@@ -2586,15 +2607,22 @@ function onFlushSilent() {
  * 设置页「试发一条免打扰开始提醒」按钮。
  * 走与自动提醒完全相同的文案与发送路径（pushPreSilenceNotice），
  * 改完文案可以先看一眼效果，确认没问题再等下一个时段自动触发。
+ *
+ * 后端模式下委托后端发（见 sendBackendSilentNotice）——以前这里只弹一句
+ * 「后端模式下推送在服务端」，按钮点了等于没点。
  */
 function onTestPreSilence() {
   if (backendActive.value) {
-    showToast('后端模式下推送在服务端，请到后端机器查看')
+    sendBackendSilentNotice(options.backend.url, 'pre', silentTestChannels()).then((r) =>
+      showToast(
+        r.ok ? `开始提醒已推送（后端）${r.reason ? ' · ' + r.reason : ''}` : `未推送：${r.reason || '未知原因'}`
+      )
+    )
     return
   }
   if (typeof push.pushPreSilenceNotice === 'function') {
     push
-      .pushPreSilenceNotice()
+      .pushPreSilenceNotice(null, { onlyIds: silentTestChannels() })
       .then((r) =>
         showToast(
           r && r.ok
@@ -2613,12 +2641,14 @@ function onTestPreSilence() {
  */
 function onTestPostSilence() {
   if (backendActive.value) {
-    showToast('后端模式下推送在服务端，请到后端机器查看')
+    sendBackendSilentNotice(options.backend.url, 'post', silentTestChannels()).then((r) =>
+      showToast(r.ok ? `结束提醒已推送（后端）${r.title ? ' · ' + r.title : ''}` : `未推送：${r.reason || '未知原因'}`)
+    )
     return
   }
   if (typeof push.pushPostSilenceNotice === 'function') {
     push
-      .pushPostSilenceNotice()
+      .pushPostSilenceNotice({ onlyIds: silentTestChannels() })
       .then((summary) =>
         showToast(summary ? `结束提醒已推送（${summary.title}）` : '未推送：没有可用渠道')
       )

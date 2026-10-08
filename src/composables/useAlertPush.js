@@ -389,15 +389,28 @@ export function useAlertPush(options, hooks = {}) {
   let coveredSlotKey = ''
 
   /**
-   * 静默相关消息（开始提醒 / 结束提醒 / 汇总）发给哪些渠道。
+   * 静默相关消息（开始提醒 / 结束提醒 / 汇总）发给哪些渠道 —— 全项目唯一的判定点。
    *
-   * 用户要求：只要静默提醒开着，就推给**现有已配置的三端**（钉钉 / 企微 / TG）。
-   * 注意这里刻意不看 silent.channels —— 那个勾选决定的是「静默期间哪些渠道
-   * 暂停实时推送」，跟「提醒本身发去哪」不是一回事：只对钉钉静默的人，
-   * 一样应该在企业微信 / TG 上看到「免打扰已开启 / 已结束」。
+   * 默认口径（不是试发时）：只要静默提醒开着，就推给**现有已配置的三端**
+   * （钉钉 / 企微 / TG）。这时刻意**不看** silent.channels —— 那个勾选决定的是
+   * 「静默期间哪些渠道暂停实时推送」，跟「提醒本身发去哪」不是一回事：
+   * 只对钉钉静默的人，一样应该在企业微信 / TG 上看到「免打扰已开启 / 已结束」。
+   *
+   * 唯一的例外是设置页的「试发」：那里传 only = silent.channels，
+   * 让用户能挑一个渠道单独验证文案，不用被三端同时轰炸。
+   *
+   * @param {string[]} [only] 限定渠道（试发用）；缺省 / 空 = 全部已配置渠道
    */
-  function noticeIds() {
-    return CHANNEL_DEFS.filter((d) => isReady(d.id)).map((d) => d.id)
+  function restrictIds(only) {
+    const all = CHANNEL_DEFS.filter((d) => isReady(d.id)).map((d) => d.id)
+    if (Array.isArray(only) && only.length) {
+      const hit = all.filter((id) => only.includes(id))
+      // 两道防呆，避免试发变成「静默失败」：选中的渠道剔掉没配置好的；
+      // 剔完一个都不剩（勾的三个都没配凭据，或传进来一堆不存在的 id），
+      // 就退回「全部已配置渠道」—— 宁可多发，也不能让按钮点了却收不到东西。
+      if (hit.length) return hit
+    }
+    return all
   }
 
   /**
@@ -518,6 +531,7 @@ export function useAlertPush(options, hooks = {}) {
    * @param {object} [opts.window]  正在结束的那个窗口（有则用它写时段文案）
    * @param {boolean}[opts.manual]  手动触发：没收到报警就不发（纯提醒按钮场景）
    * @param {boolean}[opts.test]    设置页试发：只生成并发送，不动真实缓冲
+   * @param {string[]}[opts.onlyIds] 限定只发这几个渠道（试发用；缺省 = 全部已配置渠道）
    */
   async function flushSilentSummary(opts = {}) {
     const now = Date.now()
@@ -543,7 +557,7 @@ export function useAlertPush(options, hooks = {}) {
      */
     if (!buf.length && !opts.test && (opts.manual || silentCfg().preNotify === false || !preAllowed())) return
 
-    const ids = noticeIds()
+    const ids = restrictIds(opts.onlyIds)
     if (!ids.length) return
 
     const closedWin = opts.window || null
@@ -705,7 +719,7 @@ export function useAlertPush(options, hooks = {}) {
    * @param {object} win  窗口信息（currentWindow 的产物；win.temp 决定用哪套文案）
    * @param {object} slot 定时时段的 { start, end }（分钟数，来自 matchSlot）
    */
-  async function pushStartNotice(win, slot) {
+  async function pushStartNotice(win, slot, opts = {}) {
     if (silentCfg().preNotify === false) return { ok: false, reason: '静默提醒已关闭' }
     const msg = win && win.temp ? buildTempSilentMessages(win) : buildPreSilenceMessages(slot)
     if (!msg) return { ok: false, reason: '时段格式无效' }
@@ -713,28 +727,36 @@ export function useAlertPush(options, hooks = {}) {
       title: msg.title,
       text: msg.markdown,
       html: msg.html,
-      kind: 'silent'
+      kind: 'silent',
+      // 试发时限定渠道；正常触发时 opts.onlyIds 为空 = 发全部已配置渠道
+      onlyIds: opts.onlyIds
     })
     // sendDirect 成功时返回 { ok, reason }（reason 为空=全渠道成功，非空=部分失败说明），没有 sent 字段
     if (r && r.ok) notify(r.reason ? `免打扰开始提醒已推送（${r.reason}）` : '免打扰开始提醒已推送')
     return r
   }
 
-  /** 设置页「试发一条开始提醒」用的入口（不受 preNotify 开关限制，改完文案先看效果） */
-  function pushPreSilenceNotice(slot) {
+  /**
+   * 设置页「试发一条开始提醒」用的入口（不受 preNotify 开关限制，改完文案先看效果）。
+   *
+   * @param {object} [slot] 指定时段；缺省则用「当前正在跑的时段」，再缺省用第一个时段
+   * @param {object} [opts] { onlyIds } —— 试发时限定只发这几个渠道
+   */
+  function pushPreSilenceNotice(slot, opts = {}) {
     const slots = readSlots()
     const hit = matchSlot(Date.now())
     const useSlot = slot || hit || slots[0] || null
     // 试发时若正处在临时静默里，用临时静默的文案更贴近真实
     const win = currentWindow(Date.now())
-    return pushStartNotice(win && win.temp ? win : { temp: false }, useSlot)
+    return pushStartNotice(win && win.temp ? win : { temp: false }, useSlot, opts)
   }
 
   /**
    * 设置页「试发一条结束提醒」用的入口。
    * 不走真实的缓冲清理（test 模式），所以随便点也不会把待汇总的事件弄丢。
+   * @param {object} [opts] { onlyIds } —— 试发时限定只发这几个渠道
    */
-  function pushPostSilenceNotice() {
+  function pushPostSilenceNotice(opts = {}) {
     const now = Date.now()
     let win = currentWindow(now)
     if (!win) {
@@ -754,7 +776,7 @@ export function useAlertPush(options, hooks = {}) {
         }
       }
     }
-    return flushSilentSummary({ endMs: win ? win.endMs : now, window: win, test: true })
+    return flushSilentSummary({ endMs: win ? win.endMs : now, window: win, test: true, onlyIds: opts.onlyIds })
   }
 
   /*
@@ -1463,16 +1485,22 @@ export function useAlertPush(options, hooks = {}) {
    * @param {string} text 钉钉 / 企业微信用的 markdown
    * @param {string} html Telegram 用的 HTML（不传则用纯文本）
    */
-  async function sendDirect({ title, text, html, atAll = false, kind = 'status', key, onState: cb }) {
+  async function sendDirect({ title, text, html, atAll = false, kind = 'status', key, onState: cb, onlyIds }) {
+    /*
+     * 渠道集先由 restrictIds 收口 —— 它同时负责「限定渠道」与
+     * 「限定到空的就退回全部已配置」这两件事，避免这里再各判一遍、两处走偏。
+     */
+    const allow = restrictIds(onlyIds)
     const ids = CHANNEL_DEFS.filter((d) => {
-      if (!isReady(d.id)) return false
+      if (!allow.includes(d.id)) return false
       const c = d.read()
       // 巡检 / 状态异常在各渠道里可以单独关掉
       if (kind === 'patrol') return !(c.patrol && c.patrol.enabled === false)
       if (kind === 'status') return !(c.statusAlerts && c.statusAlerts.enabled === false)
       // 'silent'：免打扰开始/结束提醒。发给**所有已配置的渠道**（三端），
       // 刻意不看 silent.channels —— 那是「静默期间暂停实时推送的渠道」，
-      // 跟「提醒发去哪」不是一回事（只对钉钉静默，也该在企微/TG 上看到提醒）
+      // 跟「提醒发去哪」不是一回事（只对钉钉静默，也该在企微/TG 上看到提醒）。
+      // 试发的限定走上面的 onlyIds，不在这里改口径。
       if (kind === 'silent') return true
       return true
     }).map((d) => d.id)

@@ -222,6 +222,89 @@ export async function runBackendPatrol(url) {
   }
 }
 
+/**
+ * 让后端发一条静默提醒（设置页「试发开始/结束提醒」「立即推送静默汇总」）。
+ *
+ * 为什么必须走后端：后端模式下推送只在服务端跑，页面里既没有待汇总的缓冲、
+ * 也不该由浏览器去发 —— 否则同一件事会被两个进程各推一遍。
+ * 以前这三个按钮只弹一句「后端模式下推送在服务端」，点了等于没点。
+ *
+ * @param {string} url      后端地址
+ * @param {'pre'|'post'|'flush'} kind
+ * @param {string[]} [channels] 限定渠道（试发按「静默期间暂停推送的渠道」勾选走）；
+ *                              空数组 / 不传 = 后端发全部已配置渠道
+ * @returns {Promise<{ok:boolean, reason?:string, title?:string}>}
+ */
+export async function sendBackendSilentNotice(url, kind, channels) {
+  const base = normalizeUrl(url)
+  if (!base) return { ok: false, reason: '后端地址无效' }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 30000)
+    try {
+      const res = await fetch(`${base}/api/silent-notice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, channels: Array.isArray(channels) ? channels : [] }),
+        signal: ctrl.signal
+      })
+      const data = await res.json().catch(() => ({}))
+      return { ok: res.ok && !!data.ok, reason: data.reason || '', title: data.title || '' }
+    } finally {
+      clearTimeout(t)
+    }
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || '无法连接后端服务' }
+  }
+}
+
+/**
+ * 让后端做一次 Telegram 连接自检（设置页远程控制区的「测试连接」）。
+ * @returns {Promise<{ok:boolean, probe?:object, diagnostic?:object, reason?:string}>}
+ */
+export async function testBackendTgRemote(url) {
+  const base = normalizeUrl(url)
+  if (!base) return { ok: false, reason: '后端地址无效' }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 20000)
+    try {
+      const res = await fetch(`${base}/api/tg-remote/test`, { method: 'POST', signal: ctrl.signal })
+      return await res.json().catch(() => ({ ok: false, reason: '返回内容无法解析' }))
+    } finally {
+      clearTimeout(t)
+    }
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || '无法连接后端服务' }
+  }
+}
+
+/**
+ * 让后端删除 Telegram Webhook（getUpdates 与 Webhook 互斥，
+ * 这是「机器人配好了却收不到指令」的常见成因）。
+ */
+export async function deleteBackendTgWebhook(url) {
+  const base = normalizeUrl(url)
+  if (!base) return { ok: false, reason: '后端地址无效' }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), 20000)
+    try {
+      const res = await fetch(`${base}/api/tg-remote/webhook`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete' }),
+        signal: ctrl.signal
+      })
+      return await res.json().catch(() => ({ ok: false, reason: '返回内容无法解析' }))
+    } finally {
+      clearTimeout(t)
+    }
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || '无法连接后端服务' }
+  }
+}
+
 /** 拉一次状态哨兵快照（设置页展示掉线监控与下次巡检时间） */
 export async function refreshBackendWatchdog(options) {
   if (!backendOn(options)) {
