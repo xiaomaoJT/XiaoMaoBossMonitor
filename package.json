@@ -12,6 +12,7 @@
     "preview": "vite preview --port 4173",
     "build:all": "node scripts/build-all.mjs",
     "serve": "node scripts/serve-static.mjs --open",
+    "serve:drop": "node server/headless-monitor.mjs --drop-pending",
     "pack:portable": "npm run build && node scripts/make-portable.mjs",
     "electron:dev": "node scripts/electron-dev.mjs",
     "electron:preview": "npm run build && electron .",
