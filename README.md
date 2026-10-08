@@ -396,6 +396,15 @@ analyzer.mjs（每路一个实例）
 
 配套还有 `listenWithRetry`：端口被占用时退避重试（`EADDRINUSE` / `EACCES`），失败则明确报错退出，而不是假活。
 
+**两层重启保护**（互补，别只留一层）：
+
+| 保护 | 统计什么 | 拦什么 |
+|---|---|---|
+| 风暴保护 `stormMax = 3 / 10 分钟` | **失败**的重启次数 | 自愈连续失败（端口被别的程序长期占着）→ 暂停自动重启，保持服务运行 |
+| 循环保护 `loopMax = 4 / 10 分钟` | **成功**的重启次数 | 重启循环。循环里每一次重启其实都成功，所以风暴保护一次都不会触发 —— 这层就是补那个缺口 |
+
+另外，`spawn` 新进程时**必须带 `windowsHide: true`**：`detached` 的新进程没有控制台，而 Windows 会给「无控制台进程创建的控制台程序」自动分配一个可见终端窗口（见 5.13）。同理，重启时会把「TG 指令游标」通过环境变量 `MONITOR_TG_OFFSET` 交给新进程（见 5.12）。
+
 ### 5.9 系统级硬重启（`hard-reboot.mjs`，最后手段）
 
 ⚠️ 这不是「重启 BossMonitor」，而是**重启整台机器**。
@@ -451,6 +460,40 @@ analyzer.mjs（每路一个实例）
 
 游标落盘带来的是 **at-most-once** 语义：若在「落盘之后、执行之前」崩溃，这条指令会**丢失**。对 `/reboot` 这类危险指令这正是想要的偏向 —— 宁可漏执行一次，也绝不重复执行。
 
+**为什么光落盘还不够**（这是修完上面那条之后仍然会踩的坑）：Windows 上 `rename` 会被 Defender / 文件索引锁住而报 `EPERM`，而落盘函数里原来把异常**静默吞掉**了 —— 于是「没写进去」和「写进去了」在运行时毫无区别，下一次重启照样重放。所以又加了一条独立通道：
+
+```
+父进程 spawn 新进程时 → 环境变量 MONITOR_TG_OFFSET = 当前游标
+新进程启动      → lastUpdateId = max(磁盘, 环境变量)
+```
+
+两条通道互不依赖，坏一条也不会重放。另外游标落盘失败会记进 `status.tgRemote.offsetSaveError`（设置页诊断面板可见），不再无声降级。
+
+### 5.13 Windows 上「重启后反复弹出终端窗口」
+
+症状：在 Windows 上执行 `/reboot confirm` 之后，**反复弹出好几个终端窗口，关掉又弹、弹了又关**；而双击 `start-windows.bat` 启动时完全看不到这个现象。
+
+成因是**控制台的归属**：
+
+```
+start-windows.bat → node 继承 cmd 的窗口 → ffmpeg 也继承同一个窗口   → 什么都看不见
+自愈重启        → node 是 detached（没有控制台）
+                  → Windows 给它的每个控制台子进程**新开一个窗口**（每路摄像头一个 ffmpeg）
+                  → 流断开重连再开一次 → 看起来就是「反复弹出、又关闭、又反复」
+```
+
+所以窗口数 ≈ 摄像头路数。修法是给**所有运行期 `spawn`** 加 `windowsHide: true`：
+
+| 位置 | 拉起的进程 | 说明 |
+|---|---|---|
+| `restart.mjs` | node（新进程自己） | 同时保留 `detached: true`，守护性不能丢 |
+| `source.mjs` | ffmpeg（每路流一个） | 弹窗的主要来源 |
+| `ffmpeg-fetch.mjs` | `ffmpeg -version` / `tar` / `xattr` | 启动时探测版本，也会闪窗口 |
+
+回归探针断言的是「**本项目所有 `spawn` 都带 `windowsHide`**」这条不变量（用模块加载钩子抓真实服务里每一次 spawn 的完整参数），所以在 macOS 上也能守住这个 Windows 缺陷。
+
+`start-windows.bat` 也一并改了：启动前先 `netstat` 查 8787，**已在运行就不再起第二个**（重复启动会互相抢端口、各弹一个窗口）；自愈重启接管后旧窗口不再停在 `pause` 上误导人（打印说明后 6 秒自动关闭；只有非 0 退出码才 `pause` 等你看错误）。
+
 ---
 
 ## 六、各端运行方式
@@ -486,15 +529,32 @@ npm run preview      # 起 vite preview：http://127.0.0.1:4173
 这是「7×24 无人值守」的正式跑法：
 
 ```bash
-npm run server                               # 按 server/config.json 启动，默认 8787
+npm run server                               # ★ 日常就用这条：按 server/config.json 启动，默认 8787
 node server/headless-monitor.mjs --port=9000 # 换端口
-node server/headless-monitor.mjs --drop-pending   # 启动时先清空 Telegram 侧积压的指令
 npm run server:status                        # curl 一下 /api/status 看状态
+
+npm run serve:drop                           # 只有陷入重启循环时才用（见下）
+node server/headless-monitor.mjs --drop-pending   # 与上一行完全等价
 ```
+
+> **⚠️ 别把 `npm run serve` 当成后端。** 它和 `npm run serve:drop` 名字像，其实是两回事：
+> `serve`（见 §7 便携版）起的是**纯静态文件服务**，只反代了钉钉 / 企微那两个**外网**接口，
+> **不托管本机的后端 API**。用它打开大屏，事件、配置同步、推送、远程控制全都不可用（都得有后端）。
+> `npm run server` 则是**一条命令把大屏 + HTTP API + 采集检测 + 推送 + 远程控制全带起来**，
+> 后端会把 `dist/` 一起托管在同一个端口上，所以日常只需要这一条。
+>
+> 一句话记法：**要看大屏且要功能 → `npm run server`；只想要个静态页 → `npm run serve`。**
 
 > **`--drop-pending` 什么时候用**：如果服务**一启动就反复重启**，多半是 Telegram 那边积压了旧的
 > `/reboot confirm`（详见下面「反复重启」小节）。带上这个参数启动一次即可清除，日志会报出
 > 清掉了几条；下次正常启动就不用再带。它只作用于本次启动，不会被自重启的子进程继承。
+>
+> 两条使用纪律（不然它反而会帮倒忙）：
+> ① **不要当默认启动命令**。它的语义是「把停机期间收到的指令全部丢弃」——
+> 你停机时发的 `/status`、`/duty` 会一起没了，而且会掩盖真正的故障原因
+> （现在游标已落盘 + 有循环保护，重启循环本不该再发生，若还需要反复清积压，说明另有问题）。
+> ② **服务已经在跑时别执行它**。好消息是这种情况下它是**安全的**：程序会先在端口上撞满
+> 40 次重试（约 10 秒）后报 `EADDRINUSE` 退出，**根本走不到清积压那一步**，代码不会去动积压。
 
 Windows 上直接**双击 `start-windows.bat`**（会自动开浏览器并启动服务，窗口保持打开即代表在跑）。
 
@@ -539,6 +599,8 @@ node scripts/make-win-deploy.mjs --zip    # 额外压一个 zip
 ```
 
 产物是个自包含目录：`dist/` + `server/` + `node_modules/` + `start-windows.bat` + 使用说明。拷到另一台 Windows 上双击 bat 即可。
+
+`start-windows.bat` 会先检查 8787 端口：**已在运行就不再起第二个进程**（重复启动会互相抢端口、各弹一个窗口），只在界面打开一下；服务自愈重启接管后旧窗口会自动关闭，不再停在 `pause` 上误导人。要清积压就带参数启动：`node server\headless-monitor.mjs --drop-pending`。
 
 > ⚠️ **必须在目标平台执行**：`node_modules` 里 `better-sqlite3` / `onnxruntime-node` / `ffmpeg-static` 都是平台原生二进制，mac 上打出来的包拿到 Windows 上跑不起来。
 
@@ -714,6 +776,7 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 | `BOSSMONITOR_FFMPEG_OFFLINE` | 设为 `1` 表示完全离线：只查缓存与显式指定，不发起下载 |
 | `MONITOR_SMOKE_TEST` | 设为 `1` 时 Electron 自检模式（`npm run electron:smoke`） |
 | `MONITOR_RESTARTED_BY` / `MONITOR_RESTART_AT` | 由自愈重启器注入，标记「本进程是被谁、何时拉起的」 |
+| `MONITOR_TG_OFFSET` | 由自愈重启器注入：重启前「TG 指令已确认到哪一条」。新进程取 `max(磁盘, 它)`，于是**磁盘写不进去也不会重放** `/reboot`（Windows 上会被杀软挡住 rename，见 5.12） |
 | `VITE_DEV_SERVER_URL` | Electron 加载的开发服务器地址（`npm run electron:dev` 自动设置） |
 
 ---
@@ -730,7 +793,9 @@ ffmpeg 版本问题。市面 ws-flv 大量使用增强型 FLV（`codecId=0` + Fo
 先看 `allowReboot` 开了没；再看是不是连败触发了风暴保护（手动/远程 `force` 不受限，但自动重启会被暂停）；最后看 `GET /api/restart-status` 的 `consecFailures`。
 
 **Q：后端服务一启动就一直在反复重启？**
-Telegram 侧积压了旧的 `/reboot confirm`，被反复重放执行。用 `node server/headless-monitor.mjs --drop-pending` 启动一次即可（日志会报出清掉了几条），之后正常启动就行。根因与三处修复见 [5.12](#512-启动重放与积压为什么一启动就反复重启)。附带症状：连续远程重启超过 3 次会被**熔断**拒绝，回执里会直接说明还要等多久。
+Telegram 侧积压了旧的 `/reboot confirm`，被反复重放执行。用 `node server/headless-monitor.mjs --drop-pending` 启动一次即可（日志会报出清掉了几条），之后正常启动就行。根因与修复见 [5.12](#512-启动重放与积压为什么一启动就反复重启)。
+
+已经升级过的话，正常情况下**不会**再重放（游标落盘 + 环境变量双通道），而且有三道拦截：远程重启**熔断**（10 分钟内因 TG 指令重启超 3 次即拒绝，回执里说明还要等多久）、**循环保护**（10 分钟内成功重启超 4 次即拒绝）、**风暴保护**（连续失败 3 次即暂停自动重启）。诊断面板（设置 → TG 推送）会显示积压条数 `pendingUpdates` 与游标 `lastUpdateId`。
 
 **Q：硬重启之后监控没回来？**
 硬重启只负责重启机器，**不会**帮你把服务拉起来。必须先配开机自启。
@@ -743,6 +808,9 @@ Windows 需管理员；macOS 需给本进程「辅助功能」授权；Linux 需
 
 **Q：推送统计 / 事件清空后，顶部的今日报警数也归零了？**
 不会。每日统计走 `useDailyStats` 独立存储，不受事件条数淘汰与清空影响。
+
+**Q：Windows 上执行 `/reboot confirm` 之后，反复弹出好几个终端窗口，关掉又弹？**
+这是「detached 的新进程没有控制台」引起的：Windows 会给无控制台进程创建的控制台程序（ffmpeg）单独分配一个可见窗口，于是**每路摄像头弹一个**，流断开重连再弹一次。已通过给所有 `spawn` 加 `windowsHide: true` 修掉；若仍能复现，说明启动脚本/二进制是你自己改过的版本。详见 5.13。
 
 **Q：想彻底重置后端？**
 删掉 `server/data/` 即重置（数据库 + 快照 + 重启台账 + TG 指令游标 `tg-offset.json` + 远程重启熔断台账 `tg-reboot.json` 全在里面）。只清事件不清配置的话，用设置里的「清空事件」。

@@ -2201,6 +2201,14 @@
                   <span class="diag-k">最近被拒</span>
                   <span class="diag-v err-text">{{ tgDiag.lastRejectId }} · {{ tgDiag.lastRejectReason }}</span>
                 </div>
+                <!--
+                  游标落盘失败会导致「重启后重放旧指令」。Windows 上被杀软/文件锁
+                  挡住 rename 时会出现，必须让它可见 —— 否则这个降级是无声的。
+                -->
+                <div class="diag-row" v-if="tgDiag.offsetSaveError">
+                  <span class="diag-k">游标落盘</span>
+                  <span class="diag-v err-text">{{ tgDiag.offsetSaveError }}</span>
+                </div>
                 <p class="diag-note" v-if="tgDiag.note">💡 {{ tgDiag.note }}</p>
                 <div class="test-row">
                   <button class="btn tiny" :disabled="tgTesting" @click="testTgConnection">
