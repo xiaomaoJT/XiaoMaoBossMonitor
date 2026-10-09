@@ -179,30 +179,48 @@ const logoutTitle = computed(() =>
  */
 const remoteUptime = ref(null)
 let remoteTimer = null
+let remoteRetryTimer = null
 
-async function pullRemoteUptime() {
+/**
+ * 拉一次后端快照。
+ *
+ * 拉不到时要**短间隔补两次**，不能傻等下一个 10 秒周期 ——
+ * 网络抖一下、或后端恰好在做重活（拉流 / 推理 / 落盘），一次失败就会让
+ * 「运行时长」空整整一个周期，用户看到的就是「经常加载不出来，只显示 —」。
+ *
+ * ⚠️ 口径不变：**连不上就是 —，绝不退回前端页面时长** ——
+ * 那会把「系统其实停了」显示成「一直在跑」，比不显示更糟。
+ * 所以这里只做「更快地再问一次」，不做任何本地兜底。
+ */
+async function pullRemoteUptime(retry = 0) {
   if (!backendOn.value) {
     remoteUptime.value = null
     return
   }
   const data = await refreshRemoteStatus(props.options.backend.url)
   const su = data && data.systemUptime
-  remoteUptime.value = su
-    ? {
-        uptimeMs: Number(su.uptimeMs) || 0,
-        interruptMs: Number(su.interruptMs) || 0,
-        startedAt: Number(su.startedAt) || 0,
-        lastGapMs: Number(su.lastGapMs) || 0,
-        resetAt: Number(su.resetAt) || 0,
-        fetchedAt: Date.now()
-      }
-    : null
+  if (!su) {
+    if (retry < 2 && backendOn.value) {
+      clearTimeout(remoteRetryTimer)
+      remoteRetryTimer = setTimeout(() => pullRemoteUptime(retry + 1), 1200)
+    }
+    remoteUptime.value = null
+    return
+  }
+  remoteUptime.value = {
+    uptimeMs: Number(su.uptimeMs) || 0,
+    interruptMs: Number(su.interruptMs) || 0,
+    startedAt: Number(su.startedAt) || 0,
+    lastGapMs: Number(su.lastGapMs) || 0,
+    resetAt: Number(su.resetAt) || 0,
+    fetchedAt: Date.now()
+  }
 }
 
 function startRemotePoll() {
   if (remoteTimer) return
   pullRemoteUptime()
-  remoteTimer = setInterval(pullRemoteUptime, 10000)
+  remoteTimer = setInterval(() => pullRemoteUptime(), 10000)
 }
 
 function stopRemotePoll() {
@@ -210,6 +228,9 @@ function stopRemotePoll() {
     clearInterval(remoteTimer)
     remoteTimer = null
   }
+  // 忘了清这个的话，退出「关于系统」后还会再打两次后端，白耗一次连接
+  clearTimeout(remoteRetryTimer)
+  remoteRetryTimer = null
 }
 
 /** 当前运行时长视图：后端模式只用后端数据（连不上就留空，绝不退回前端时长） */

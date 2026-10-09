@@ -72,7 +72,7 @@ const FACE_SHOT_SIZE = 256
  * 后端 server/ 也直接复用它算推送消息里的「功能状态」，前后端不会各说各话。
  * 这里只做转发，保持原有导出路径不变。
  */
-export { camExtOn, EXT_FEATURES, activeFeatures, featureState } from '../config/features.js'
+export { camExtOn, EXT_FEATURES, activeFeatures, featureState, motionOn, activeDetects, DETECT_FEATURES } from '../config/features.js'
 import { camExtOn } from '../config/features.js'
 
 

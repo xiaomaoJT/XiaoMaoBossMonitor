@@ -66,6 +66,39 @@ export function activeFeatures(cam, options) {
 }
 
 /**
+ * 「画面变动」（移动检测）是否开启 —— 只算**配置**，不含"这一路此刻在不在解码"。
+ * 这是移动检测开关的唯一权威定义：CameraTile 的 analysisOn = decode && motionOn(...)。
+ */
+export function motionOn(cam, options) {
+  const o = options || {}
+  return !!o.analysisEnabled && !!(cam && cam.motion !== false)
+}
+
+/**
+ * 这一路**配置为要跑**的检测项全集：画面变动 / 人形 / 人脸 / 姿态 / 区域 / 计数。
+ *
+ * ⚠️ 存在的理由：盲视面板的「检测运行中」以前只看 `cam.motion`，
+ *    于是"关了移动检测、开着人形识别"时面板写着「检测已关闭」，
+ *    而画面顶上的人形芯片亮着 —— 同一个事实在同一个画面上两个说法。
+ *    现在两处都从这里取，不可能再各说各话。
+ *
+ * 人形只认 `cam.ai`（与画面的人形芯片、「更多」菜单里的「人形识别」一致），
+ * 不再叠一层全局 aiEnabled —— 后端模式下前端会把 aiEnabled 强制关掉，
+ * 而人形检测其实跑在服务端，叠全局闸反而会把「真的在跑」显示成没跑。
+ */
+export const DETECT_FEATURES = [
+  { key: 'motion', label: '画面变动', on: (cam, o) => motionOn(cam, o) },
+  { key: 'person', label: '人形', on: (cam) => !!(cam && cam.ai) },
+  ...EXT_FEATURES.map((d) => ({ key: d.key, label: d.short, on: d.on }))
+]
+
+/** 这一路真正开着的检测项（顺序固定：画面变动 → 人形 → 人脸 → 姿态 → 区域 → 计数） */
+export function activeDetects(cam, options) {
+  const o = options || {}
+  return DETECT_FEATURES.filter((d) => d.on(cam, o)).map((d) => ({ key: d.key, label: d.label }))
+}
+
+/**
  * 全量状态（推送消息用）。
  * 和 activeFeatures 相反：这里**开了的要报，没开的也要显式说明「未开启」**——
  * 用户要的是「开了啥就带啥，没开就告诉我它没开」。

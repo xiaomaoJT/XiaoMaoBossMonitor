@@ -1070,7 +1070,7 @@ export function cloneInitConfig() {
 export const BRAND = {
   name: 'XiaoMao',
   fullName: 'BossMonitor',
-  slogan: '7 路实时预览 · AI 人形识别 · 多端推送',
+  slogan: '多通道实时预览 · AI 人形识别 · 多端推送',
   logo: './logo/logo.png',
   version: '1.0.0'
 }
@@ -1103,6 +1103,62 @@ export const PUSH_CHANNEL_KEYS = [
   { id: 'wecom', cfgKey: 'wecom', label: '企微' },
   { id: 'tg', cfgKey: 'telegram', label: 'TG' }
 ]
+
+/** 取渠道对应的配置块 */
+function channelCfg(options, id) {
+  const o = options || {}
+  if (id === 'ding') return o.dingtalk
+  if (id === 'wecom') return o.wecom
+  if (id === 'tg') return o.telegram
+  return null
+}
+
+/**
+ * 渠道总开关是否打开。
+ *
+ * ⚠️ 三端缺省语义**不一样**，别统一成 `!!cfg.enabled`：
+ *   - Telegram：`enabled` 缺省即视为开（normalizeTelegram 会把 undefined 补成 true）；
+ *   - 钉钉 / 企微：显式开关，缺省视为关。
+ */
+export function channelGlobalOn(options, id) {
+  const cfg = channelCfg(options, id)
+  if (!cfg || typeof cfg !== 'object') return false
+  return id === 'tg' ? cfg.enabled !== false : !!cfg.enabled
+}
+
+/**
+ * 渠道凭据是否配齐（只看凭据，不含 enabled —— 见 channelUsable）。
+ *
+ * ⚠️ 这里**故意不 normalize 配置**：normalizeDingTalk / normalizeTelegram 会就地改配置，
+ *    在渲染期调用等于边渲染边写响应式状态。好在三个渠道的凭据字段
+ *    normalize 只补默认值、不做格式转换，所以直接读原始字段与规范化后完全等价。
+ */
+export function channelCredReady(options, id) {
+  const cfg = channelCfg(options, id)
+  if (!cfg || typeof cfg !== 'object') return false
+  const has = (v) => !!String(v === undefined || v === null ? '' : v).trim()
+  if (id === 'ding') return has(cfg.webhook)
+  if (id === 'wecom') return has(cfg.webhook)
+  if (id === 'tg') return has(cfg.token) && has(cfg.chatId)
+  return false
+}
+
+/**
+ * 渠道「既启用、凭据又齐」—— 才谈得上能推出去。
+ *
+ * 与推送调度器 useAlertPush.checkChannel 的前两道判据**同一口径**（那里是
+ * `!c.enabled` → 未启用；`!def.ready(c)` → 凭据未配置完整）。
+ * 抽出来是为了让**展示层**（通道盲视面板等）也能如实说"这个渠道到底行不行"，
+ * 而不是各自再写一份凭据判断 —— 两份判断迟早会在某个字段上漂移，
+ * 表现成「面板说能推、实际一条都推不出去」。
+ *
+ * ⚠️ 不含 Telegram 那条「钉钉/企微开着就强制带上 TG」的运行时兜底
+ *    （那是推送层的自救，不是用户的配置）。展示层按用户**实际配置**如实显示，
+ *    与设置页三个渠道的「已启用 / 未启用」芯片保持同源。
+ */
+export function channelUsable(options, id) {
+  return channelGlobalOn(options, id) && channelCredReady(options, id)
+}
 
 /**
  * 由「通道级推送配置」派生各渠道的「需要监听的监控」名单（渠道配置里的 cameras）。

@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-02T00:48:56.337Z",
+  "generatedAt": "2026-10-09T06:17:22.523Z",
   "appid": "touristappid",
   "h5Url": null,
   "pages": [
@@ -56,10 +56,10 @@
     ]
   },
   "h5Dist": {
-    "total": 115184153,
+    "total": 115368946,
     "ai": 112476361,
     "js": 1781219,
-    "assets": 484259,
+    "assets": 669052,
     "other": 442314
   },
   "warnings": [

@@ -30,7 +30,7 @@ import { recordPush } from './usePushStats.js'
 import { uploadToLitterbox } from './useImageHost.js'
 import { EVENT_GROUPS, TYPE_GROUP, featureText, normalizeEvents } from './useAlarmText.js'
 import { runtimeLine } from './useDeviceInfo.js'
-import { BRAND } from '../config/defaults.js'
+import { BRAND, channelCredReady } from '../config/defaults.js'
 import {
   buildTelegramCaption,
   buildTelegramMergedText,
@@ -55,13 +55,17 @@ function makeChannelDefs(options) {
       id: 'ding',
       name: '钉钉',
       read: () => normalizeDingTalk(options.dingtalk || {}),
-      ready: (c) => !!String(c.webhook || '').trim()
+      /*
+       * 凭据判定走 channelCredReady（defaults.js）—— 与展示层（通道盲视面板）
+       * 共用同一份定义。各自写一份 `!c.webhook.trim()` 迟早会漂移。
+       */
+      ready: () => channelCredReady(options, 'ding')
     },
     {
       id: 'wecom',
       name: '企微',
       read: () => normalizeWeCom(options.wecom || {}),
-      ready: (c) => !!String(c.webhook || '').trim()
+      ready: () => channelCredReady(options, 'wecom')
     },
     {
       id: 'tg',
@@ -79,7 +83,7 @@ function makeChannelDefs(options) {
         if (needTg && !t.enabled) t.enabled = true
         return t
       },
-      ready: (c) => !!String(c.token || '').trim() && !!String(c.chatId || '').trim()
+      ready: () => channelCredReady(options, 'tg')
     }
   ]
 }

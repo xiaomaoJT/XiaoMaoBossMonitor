@@ -137,15 +137,31 @@
       </span>
     </div>
 
-    <!-- 盲视模式：画面已隐藏，显示检测运行状态 -->
+    <!-- 盲视模式：画面已隐藏，显示检测 / 推送状态 -->
     <transition name="fade">
       <div class="blind-panel" v-if="blindOn && status === 'playing'">
         <div class="blind-head">
-          <span class="b-dot" :class="{ run: analysisOn, hit: !!motionBox }"></span>
-          <span class="b-title">盲视模式 · 检测{{ analysisOn ? '运行中' : '已关闭' }}</span>
+          <span class="b-dot" :class="{ run: anyDetectOn, hit: !!motionBox }"></span>
+          <span class="b-title">盲视模式 · 检测{{ anyDetectOn ? '运行中' : '已关闭' }}</span>
         </div>
         <div class="b-rows">
-          <span>画面已隐藏，解码与检测正常</span>
+          <span>{{ anyDetectOn ? '画面已隐藏，解码与检测照常运行' : '画面已隐藏；这一路没有开启任何检测' }}</span>
+          <span>
+            检测项：<b v-if="anyDetectOn" class="b-detect">{{ detectText }}</b><b v-else class="b-off">一个都没开</b>
+          </span>
+          <span class="b-ch-row">
+            推送渠道：
+            <b
+              v-for="c in pushChannelRows"
+              :key="c.id"
+              class="b-ch"
+              :class="c.state"
+              :title="c.title"
+            >
+              {{ c.label }}
+            </b>
+            <em v-if="!anyPushOn" class="b-off">这一路当前不会推送到任何渠道</em>
+          </span>
           <span>上次分析：<b>{{ analyzeAgo }}</b><template v-if="lastAnalyzeAt">（{{ clockText(lastAnalyzeAt) }}）</template></span>
           <span v-if="lastAlarmText">最近报警：<b class="b-alarm">{{ lastAlarmText }}</b></span>
           <span v-else>最近报警：暂无</span>
@@ -359,7 +375,8 @@ import { FrameSampler } from '../composables/frameSampler'
 import { ensureJessibuca, isJessibucaReady } from '../composables/useJessibuca'
 import { compareFrames, sensitivityToThreshold } from '../composables/useMotion'
 import { aiState, detectPersons, loadModel, loadPersonModel, setGpuPref } from '../composables/useAiDetector'
-import { activeFeatures, camExtOn, useAiExtras } from '../composables/useAiExtras'
+import { activeDetects, activeFeatures, camExtOn, motionOn, useAiExtras } from '../composables/useAiExtras'
+import { PUSH_CHANNEL_KEYS, channelUsable } from '../config/defaults.js'
 
 const props = defineProps({
   cam: { type: Object, required: true },
@@ -921,7 +938,41 @@ let hitFrames = 0
 let lastAlarmAt = 0
 let alarmTimer = null
 
-const analysisOn = computed(() => !!props.decode && !!props.options.analysisEnabled && props.cam.motion !== false)
+const analysisOn = computed(() => !!props.decode && motionOn(props.cam, props.options))
+
+/* ---------- 盲视面板：检测 / 推送的快照 ---------- */
+/**
+ * 这一路上**配置为要跑**的检测项（画面变动 / 人形 / 人脸 / 姿态 / 区域 / 计数）。
+ * 唯一权威是 features.js 的 activeDetects —— 与画面顶部那排芯片同源。
+ *
+ * ⚠️ 这里以前直接拿 `analysisOn` 当"有没有检测"，于是「关了移动检测、开着人形识别」
+ *    时盲视面板写着「检测已关闭」，而画面顶上的人形芯片亮着 —— 自相矛盾。
+ *    判据改成"任意一项开着即算有检测"。
+ */
+const detectLabels = computed(() => activeDetects(props.cam, props.options).map((d) => d.label))
+const anyDetectOn = computed(() => detectLabels.value.length > 0)
+const detectText = computed(() => detectLabels.value.join(' · '))
+
+/**
+ * 盲视面板：这一路当前会推送到哪些渠道。
+ *
+ * 判定 = 通道级开关（cam.push 总开关 + cam.channels[渠道]）× 渠道可用性（channelUsable）：
+ *   on      —— 这一路开着、渠道也启用且凭据齐全 → 真的收得到
+ *   unready —— 这一路开着，但渠道没启用 / 凭据没配好 → 实际一条都推不出去
+ *   off     —— 这一路把这个渠道关了
+ * 与设置页「监控通道」页那排渠道小勾、以及推送调度器 checkChannel 的口径一致。
+ */
+const pushChannelRows = computed(() =>
+  PUSH_CHANNEL_KEYS.map(({ id, label }) => {
+    const openForCam = props.cam.push !== false && !(props.cam.channels && props.cam.channels[id] === false)
+    if (!openForCam) return { id, label, state: 'off', title: `这一路已关闭「${label}」推送` }
+    if (!channelUsable(props.options, id))
+      return { id, label, state: 'unready', title: `${label}未启用或凭据未配好，这一路实际推不出去` }
+    return { id, label, state: 'on', title: `这一路的报警会推送到${label}` }
+  })
+)
+const anyPushOn = computed(() => pushChannelRows.value.some((c) => c.state === 'on'))
+
 const aiTitle = computed(() => {
   if (aiState.value === 'loading') return 'AI 模型加载中…'
   if (aiState.value === 'error') return 'AI 模型加载失败'
@@ -2000,16 +2051,72 @@ defineExpose({
   flex-direction: column;
   gap: 4px;
   font-size: 11.5px;
-  color: #8fa0ba;
+  color: var(--text-dim);
 }
 
 .b-rows b {
-  color: #c4d2e8;
+  color: var(--text-soft);
   font-weight: 600;
 }
 
 .b-rows .b-alarm {
-  color: #ff8d99;
+  color: var(--err-text);
+}
+
+/*
+ * 检测项 / 「一个都没开」/ 推送渠道
+ * ----------------------------------------------------------------
+ * 这一段全部走主题变量。以前这里是写死的浅灰（#8fa0ba / #c4d2e8），
+ * 在深色面板上没问题，但亮色主题下面板是白底 → 浅灰字几乎看不见。
+ */
+.b-rows .b-detect {
+  color: var(--accent-text-strong);
+}
+
+.b-rows .b-off {
+  color: var(--text-dim-2);
+  font-weight: 400;
+  font-style: normal;
+}
+
+.b-ch-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.b-rows .b-ch {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-soft);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--tint) 6%, transparent);
+}
+
+/* 会推送到该渠道 */
+.b-rows .b-ch.on {
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+
+/* 这一路开着，但渠道没启用 / 凭据没配好 */
+.b-rows .b-ch.unready {
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
+/* 这一路自己关掉的渠道：划掉 —— 与「没配好」区分开 */
+.b-rows .b-ch.off {
+  color: var(--text-dim-2);
+  border-style: dashed;
+  text-decoration: line-through;
 }
 
 .blind-panel .btn {
