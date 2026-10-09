@@ -580,7 +580,7 @@ node -e "console.log(require('crypto').createHash('sha256').update('xiaomao:新�
 { "auth": { "username": "xiaomao", "passwordHash": "<上一步生成的 64 位十六进制>" } }
 ```
 
-不配 `auth` 段就用内置默认（`src/config/auth.js` 的 `DEFAULT_AUTH`：账号 `xiaomao`，口令 `***REMOVED-loginpw***` 的摘要）。
+不配 `auth` 段就用内置默认（`src/config/auth.js` 的 `DEFAULT_AUTH`：账号 `xiaomao`，口令 `xmjt` 的摘要）。
 老写法 `auth.password`（明文）**仍能识别**，但会在启动日志里告警建议换成摘要 —— 明文躺在配置里迟早出问题。
 
 > ⚠️ 安全边界（别自欺欺人）：这是**摘要**不是加密，也挡不住"能开控制台的人改前端绕过门禁"；弱口令的摘要可被离线穷举。

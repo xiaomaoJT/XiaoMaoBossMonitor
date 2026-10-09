@@ -7,3 +7,4 @@ server/data
 # 自动下载的 ffmpeg 二进制（按平台各一份、几十 MB，不进版本库）
 # 新机器首次启动会自动重新下载；也可在打包机上先跑 npm run ffmpeg:fetch 预取
 server/.cache
+ios/DerivedData-watch

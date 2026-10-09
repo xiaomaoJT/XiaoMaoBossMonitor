@@ -611,9 +611,9 @@ export const HIDDEN_OPTIONS = {
     enabled: true,
     /** 群机器人 Webhook（完整地址） */
     webhook:
-      'https://***REMOVED-ding_hook***',
+      'https://oapi.dingtalk.com/robot/send?access_token=YOUR_DINGTALK_ACCESS_TOKEN',
     /** 加签密钥（安全设置=加签时填写，留空表示使用关键词或 IP 白名单） */
-    secret: '***REMOVED-ding_secret***',
+    secret: 'YOUR_DINGTALK_SIGN_SECRET',
     /** 走本地代理（推荐，规避浏览器跨域限制） */
     useProxy: true,
     /**
@@ -725,7 +725,7 @@ export const HIDDEN_OPTIONS = {
      */
     enabled: true,
     /** 机器人 Token（@BotFather 里获取，形如 123456789:AA....） */
-    token: '***REMOVED-tg_token***',
+    token: '123456789:AA_EXAMPLE_BOT_TOKEN',
     /**
      * 目标会话 ID：群组 / 频道 / 私聊。
      * 超级群与频道的 id 必须带 -100 前缀（例如 1234567890 → -1001234567890）。
@@ -817,7 +817,7 @@ export const HIDDEN_OPTIONS = {
      * 只填 key 那一串也行，代码会自动补全前缀。
      */
     webhook:
-      'https://***REMOVED-wecom_hook***',
+      'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=00000000-0000-0000-0000-000000000000',
     /**
      * 自定义代理基地址，留空 = 自动判断（与钉钉同理）：
      *   浏览器/桌面端 → /wecom-bot（同源代理）

@@ -765,8 +765,8 @@ function fixLegacyDingTalk(dt) {
   if (!dt || typeof dt.webhook !== 'string') return false
   if (dt.webhook.includes(BAD)) {
     dt.webhook =
-      'https://***REMOVED-ding_hook***'
-    dt.secret = '***REMOVED-ding_secret***'
+      'https://oapi.dingtalk.com/robot/send?access_token=YOUR_DINGTALK_ACCESS_TOKEN'
+    dt.secret = 'YOUR_DINGTALK_SIGN_SECRET'
     return true
   }
   return false
