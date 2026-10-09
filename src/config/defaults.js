@@ -7,7 +7,14 @@
  *
  *   2. 内置隐藏配置（HIDDEN_*）——完整的一份（7 路真实通道 + 推送凭据 + 摆放坐标）。
  *      只在「配置方案 → 加载内置配置」输入访问密码后载入，不会混进初始化配置里。
+ *
+ * ⚠️ 相对 import 必须带 `.js`：这个文件后端 headless 也会直接 import
+ *    （见 server/headless-monitor.mjs），Vite 能省略扩展名，Node 不能 ——
+ *    省了就会 ERR_MODULE_NOT_FOUND。
  */
+
+import { SECRET_SCOPE } from './auth.js'
+import { secretDigest } from '../composables/sha256.js'
 
 const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
 const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
@@ -123,6 +130,33 @@ export const LAYOUTS = [
   { key: 'focus', label: '1 大 + N 小' },
   { key: 'free', label: '自定义摆放' }
 ]
+
+/**
+ * 远程静默指令（`/silent`、`/until`）默认静默哪些渠道。
+ *
+ * 为什么默认**不含 TG**：TG 是控制通道 —— 你就是通过它下发这条指令的。
+ * 把它一起静默，等于「远程把自己的回执也关了」：静默开没开、还剩多久、
+ * 期间攒了多少报警，全都看不到，只能跑去翻机器。所以要静默 TG 得显式勾。
+ *
+ * 顺序即展示顺序（钉钉 → 企微 → TG），别改：设置页的勾选、指令回执、
+ * /status 都是照这个顺序读的，改了会让同一份配置在两处看起来不一样。
+ *
+ * ⚠️ 「空数组」不等于「用这个默认值」：
+ *   字段缺失 / 不是数组 → 用这份默认；
+ *   用户显式清空成 []  → **拒绝开启并回提示**（见 server/headless-monitor.mjs
+ *                       的 resolveSilentChannels）。原因见那边注释。
+ */
+export const DEFAULT_SILENT_CHANNELS = ['ding', 'wecom']
+
+/** 渠道 id → 显示名。与 useAlertPush 的 CHANNEL_DEFS.name 保持一致，改要一起改 */
+export const CHANNEL_LABELS = { ding: '钉钉', wecom: '企微', tg: 'TG' }
+
+/** 渠道 id → 指令里可用的别名（小写比对）。远程指令的渠道参数靠它解析 */
+export const CHANNEL_ALIASES = {
+  ding: ['ding', 'dingtalk', 'dd', '钉钉'],
+  wecom: ['wecom', 'weixin', 'qywx', 'wx', '企微', '企业微信'],
+  tg: ['tg', 'telegram', 'tele', '电报']
+}
 
 /**
  * 内置隐藏配置（完整版）。
@@ -554,8 +588,17 @@ export const HIDDEN_OPTIONS = {
 
   /* ---------------- 隐私遮罩 ---------------- */
   mask: {
-    /** 解锁密码，留空表示点击屏幕即可恢复 */
-    password: '',
+    /**
+     * 解锁密码的**摘要**（sha256，见 config/auth.js 的 SECRET_SCOPE.MASK）。
+     * 留空表示点击屏幕即可恢复。
+     *
+     * ⚠️ 这里存的是摘要不是密码本身，所以：
+     *   - 界面上**不回显**已设的密码（只显示"已设密码/免密码"），想换就直接输新的；
+     *   - 老存档里的 `mask.password`（明文）会在载入时被
+     *     migrateSecretFields() 换算成摘要并删掉明文字段。
+     * 别把这里改回 `password` 再去比明文 —— 那正是这次要修掉的东西。
+     */
+    passwordHash: '',
     /** 无操作多少分钟后自动遮罩（0 = 关闭自动遮罩） */
     autoMaskMinutes: 0,
     /** 遮罩期间是否保持播放（关闭可省资源，但恢复需要重新拉流） */
@@ -748,7 +791,19 @@ export const HIDDEN_OPTIONS = {
        * Telegram 对同一会话的连续 sendPhoto 有频率限制，并发发图大概率被 429 拒掉，
        * 所以刻意串行 + 留间隔。网络差 / 图大时可以调大到 1200~2000。
        */
-      dutyImageGapMs: 700
+      dutyImageGapMs: 700,
+      /**
+       * 远程静默（/silent、/until）**默认静默哪些渠道**。
+       *
+       * 放在 remote 这一块而不是 silent 里，是因为它管的是「远程指令的行为」：
+       * 夜间定时静默（silent.channels）是另一档设置，两者互不影响 ——
+       * 定时静默该怎么静还怎么静，这里只决定**从手机上下指令**时默认静默谁。
+       *
+       * 默认钉钉 + 企微（不含 TG：TG 是控制通道，静默它就看不到回执了）。
+       * 手机上也不必迁就这个默认：`/silent 2 wecom`、`/silent 2 ding,tg` 可以临时指定。
+       * ⚠️ 清空 = 拒绝开启（不是「静默全部」），详见 DEFAULT_SILENT_CHANNELS 的说明。
+       */
+      silentChannels: [...DEFAULT_SILENT_CHANNELS]
     }
   },
 
@@ -927,8 +982,61 @@ export const DEFAULT_OPTIONS = (() => {
   return o
 })()
 
-/** 「加载内置配置」的访问密码 */
-export const HIDDEN_PASSCODE = '***REMOVED-passcode***'
+/**
+ * 「加载内置配置」的访问口令 —— 这里只**转出摘要**，明文已从代码里删除。
+ *
+ * 权威定义在 config/auth.js（那里连用途域 scope 一起说明）。
+ * 之所以还从这里转出一次：这个常量的历史引用方（设置页）一直是从 defaults
+ * 取它的，转出可以少改一处引用；新代码**请直接从 config/auth.js 拿**。
+ */
+export { HIDDEN_PASSCODE_HASH } from './auth.js'
+
+/**
+ * 把所有「本地校验型口令」的存量明文换算成摘要（幂等，可反复调用）。
+ * ----------------------------------------------------------------------------
+ * 只有一处需要迁移：`options.mask.password`（老版本直接存明文、直接比明文）。
+ * 隐藏配置那个口令是代码常量，已经换掉了，没有存量数据要迁。
+ *
+ * 为什么必须做这一步而不是"向后兼容继续比明文"：
+ *   只要还留着一条"明文也能过"的分支，攻击面就等于没缩小 ——
+ *   老存档里躺着的那份明文会一直是可用的口令副本。所以这里**删掉明文字段**，
+ *   而不是留着它做兼容。
+ *
+ * 调用点（两处都要，缺一就会出现"配置里的明文没人管"）：
+ *   - 前端 App.vue 载入存档时（紧跟着 writeStorage，否则纠正结果只活在内存里）
+ *   - 后端 headless-monitor 的 syncPushMirror（覆盖"手改过 config.json"的情况）
+ *
+ * @param {object} opts options 配置对象，**原地修改**
+ * @returns {boolean} 是否真的动了它（便于调用方决定要不要落盘）
+ */
+export function migrateSecretFields(opts) {
+  if (!opts || typeof opts !== 'object') return false
+  const m = opts.mask
+  if (!m || typeof m !== 'object') return false
+  // 已经是新格式（没有明文字段）→ 什么都不做
+  if (typeof m.password !== 'string') return false
+
+  const plain = m.password
+  delete m.password
+  /*
+   * 仅在"还没有摘要"时才派生，避免用陈旧的明文字段覆盖用户后来设的新密码。
+   * 用 `!m.passwordHash` 而不是 `=== undefined`：fillMissingOptions 会先用默认值
+   * 把 passwordHash 补成空串，空串也是"没有摘要"，一样要派生。
+   */
+  if (plain && !m.passwordHash) {
+    m.passwordHash = secretDigest(SECRET_SCOPE.MASK, plain)
+  } else if (typeof m.passwordHash !== 'string') {
+    /*
+     * 明文是空的（= 从没设过密码）→ 显式补一个空摘要。
+     * 这一步是为了让本函数**不依赖调用方先跑过 fillMissingOptions**：
+     * 后端那份配置就不走前端那套补默认值的流程，少了这一句，
+     * 删掉 password 之后 passwordHash 会是 undefined，
+     * 而不是一个清楚表达"没设密码"的空串。
+     */
+    m.passwordHash = ''
+  }
+  return true
+}
 
 /**
  * 深拷贝一份内置隐藏配置（通道 + 通道可见性 + 配置）。

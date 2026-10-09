@@ -1,9 +1,14 @@
 import { createApp } from 'vue'
-import App from './App.vue'
+/*
+ * 挂载的是 LoginGate 而不是 App。
+ * 「先登录再进系统」的门禁就在这一层：未登录 / 会话校验中，
+ * App（大屏本体）连实例化都不会发生 —— 详见 src/LoginGate.vue。
+ */
+import LoginGate from './LoginGate.vue'
 import './style.css'
 import { reportError } from './composables/useErrorLog'
 
-const app = createApp(App)
+const app = createApp(LoginGate)
 
 /*
  * 全局错误兜底（三层）。

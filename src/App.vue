@@ -164,7 +164,7 @@
 
     <PrivacyMask
       :open="masked"
-      :has-password="!!maskPassword"
+      :has-password="!!maskPasswordHash"
       :error="maskError"
       :ask-signal="maskAskSignal"
       @unlock="unlockMask"
@@ -229,9 +229,12 @@ import {
   STORAGE_KEY,
   cloneDefaultCameras,
   cloneDefaultOptions,
+  migrateSecretFields,
   normalizeCameraChannels,
   syncChannelCameras
 } from './config/defaults'
+import { SECRET_SCOPE } from './config/auth'
+import { secretMatches } from './composables/sha256'
 import { useAlertPush } from './composables/useAlertPush'
 import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
 import NotifyStack from './components/NotifyStack.vue'
@@ -297,6 +300,20 @@ import {
   sendSystemNotify
 } from './composables/useSystemNotify'
 
+/*
+ * 是否允许用户直接操作（目前只有一组键盘快捷键）。
+ *
+ * 后端模式下 App 会照常挂载在**登录遮罩下面**（监测在常驻设备上跑，
+ * 本页只是看画面的窗口）。遮罩挡得住鼠标，挡不住挂在 window 上的键盘监听 ——
+ * 不置 false 的话，未登录的人随手敲一下 M / R / E 就在操作大屏了，
+ * 而且 M 会把遮罩盖上（他是看不见的），等真正登录进来看到的第一眼是「已锁定」，
+ * 排查起来极其费解。所以把这一项交给门禁（src/LoginGate.vue）按登录态传进来。
+ * 默认 true —— 不传的老用法（含各种探针直接挂 App）行为不变。
+ */
+const props = defineProps({
+  interactive: { type: Boolean, default: true }
+})
+
 /* ==================== 配置持久化 ==================== */
 function loadSaved() {
   try {
@@ -340,6 +357,16 @@ const options = reactive(
 normalizeDingTalk(options.dingtalk)
 // 老版本 localStorage 里没有的新增配置项，用默认值补齐（含 alert / mask / dingtalk 的嵌套字段）
 fillMissingOptions(options)
+/*
+ * 把老存档里的**明文遮罩密码**换算成摘要，并删掉明文字段（幂等）。
+ *
+ * 函数自身不依赖调用顺序（明文字段为空时也会补一个空摘要，而不是留 undefined），
+ * 放这儿只是为了跟其它一次性迁移排在一起，便于阅读。
+ *
+ * 下面紧跟着一次 writeStorage()，纠正结果会一并落盘；少了那一步，
+ * 这段迁移就只活在内存里，下次打开还得再迁一遍。
+ */
+migrateSecretFields(options)
 const hiddenIds = ref(saved && Array.isArray(saved.hiddenIds) ? saved.hiddenIds : [])
 const layoutKey = ref((saved && saved.layoutKey) || 'auto')
 // 修复早期版本默认配置里无效的钉钉机器人 token（存在旧 token 时自动替换并落盘）
@@ -2734,7 +2761,15 @@ async function onRestartSystem() {
  * 后端模式下推送在服务端跑，所以要把指令发到后端去。
  */
 async function onStartTempSilent({ hours, channels, label, untilAt } = {}) {
-  const chans = Array.isArray(channels) && channels.length ? channels : ['ding', 'wecom', 'tg']
+  /*
+   * 渠道原样透传，**不要**在这里兜底成三端。
+   *
+   * 空数组是「用户把渠道勾全取消了」，得让它一路走到推送层被明确拒掉并回原因；
+   * 在这里悄悄换成三端，用户会收到一句「已开启」却莫名其妙把三端全静默了 ——
+   * 排查时最想不到的就是「取消勾选」这一步。
+   * 只有不传（undefined → null）才是「按配置里的默认走」，由后端 / 推送层决定。
+   */
+  const chans = Array.isArray(channels) ? channels.slice() : null
   const payload = { hours: Number(hours) || 0, channels: chans, label: String(label || ''), untilAt: Number(untilAt) || 0 }
   if (backendActive.value) {
     const url = String((options.backend && options.backend.url) || '')
@@ -2839,7 +2874,12 @@ function schedulePatrol() {
 const masked = ref(false)
 const maskError = ref('')
 const maskAskSignal = ref(0)
-const maskPassword = computed(() => String((options.mask && options.mask.password) || ''))
+/**
+ * 遮罩解锁密码的**摘要**（不是密码本身）。
+ * 空串 = 没设密码 → 点击屏幕任意位置即可恢复，不做校验；
+ * 非空 = 已设密码 → 只有输入能算出同一个摘要的明文才放行。
+ */
+const maskPasswordHash = computed(() => String((options.mask && options.mask.passwordHash) || ''))
 
 /**
  * 遮罩期间的页签标题：只留「在线/总数」这一串数字。
@@ -2894,8 +2934,16 @@ function setMask(v) {
   }
 }
 
+/**
+ * 校验遮罩解锁密码。
+ * 只比摘要 —— secretMatches 内部是 secretDigest(scope, 明文) 与已存摘要的定长异或，
+ * 所以这条路径上**没有任何"明文对明文"的比较**，配置里也翻不出密码原文。
+ *
+ * 没设密码（摘要为空）时直接放行：遮罩的语义是"防旁人瞥一眼"，
+ * 不是"必须解锁"，把免密码状态做成进不去才是 bug。
+ */
 function unlockMask(pwd) {
-  if (maskPassword.value && String(pwd) !== maskPassword.value) {
+  if (maskPasswordHash.value && !secretMatches(SECRET_SCOPE.MASK, pwd, maskPasswordHash.value)) {
     maskError.value = '密码错误，请重试'
     return
   }
@@ -2922,6 +2970,8 @@ function onUserActivity() {
 
 /* ==================== 快捷键 ==================== */
 function onKeydown(e) {
+  // 被登录遮罩盖住时不响应任何快捷键（见上面 props.interactive 的说明）
+  if (!props.interactive) return
   if (masked.value) {
     // 遮罩期间只响应恢复操作，屏蔽其它快捷键
     if (e.key === 'm' || e.key === 'M') {

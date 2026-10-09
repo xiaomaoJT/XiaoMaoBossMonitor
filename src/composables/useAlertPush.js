@@ -879,6 +879,18 @@ export function useAlertPush(options, hooks = {}) {
    * @returns {{ok:boolean, until?:number, reason?:string}}
    */
   function startTempSilent(hours, channels, label, untilAt) {
+    /*
+     * 渠道先校验，且必须在**任何写入之前** —— 下面一旦开始写 tempUntil，
+     * 中途 return 就会留下"静默开着但没有渠道"的半截状态。
+     *
+     * 显式传空数组 = 用户把渠道勾全取消了。这里刻意**不**当成「没指定」往下回落：
+     * 回落会走到下面「沿用配置里的渠道」那条分支，于是「一个都不选」
+     * 反而静默掉了配置里的默认渠道 —— 比不选还糟，而且完全看不出来。
+     */
+    if (Array.isArray(channels) && !channels.length) {
+      // 文案与指令层那道守卫对齐（两处都可能弹给用户看，别让人以为遇到了两个不同的错）
+      return { ok: false, reason: '请至少选一个静默渠道 —— 一个都不选的话，静默不静默就没区别了' }
+    }
     const now = Date.now()
     const maxMs = 7 * 24 * 3600000
     let until = 0

@@ -17,6 +17,7 @@ import { buildEventFields, formatDuration, formatTime, stateLabel, switchText, t
 import { timeoutSignal } from './useNet.js'
 import { alarmDetail, alarmTitle, extraText } from './useAlarmText.js'
 import { collectAlarmVars, renderTemplate, DEFAULT_TG_TEMPLATE } from './useMessageTemplate.js'
+import { DEFAULT_SILENT_CHANNELS } from '../config/defaults.js'
 
 const API_ORIGIN = 'https://api.telegram.org'
 /** 普通接口调用：迟迟不返回就别再等了，否则事件会一直停在「正在推送」 */
@@ -51,6 +52,16 @@ export function normalizeTelegram(tg) {
   if (r.dutyMaxImages === undefined) r.dutyMaxImages = 0
   // 两张截图之间的间隔，避免连续 sendPhoto 触发 Telegram 限流
   if (r.dutyImageGapMs === undefined) r.dutyImageGapMs = 700
+  /*
+   * 远程静默（/silent、/until）默认静默哪些渠道。
+   *
+   * ⚠️ 判据是「不是数组」而不是「空」：这两种情况语义完全不同 ——
+   *   字段缺失（老配置）→ 用户还没选过 → 用默认值（钉钉 + 企微）；
+   *   显式 []         → 用户把渠道全取消了 → **不能**悄悄填回默认，
+   *                     否则"取消勾选"反而会静默回钉钉 + 企微，比不选还糟。
+   *                     这种情况由指令层拒绝开启并回提示（见 headless-monitor.mjs）。
+   */
+  if (!Array.isArray(r.silentChannels)) r.silentChannels = [...DEFAULT_SILENT_CHANNELS]
   return tg
 }
 

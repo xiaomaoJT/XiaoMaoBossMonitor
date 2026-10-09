@@ -102,6 +102,16 @@
 
     <div class="foot">
       <button class="btn primary" @click="copyAll">{{ copied ? '已复制到剪贴板' : '复制全部信息' }}</button>
+      <!--
+        退出登录的后果**取决于运行模式**，所以按钮说明与二次确认都跟着变：
+          · 前端模式：这个页面就是监测本身 —— 退出 = 大屏卸载，播放 / 检测 / 推送一起停；
+          · 后端模式：本页只是"看画面"的窗口 —— 退出只影响本机显示，
+                      常驻设备照旧检测、照旧推送。
+        两种情况都得二次确认：前者误点等于把监控停了，后者误点等于黑屏。
+      -->
+      <button class="btn danger" @click="onLogout" :title="logoutTitle">
+        退出登录
+      </button>
       <span class="foot-tip">{{ BRAND.fullName }} {{ BRAND.version }}</span>
     </div>
   </div>
@@ -110,6 +120,13 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BRAND } from '../config/defaults'
+import { AUTH_REMEMBER_DAYS } from '../config/auth'
+import {
+  authModeText,
+  authState as sessionState,
+  expiryText,
+  logout as doLogout
+} from '../composables/useAuth'
 import { aiBackend, aiModel, aiState } from '../composables/useAiDetector'
 import { runtimeInfo } from '../composables/useDeviceInfo'
 import { errorLog, errorLogText } from '../composables/useErrorLog'
@@ -142,6 +159,17 @@ let ticker = null
 /** 是否处于后端值守模式（与设置页判断口径一致） */
 const backendOn = computed(
   () => !!(props.options.backend && props.options.backend.enabled && props.options.backend.url)
+)
+
+/**
+ * 「退出登录」按钮的悬浮说明。同一个按钮在两种模式下**做完的事完全不同**，
+ * 说明里不写清楚的话：后端模式下用户会以为自己在"关监控"而不敢点，
+ * 或者反过来以为无所谓随手点掉（本机画面随即被登录页盖住）。
+ */
+const logoutTitle = computed(() =>
+  backendOn.value
+    ? '退出登录（只影响本机画面，常驻设备的检测与推送不受影响）'
+    : '退出登录并停止本页面的播放与检测'
 )
 
 /**
@@ -437,6 +465,28 @@ const sections = computed(() => [
     ]
   },
   {
+    title: '登录会话',
+    rows: [
+      { k: '登录账号', v: sessionState.user || '—' },
+      {
+        k: '工作模式',
+        // 退出登录的后果完全由这一项决定，所以紧挨着登录账号放
+        v: backendOn.value ? '后端模式 · 退出不影响常驻设备' : '前端模式 · 退出即停止本页监测'
+      },
+      {
+        k: '身份校验',
+        // 服务端校验才算拿到了真凭据；本地兜底是"后端不在"时的降级，得让用户看得出来
+        v: authModeText(sessionState),
+        tone: sessionState.mode === 'backend' ? 'ok' : sessionState.mode === 'local' ? '' : 'warn'
+      },
+      { k: '会话到期', v: expiryText(sessionState.expiresAt) },
+      {
+        k: '保持登录',
+        v: sessionState.remember ? `是（${AUTH_REMEMBER_DAYS} 天）` : '否（关掉标签页即失效）'
+      }
+    ]
+  },
+  {
     title: '运行设备',
     rows: [
       { k: '设备类型', v: runtime.value.label },
@@ -549,6 +599,24 @@ function allText() {
     lines.push(errs)
   }
   return lines.join('\n')
+}
+
+/**
+ * 退出登录（设置 → 关于系统 底部）。
+ *
+ * 措辞必须按模式分开 —— 这里早先写死了"退出后画面播放与检测会一起停止"，
+ * 那只是**前端模式**的行为。后端模式下监测在常驻设备上跑，
+ * 那句话是错的，会让人以为退出登录把整套监控停了（真出事时这个误解代价很大）。
+ */
+async function onLogout() {
+  const extra = backendOn.value
+    ? '退出后本机画面会重新被登录页盖住，常驻设备上的检测与推送不受影响。'
+    : '退出后画面播放与检测会一起停止。'
+  const ok = typeof window !== 'undefined'
+    ? window.confirm(`确定退出登录${sessionState.user ? `（${sessionState.user}）` : ''}？\n${extra}`)
+    : true
+  if (!ok) return
+  await doLogout('已退出登录')
 }
 
 async function copyAll() {

@@ -872,6 +872,12 @@
                   <input type="checkbox" value="tg" v-model="opts.silent.channels" /> TG
                 </label>
               </div>
+              <p class="hint tight">
+                这一排只管<b>上面的定时时段</b>（夜间 / 午休那一场）。
+                从手机远程下发 <code>/silent</code>、<code>/until</code> 默认静默哪几端，
+                在「Telegram 推送 → 远程控制 → 可用指令」里单独配 —— 两者互不影响，
+                默认值也不一样（那边默认只静默钉钉 + 企微）。
+              </p>
 
               <!-- 免打扰「开始 / 结束」提醒推送（preNotify，默认开） -->
               <div class="opt pre-notify">
@@ -2293,6 +2299,38 @@
               <p class="hint tight">
                 已注册到 TG 的命令菜单 —— 在聊天框输入 <code>/</code> 就会自动弹出候选，不用背。
               </p>
+
+              <!--
+                /silent、/until 的默认静默渠道。
+                故意放在「可用指令」这一块里而不是塞进静默时段：它改的就是这两条指令
+                的行为，和「有哪些指令」是同一件事的两面，分开放会让人找不到。
+              -->
+              <div class="opt col">
+                <span>
+                  <strong>/silent、/until 默认静默哪些渠道</strong>
+                  <em>
+                    在手机上发 <code>/silent 2</code> 时静默哪几端。默认只有钉钉 + 企微 ——
+                    TG 是你下发指令的通道，把它一起静默掉，连"静默开没开、还剩多久"的回执都收不到。
+                    想临时改不用回来改配置：<code>/silent 2 wecom</code>、<code>/silent 2 ding,tg</code>。
+                    <b>一个都不勾 = 拒绝开启</b>（不是"静默全部"），照样可以在指令里临时指定。
+                  </em>
+                </span>
+                <div class="temp-chips">
+                  <button
+                    v-for="c in TEMP_CHANNEL_OPTS"
+                    :key="c.id"
+                    class="chip sm"
+                    :class="{ on: remoteSilentChannels.includes(c.id) }"
+                    @click="toggleRemoteSilentChannel(c.id)"
+                  >
+                    {{ c.label }}
+                  </button>
+                  <span class="muted" v-if="!remoteSilentChannels.length">
+                    一个都没勾 —— 远程静默指令会直接拒绝执行
+                  </span>
+                </div>
+              </div>
+
               <div class="cmd-list">
                 <div class="cmd" v-for="c in TG_COMMANDS" :key="c.cmd">
                   <code>{{ c.usage }}</code>
@@ -2765,22 +2803,44 @@
         <section class="block" v-show="tab === 'mask'">
           <div class="block-head">
             <h3>隐私遮罩</h3>
-            <span class="state-chip" :class="opts.mask.password ? 'ready' : ''">
-              {{ opts.mask.password ? '已设密码' : '免密码' }}
+            <span class="state-chip" :class="opts.mask.passwordHash ? 'ready' : ''">
+              {{ opts.mask.passwordHash ? '已设密码' : '免密码' }}
             </span>
           </div>
           <p class="hint">
             点击顶部「遮罩」按钮或按 <b>M</b> 键，可一键把整个大屏盖住，避免旁人看到监控画面；报警推送与检测仍在后台运行。
           </p>
 
+          <!--
+            解锁密码：**只写不回显**。
+            配置里存的是摘要，系统自己也反推不出原文，所以这里没有"显示已有密码"这回事 ——
+            输入框永远从空白开始，填了就是"设一个新的"。
+            改完按回车或点到别处即生效（@change），不用等「保存并应用」。
+          -->
           <div class="opt col">
             <span>
               <strong>解锁密码</strong>
-              <em>留空表示点击屏幕任意位置即可恢复</em>
+              <em>
+                留空表示点击屏幕任意位置即可恢复。已设的密码不回显 —— 存的只是摘要，
+                系统也读不出原文；想换就直接输新的，输入后按回车或点到别处即生效
+              </em>
             </span>
             <div class="pw-wrap">
-              <input class="field" :type="revealed.maskPwd ? 'text' : 'password'" v-model.trim="opts.mask.password" spellcheck="false" autocomplete="off" placeholder="留空 = 无需密码" />
+              <input
+                class="field"
+                :type="revealed.maskPwd ? 'text' : 'password'"
+                v-model.trim="maskPwdNew"
+                spellcheck="false"
+                autocomplete="new-password"
+                :placeholder="opts.mask.passwordHash ? '输入新密码以替换（留空 = 不改）' : '设置解锁密码（留空 = 免密码）'"
+                @change="applyMaskPwd"
+                @keyup.enter="applyMaskPwd"
+              />
               <button type="button" class="pw-eye" :title="revealed.maskPwd ? '隐藏' : '显示'" @click="revealed.maskPwd = !revealed.maskPwd">{{ revealed.maskPwd ? '🙈' : '👁' }}</button>
+            </div>
+            <div class="test-row">
+              <span class="test-state" :class="maskPwdState.kind" v-if="maskPwdState.text">{{ maskPwdState.text }}</span>
+              <button class="btn small danger" v-if="opts.mask.passwordHash" @click="clearMaskPwd">清除密码（改为免密码）</button>
             </div>
           </div>
 
@@ -2820,7 +2880,18 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { BRAND, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, DEFAULT_BACKEND_URL, HIDDEN_PASSCODE, syncChannelCameras } from '../config/defaults'
+import {
+  BRAND,
+  cloneDefaultCameras,
+  cloneDefaultOptions,
+  cloneHiddenConfig,
+  DEFAULT_BACKEND_URL,
+  DEFAULT_SILENT_CHANNELS,
+  HIDDEN_PASSCODE_HASH,
+  syncChannelCameras
+} from '../config/defaults'
+import { SECRET_SCOPE } from '../config/auth'
+import { secretDigest, secretMatches } from '../composables/sha256'
 import { resetPushStats } from '../composables/usePushStats'
 import {
   backendState,
@@ -3545,6 +3616,39 @@ const TEMP_CHANNEL_OPTS = [
   { id: 'tg', label: 'TG' }
 ]
 
+/**
+ * 「远程静默指令默认静默哪些渠道」（TG 推送 → 远程控制 → 可用指令）。
+ *
+ * 直接读配置里的 `telegram.remote.silentChannels`，不另存一份到组件状态 ——
+ * 界面上勾一下、手机上发条 /silent，走的就是同一个值，
+ * 不会出现「界面上勾了却不生效」这种两头不认账的情况。
+ *
+ * ⚠️ 这里**不**把空数组当"没配"：空 = 用户明确一个都不勾（远程指令会拒绝执行），
+ * 界面上如实显示成"一个都没勾"才对。当成"没配"再填回默认值，
+ * 就等于用户取消勾选反而静默了默认的两个渠道 —— 正是要避免的那种反直觉。
+ */
+const remoteSilentChannels = computed(() => {
+  const r = opts.telegram && opts.telegram.remote
+  return r && Array.isArray(r.silentChannels) ? r.silentChannels : []
+})
+
+/**
+ * 读「默认渠道」的兜底值：只有字段缺失（老存档）才用内置默认；
+ * 显式空数组照原样返回，不替换。
+ */
+function readRemoteDefaultChannels() {
+  const r = opts.telegram && opts.telegram.remote
+  const cfg = r && r.silentChannels
+  return Array.isArray(cfg) ? cfg.slice() : [...DEFAULT_SILENT_CHANNELS]
+}
+
+function toggleRemoteSilentChannel(id) {
+  const r = opts.telegram && opts.telegram.remote
+  if (!r) return
+  const cur = Array.isArray(r.silentChannels) ? r.silentChannels : []
+  r.silentChannels = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]
+}
+
 const tempHours = ref(1)
 /** 'hours' 按小时 | 'until' 指定到几点 */
 const tempMode = ref('hours')
@@ -3555,7 +3659,14 @@ const tempMode = ref('hours')
  */
 const tempUntilLocal = ref('')
 const tempLabel = ref('')
-const tempChannels = ref(['ding', 'wecom', 'tg'])
+/**
+ * 本次手动开启临时静默要静默哪几端。
+ *
+ * 初值 = 上面那份「远程静默默认渠道」，同一个概念不该让用户配两遍还不一致。
+ * 抽屉是 v-if 挂载的（见 App.vue），每次打开都会重新取一次 ——
+ * 所以这是"打开时的默认"，而不是组件生命周期里一次性定死的快照。
+ */
+const tempChannels = ref(readRemoteDefaultChannels())
 /** 临时静默是否正在生效（由 App 通过 temp-silent prop 回传） */
 const tempActive = computed(() => !!props.tempSilent.active)
 const tempInfo = computed(() => props.tempSilent || { active: false })
@@ -4599,8 +4710,12 @@ async function testTelegram() {
  * 免得用户还要去翻后端代码才知道有哪些指令。
  */
 const TG_COMMANDS = [
-  { cmd: 'silent', usage: '/silent <小时数>', desc: '临时静默 N 小时，开启/结束各推一条提醒，到点附带汇总' },
-  { cmd: 'until', usage: '/until <HH:MM>', desc: '静默到指定时刻（已过则顺延到明天）' },
+  {
+    cmd: 'silent',
+    usage: '/silent <小时数> [渠道]',
+    desc: '临时静默 N 小时，开启/结束各推一条提醒，到点附带汇总；不写渠道就走上面那份默认'
+  },
+  { cmd: 'until', usage: '/until <HH:MM> [渠道]', desc: '静默到指定时刻（已过则顺延到明天），同样可以跟渠道' },
   { cmd: 'resume', usage: '/resume', desc: '立刻结束静默，并推送结束提醒 + 汇总' },
   { cmd: 'patrol', usage: '/patrol', desc: '立即推送一次巡检报告' },
   { cmd: 'status', usage: '/status', desc: '查看在线路数 / 静默状态 / 事件数' },
@@ -4942,6 +5057,43 @@ function importConfig(e) {
   e.target.value = ''
 }
 
+/* ---------- 遮罩解锁密码（存摘要、只写不回显） ---------- */
+/*
+ * 输入框里的明文只活在这个 ref 里，`applyMaskPwd` 一跑就换成摘要写进 opts，
+ * 随后 ref 被清空 —— 和登录页那条链路同一个口径：明文只活到算出摘要为止。
+ */
+const maskPwdNew = ref('')
+const maskPwdState = reactive({ kind: '', text: '' })
+
+/**
+ * 把输入框里的新密码换算成摘要写进配置。
+ * 绑定在 @change（失焦 / 回车）上，避免"输入框里还留着明文就点了保存"。
+ *
+ * ⚠️ 这里改的是抽屉自己的**局部副本**（opts 是 props.options 的深拷贝），
+ *   所以提示语要写明"点保存并应用才生效" —— 否则用户会以为没生效。
+ *
+ * ⚠️ 输入为空时**什么都不做**，不是"清空密码"。
+ *   留空的语义是"我不改"，想真的清掉必须点旁边的「清除密码」——
+ *   否则用户点进输入框又点走（其实是没打算改）就会把已设的密码悄悄抹掉。
+ */
+function applyMaskPwd() {
+  const plain = String(maskPwdNew.value || '')
+  if (!plain) return
+  opts.mask.passwordHash = secretDigest(SECRET_SCOPE.MASK, plain)
+  maskPwdNew.value = ''
+  revealed.maskPwd = false
+  maskPwdState.kind = 'ok'
+  maskPwdState.text = '解锁密码已更新，点右下角「保存并应用」后生效'
+}
+
+/** 清除密码 → 回到「点击屏幕任意位置即可恢复」 */
+function clearMaskPwd() {
+  opts.mask.passwordHash = ''
+  maskPwdNew.value = ''
+  maskPwdState.kind = 'ok'
+  maskPwdState.text = '已清除，改为免密码；点右下角「保存并应用」后生效'
+}
+
 /* ---------- 加载内置隐藏配置 ---------- */
 const hiddenPwd = ref('')
 const hiddenState = reactive({ kind: '', text: '' })
@@ -4952,7 +5104,11 @@ function loadHidden() {
     hiddenState.text = '请先输入访问密码'
     return
   }
-  if (hiddenPwd.value !== HIDDEN_PASSCODE) {
+  /*
+   * 只比摘要（secretMatches 内部走 secretDigest + 定长异或）。
+   * 这里**没有** HIDDEN_PASSCODE 这样的明文常量可对 —— 代码里那份已经换成摘要了。
+   */
+  if (!secretMatches(SECRET_SCOPE.HIDDEN, hiddenPwd.value, HIDDEN_PASSCODE_HASH)) {
     hiddenState.kind = 'fail'
     hiddenState.text = '访问密码不正确'
     hiddenPwd.value = ''
