@@ -1403,9 +1403,10 @@
                   </div>
                 </div>
               </div>
-              <div class="face-acts" v-if="faceBackendOn">
-                <button class="mini-btn ghost" @click="refreshBackendPending">刷新待录入</button>
-                <span class="muted">来自后端检测服务</span>
+              <div class="face-acts">
+                <button class="mini-btn danger" @click="doIgnoreAllPending">全部忽略</button>
+                <button class="mini-btn ghost" v-if="faceBackendOn" @click="refreshBackendPending">刷新待录入</button>
+                <span class="muted" v-if="faceBackendOn">来自后端检测服务</span>
               </div>
             </div>
 
@@ -2864,6 +2865,7 @@ import {
   addFace,
   backendPendingFaces,
   clearFaces,
+  clearPendingFaces,
   deleteFace,
   dropBackendPendingFace,
   faces as faceLib,
@@ -3941,6 +3943,17 @@ async function doAddPending(pf) {
 function doIgnorePending(pf) {
   if (pf.fromBackend) dropBackendPendingFace(opts.backend.url, pf.backendId)
   else removePendingFace(pf.id)
+}
+
+/** 一键忽略所有待录入人脸（前端内存队列 + 后端 SQLite 队列都清掉） */
+function doIgnoreAllPending() {
+  // 前端内存队列：直接清空
+  clearPendingFaces()
+  // 后端队列：逐条回服务端删除，否则下次刷新又冒出来
+  const list = backendPendingFaces.value
+  for (const pf of list) {
+    dropBackendPendingFace(opts.backend.url, pf.backendId)
+  }
 }
 
 async function doDeleteFace(f) {

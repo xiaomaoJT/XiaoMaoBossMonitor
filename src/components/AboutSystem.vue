@@ -4,8 +4,12 @@
     <div class="hero">
       <div class="hero-main">
         <span class="hero-label">系统运行时长</span>
-        <strong class="hero-clock">{{ uptimeText }}</strong>
-        <span class="hero-sub">启动于 {{ bootText }}</span>
+        <strong class="hero-clock" :class="{ dim: !uptimeView.ok }">{{ uptimeText }}</strong>
+        <span class="hero-sub">
+          启动于 {{ bootText }}
+          <template v-if="uptimeView.ok && uptimeView.interruptMs > 0"> · 中断 {{ interruptText }}</template>
+        </span>
+        <span class="hero-tag" :class="{ on: backendOn }">{{ modeText }}</span>
       </div>
       <div class="hero-cells">
         <div class="hero-cell">
@@ -104,7 +108,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BRAND } from '../config/defaults'
 import { aiBackend, aiModel, aiState } from '../composables/useAiDetector'
 import { runtimeInfo } from '../composables/useDeviceInfo'
@@ -112,6 +116,8 @@ import { errorLog, errorLogText } from '../composables/useErrorLog'
 import { estimateUsage, formatBytes } from '../composables/useEventStore'
 import { isJessibucaReady } from '../composables/useJessibuca'
 import { PUSH_CHANNELS, pushStats, resetPushStats } from '../composables/usePushStats'
+import { formatDuration, formatUptime, uptimeSnapshot } from '../composables/useSystemUptime'
+import { refreshRemoteStatus } from '../composables/useBackendSync'
 
 const props = defineProps({
   cameras: { type: Array, default: () => [] },
@@ -122,39 +128,125 @@ const props = defineProps({
   hiddenIds: { type: Array, default: () => [] }
 })
 
-/* ==================== 运行时长 ==================== */
+/* ==================== 运行时长（按运行模式取源） ==================== */
 /*
- * performance.timeOrigin 是「本次页面导航开始」的绝对时间戳 —— 也就是应用真正
- * 被拉起来的时刻，比自己记一个 Date.now() 更准（后者会把脚本解析时间漏掉）。
+ * 「系统」是谁由运行模式决定：
+ *   - 后端模式：真正值守的是 headless 进程 —— 时长**以后端为准**（/api/status.systemUptime），
+ *              绝不拿前端页面时长冒充（页面随便刷新/换设备，不代表系统停过）。
+ *   - 前端模式：系统就是当前这个页面 —— 取本地持久化会话（useSystemUptime）。
+ * 两种模式的起点都持久化：短中断接着算，单次中断超过 4 小时才归零重算。
  */
-const BOOT_AT =
-  (typeof performance !== 'undefined' && performance.timeOrigin) || Date.now()
-
 const nowTick = ref(Date.now())
 let ticker = null
 
+/** 是否处于后端值守模式（与设置页判断口径一致） */
+const backendOn = computed(
+  () => !!(props.options.backend && props.options.backend.enabled && props.options.backend.url)
+)
+
+/**
+ * 后端模式下从 /api/status 取回的快照。
+ * 额外记下 fetchedAt：用「本地外推」推进秒数，避免用前端钟去减后端起点
+ * —— 前后端不在同一台机器/同一时区时，时钟差会把时长算歪。
+ */
+const remoteUptime = ref(null)
+let remoteTimer = null
+
+async function pullRemoteUptime() {
+  if (!backendOn.value) {
+    remoteUptime.value = null
+    return
+  }
+  const data = await refreshRemoteStatus(props.options.backend.url)
+  const su = data && data.systemUptime
+  remoteUptime.value = su
+    ? {
+        uptimeMs: Number(su.uptimeMs) || 0,
+        interruptMs: Number(su.interruptMs) || 0,
+        startedAt: Number(su.startedAt) || 0,
+        lastGapMs: Number(su.lastGapMs) || 0,
+        resetAt: Number(su.resetAt) || 0,
+        fetchedAt: Date.now()
+      }
+    : null
+}
+
+function startRemotePoll() {
+  if (remoteTimer) return
+  pullRemoteUptime()
+  remoteTimer = setInterval(pullRemoteUptime, 10000)
+}
+
+function stopRemotePoll() {
+  if (remoteTimer) {
+    clearInterval(remoteTimer)
+    remoteTimer = null
+  }
+}
+
+/** 当前运行时长视图：后端模式只用后端数据（连不上就留空，绝不退回前端时长） */
+const uptimeView = computed(() => {
+  if (backendOn.value) {
+    const a = remoteUptime.value
+    if (!a) {
+      return { source: 'backend', ok: false, startedAt: 0, uptimeMs: 0, interruptMs: 0, lastGapMs: 0, resetAt: 0 }
+    }
+    return {
+      source: 'backend',
+      ok: true,
+      startedAt: a.startedAt,
+      uptimeMs: Math.max(0, a.uptimeMs + (nowTick.value - a.fetchedAt)),
+      interruptMs: a.interruptMs,
+      lastGapMs: a.lastGapMs,
+      resetAt: a.resetAt
+    }
+  }
+  const snap = uptimeSnapshot(nowTick.value)
+  return {
+    source: 'frontend',
+    ok: true,
+    startedAt: snap.startedAt,
+    uptimeMs: snap.uptimeMs,
+    interruptMs: snap.interruptMs,
+    lastGapMs: snap.lastGapMs,
+    resetAt: snap.resetAt
+  }
+})
+
+const uptimeText = computed(() => (uptimeView.value.ok ? formatUptime(uptimeView.value.uptimeMs) : '—'))
+const interruptText = computed(() =>
+  uptimeView.value.interruptMs > 0 ? formatDuration(uptimeView.value.interruptMs) : '无'
+)
+const bootText = computed(() =>
+  uptimeView.value.startedAt ? new Date(uptimeView.value.startedAt).toLocaleString('zh-CN') : '—'
+)
+const modeText = computed(() => {
+  if (!backendOn.value) return '前端页面'
+  return remoteUptime.value ? '后端值守（以后端为准）' : '后端值守（未连接）'
+})
+/** 最近一次因「中断超过 4 小时」而重算起点的时间（0 = 从未） */
+const resetText = computed(() =>
+  uptimeView.value.resetAt ? new Date(uptimeView.value.resetAt).toLocaleString('zh-CN') : ''
+)
+
+watch(backendOn, (on) => {
+  if (on) startRemotePoll()
+  else {
+    stopRemotePoll()
+    remoteUptime.value = null
+  }
+})
+
 onMounted(() => {
   ticker = setInterval(() => (nowTick.value = Date.now()), 1000)
+  if (backendOn.value) startRemotePoll()
 })
 
 onBeforeUnmount(() => {
   if (ticker) clearInterval(ticker)
   ticker = null
+  stopRemotePoll()
 })
-
-const pad = (n) => String(n).padStart(2, '0')
-
-const uptimeText = computed(() => {
-  const total = Math.max(0, Math.floor((nowTick.value - BOOT_AT) / 1000))
-  const d = Math.floor(total / 86400)
-  const h = Math.floor((total % 86400) / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  const clock = `${pad(h)}:${pad(m)}:${pad(s)}`
-  return d > 0 ? `${d} 天 ${clock}` : clock
-})
-
-const bootText = computed(() => new Date(BOOT_AT).toLocaleString('zh-CN'))
 
 /** 相对时间，用在「最近推送」这类展示上 */
 function ago(ts) {
@@ -319,7 +411,22 @@ const sections = computed(() => [
   {
     title: '系统运行',
     rows: [
-      { k: '运行时长', v: uptimeText.value },
+      { k: '运行模式', v: modeText.value },
+      {
+        k: '运行时长',
+        v: uptimeView.value.ok ? uptimeText.value : '—（后端未连接）',
+        tone: uptimeView.value.ok ? '' : 'fail'
+      },
+      {
+        k: '中断时长',
+        v: uptimeView.value.ok ? interruptText.value : '—',
+        tone: uptimeView.value.ok && uptimeView.value.interruptMs > 0 ? 'warn' : ''
+      },
+      // 单次中断要够长（>1 分钟）才值得单列，否则页面刷新那零点几秒会一直挂在这
+      ...(uptimeView.value.ok && uptimeView.value.lastGapMs > 60000
+        ? [{ k: '最近中断', v: formatDuration(uptimeView.value.lastGapMs) }]
+        : []),
+      ...(resetText.value ? [{ k: '起点重算', v: resetText.value }] : []),
       { k: '启动时间', v: bootText.value },
       { k: '页面状态', v: visibilityText.value },
       { k: '应用版本', v: `${BRAND.fullName} ${BRAND.version}` },
@@ -405,6 +512,19 @@ const copied = ref(false)
 function allText() {
   const lines = [`【${BRAND.fullName}】运行信息`, `导出时间：${new Date().toLocaleString('zh-CN')}`, '']
 
+  lines.push('— 运行时长 —')
+  lines.push(`运行模式：${modeText.value}`)
+  if (uptimeView.value.ok) {
+    lines.push(`系统运行时长：${uptimeText.value}（含中断）`)
+    lines.push(`中断时长：${interruptText.value}`)
+    if (uptimeView.value.lastGapMs > 0) lines.push(`最近一次中断：${formatDuration(uptimeView.value.lastGapMs)}`)
+    if (resetText.value) lines.push(`起点重算于：${resetText.value}`)
+    lines.push(`启动时间：${bootText.value}`)
+  } else {
+    lines.push('系统运行时长：后端未连接，暂不可用')
+  }
+  lines.push('')
+
   lines.push('— 推送统计 —')
   lines.push(`累计 ${pushStats.total} 次 · 成功 ${pushStats.ok} · 失败 ${pushStats.fail} · 成功率 ${successRate.value}%`)
   pushChannels.forEach((c) => {
@@ -488,6 +608,27 @@ async function copyAll() {
 .hero-sub {
   font-size: 11px;
   color: var(--text-dim-2);
+}
+
+.hero-clock.dim {
+  color: var(--text-dim);
+}
+
+.hero-tag {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--tint) 8%, transparent);
+  border: 1px solid var(--line-soft);
+}
+
+.hero-tag.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .hero-cells {
@@ -663,6 +804,11 @@ async function copyAll() {
 
 .fail {
   color: var(--err-text);
+  font-style: normal;
+}
+
+.warn {
+  color: var(--warn-text);
   font-style: normal;
 }
 

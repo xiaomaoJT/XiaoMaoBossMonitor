@@ -273,6 +273,12 @@ import {
   syncConfigNow
 } from './composables/useBackendSync'
 import { featureState } from './composables/useAiExtras'
+import {
+  beginRunSession,
+  startUptimeHeartbeat,
+  stopUptimeHeartbeat,
+  touchRunSession
+} from './composables/useSystemUptime'
 import { clearFaces, clearPendingFaces, faces as faceList, getAllFaces } from './composables/useFaceLib'
 import {
   clearWatch,
@@ -2994,7 +3000,21 @@ async function onWatchSync() {
   showToast(`已向手表同步 ${events.value.length} 条事件`)
 }
 
+/**
+ * 页面即将隐藏 / 关闭时把运行时长会话的 lastSeenAt 落准。
+ * 不做这一步的话，关闭到下次打开之间的"中断"会被算成「上次心跳 → 关闭」+「关闭 → 打开」，
+ * 凭空多出最多一个心跳周期（60s），页面反复刷新就会攒出一堆假中断。
+ */
+function onPageHideUptime() {
+  touchRunSession()
+}
+
 onMounted(() => {
+  // 系统运行时长：开始 / 续接本次会话 + 起心跳（后端模式下页面只负责展示，
+  // 但这里仍照常记录，方便在"前端模式"下拿到跨刷新的连续时长）
+  beginRunSession()
+  startUptimeHeartbeat()
+  window.addEventListener('pagehide', onPageHideUptime)
   window.addEventListener('resize', onResize)
   window.addEventListener('orientationchange', onResize)
   window.addEventListener('keydown', onKeydown)
@@ -3041,6 +3061,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('pagehide', onPageHideUptime)
+  stopUptimeHeartbeat()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('orientationchange', onResize)
   window.removeEventListener('keydown', onKeydown)
