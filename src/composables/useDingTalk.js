@@ -407,6 +407,35 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   const startMs = ctx.startMs || (total ? Math.min(...list.map((r) => r.time || Date.now())) : Date.now())
   const endMs = ctx.endMs || Date.now()
 
+  /*
+   * 措辞变体。`silent`（默认）用于「静默结束汇总」与「静默查岗」；
+   * `range` 用于 /collect 这类「按绝对时段回查历史」—— 那时根本没有发生静默，
+   * 标题里写「静默时段」会让人以为系统记错了，或者以为自己开过静默；
+   * `cam` 用于「通道静默」—— 只静默了**一路**通道，标题里必须带上那是哪一路，
+   * 否则同时开了几路通道静默时，几条汇总长得一模一样，分不清是谁的。
+   * 只换标题与引言两处措辞，下面所有统计口径完全共用（这是刻意的：同一批事件
+   * 不论从哪个入口看，数字与分区必须一致）。
+   */
+  const isRange = ctx.variant === 'range'
+  const isCam = ctx.variant === 'cam'
+  const scopeName = String(ctx.scopeName || '').trim()
+  const scopeSuffix = scopeName ? ` · ${scopeName}` : ''
+  const titleName = isRange
+    ? '监控事件汇总'
+    : isCam
+      ? `监控通道静默汇总${scopeSuffix}`
+      : '监控静默时段汇总'
+  /*
+   * 推送通知的标题沿用原来的短名（`【监控静默汇总】`），别顺手改成和正文标题一样 ——
+   * 那会改变静默结束那条通知的文案，属于"顺手改坏既有行为"。
+   */
+  const shortName = isRange ? '监控事件汇总' : isCam ? `通道静默汇总${scopeSuffix}` : '监控静默汇总'
+  const introText = isRange
+    ? `该时段内共 **${total}** 条报警，已汇总于此。`
+    : isCam
+      ? `通道「${scopeName || '（未命名）'}」在静默时段内共 **${total}** 条报警，已汇总于此。`
+      : `静默时段内共 **${total}** 条报警，已统一汇总于此。`
+
   const p2 = (n) => String(n).padStart(2, '0')
   const fmtClock = (ms) => {
     const d = new Date(ms)
@@ -456,6 +485,43 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     if (r.faceName) knownSet.add(String(r.faceName))
   })
 
+  /*
+   * 人脸命中（在库）单独聚合。
+   *
+   * 判据：**事件是脸、且有名字** —— 有 faceName 才代表"认出了库里的人"。
+   * 只 type === 'face' 是不够的：未录入的陌生人脸也会走这个 type，
+   * 把陌生人当"命中"列出来等于每次门口过人都是命中，这块就废了。
+   *
+   * 按人聚合而不是逐条列：用户要的是"这期间谁来过、来了几次、最近一次什么时候"，
+   * 同一个人一晚上来 20 次，逐条列反而是噪音。
+   */
+  const hitMap = new Map() // name -> { count, best, firstAt, lastAt, cams:Set }
+  let strangerFaces = 0
+  list.forEach((r) => {
+    const isFace = r.type === 'face' || !!r.faceName
+    if (!isFace) return
+    const nm = String(r.faceName || '').trim()
+    if (!nm) {
+      strangerFaces += 1
+      return
+    }
+    let h = hitMap.get(nm)
+    if (!h) {
+      h = { count: 0, best: 0, firstAt: 0, lastAt: 0, cams: new Set() }
+      hitMap.set(nm, h)
+    }
+    h.count += 1
+    h.best = Math.max(h.best, Number(r.faceScore) || 0)
+    const t = Number(r.time) || 0
+    if (t) {
+      if (!h.firstAt || t < h.firstAt) h.firstAt = t
+      if (t > h.lastAt) h.lastAt = t
+    }
+    if (r.name) h.cams.add(String(r.name))
+  })
+  const faceHits = [...hitMap.entries()].sort((a, b) => b[1].count - a[1].count)
+  const hitTotal = faceHits.reduce((n, [, h]) => n + h.count, 0)
+
   const camNames = Object.keys(byCamera)
   const typeLabel = (t) => alarmLabel(t) || t
   const durMin = Math.max(1, Math.round((endMs - startMs) / 60000))
@@ -480,6 +546,22 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
         .join('\n')
     : '- 无'
 
+  /*
+   * 「人脸命中（在库）」分区的正文行。
+   * 没有命中、也没有陌生人脸时整块不出现 —— 空着摆一行"0 次"只会占地方。
+   */
+  const hitLines = faceHits.length
+    ? faceHits
+        .map(([nm, h]) => {
+          const bits = [`**${nm}**：${h.count} 次`]
+          if (h.lastAt) bits.push(`最近 ${fmtClock(h.lastAt)}`)
+          if (h.cams.size) bits.push([...h.cams].join('、'))
+          if (h.best) bits.push(`相似度 ${Math.round(h.best * 100)}%`)
+          return `- ${bits.join(' · ')}`
+        })
+        .join('\n')
+    : '- 无'
+
   const detailLines = (() => {
     const top = [...list].sort((a, b) => (a.time || 0) - (b.time || 0)).slice(0, 20)
     return top
@@ -494,9 +576,9 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   const detailNote = list.length > 20 ? `\n- …另有 ${list.length - 20} 条` : ''
 
   const lines = [
-    `### 【监控静默时段汇总】${rangeLabel}`,
+    `### 【${titleName}】${rangeLabel}`,
     '',
-    `> 静默时段内共 **${total}** 条报警，已统一汇总于此。`,
+    `> ${introText}`,
     '',
     '**📊 概览**',
     `- 报警总数：${total} 条`,
@@ -509,6 +591,18 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     `- 累计到访：${totalIn} 人次（区域计数）`,
     `- 峰值同时在线：${maxCur} 人`,
     '',
+    // 「人脸命中」单独成区：静默期间最该被一眼看到的就是这条（谁来过），
+    // 埋在下面的事件明细里等于没有。没有命中就整块不出现。
+    ...(faceHits.length || strangerFaces
+      ? [
+          '**🚨 人脸命中（在库）**',
+          ...(faceHits.length
+            ? [`- 共 **${hitTotal}** 次命中 · ${faceHits.length} 人`, hitLines]
+            : ['- 本时段无在库人员命中']),
+          ...(strangerFaces ? [`- 另有 ${strangerFaces} 次未识别的人脸（陌生人，不计入命中）`] : []),
+          ''
+        ]
+      : []),
     '**📋 按通道**',
     camLines,
     '',
@@ -531,7 +625,7 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     .replace(/^[>]\s?/gm, '')
     .trim()
 
-  return { title: `【监控静默汇总】${rangeLabel}`, markdown, plain }
+  return { title: `【${shortName}】${rangeLabel}`, markdown, plain }
 }
 
 /**

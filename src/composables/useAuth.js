@@ -332,6 +332,24 @@ function toResult(cache) {
   return cache.base === null ? null : { base: cache.base, info: cache.info }
 }
 
+/**
+ * 本页是不是**由一个监测后端服务出来的**（同源）。
+ *
+ * 判据就是 detectBackend() 的同一份（`/api/auth/info` 的 service 字段），
+ * 只是把「同源」这一个结论单独提出来 —— backendCandidates() 里同源排在第一位，
+ * 命中的 base 是空串 `''`。（别为这件事另写一个探测：同源的判据一旦有两份，
+ * 「门禁按前端模式拦挂载、顶栏却说后端模式」这种事迟早出现。）
+ *
+ * 用途见 src/LoginGate.vue：一台没有任何本地配置的新机器打开
+ * `http://<值守机>:8787` 时，它必须先知道自己**不是**监测本体，
+ * 否则会一直按前端模式把自己挡在门外，而且永远发现不了
+ * 「后端就在同一个地址上、配置都在它手里」。
+ */
+export async function sameOriginBackend() {
+  const r = await detectBackend()
+  return !!(r && r.base === '')
+}
+
 /* ==================== 凭据校验 ==================== */
 
 /**

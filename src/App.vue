@@ -117,6 +117,7 @@
       @force-exit="onForceExit"
       @watch-sync="onWatchSync"
       @backend-sync="onBackendSyncNow"
+      @pull-backend="onBackendPull"
       @flush-silent="onFlushSilent"
       @test-pre-silent="onTestPreSilence"
       @test-post-silent="onTestPostSilence"
@@ -231,6 +232,7 @@ import {
   cloneDefaultOptions,
   migrateSecretFields,
   normalizeCameraChannels,
+  normalizeCameraSilent,
   syncChannelCameras
 } from './config/defaults'
 import { SECRET_SCOPE } from './config/auth'
@@ -270,10 +272,15 @@ import {
   stopBackendPolling
 } from './composables/useBackendEvents'
 import {
+  backendBase,
+  localRev,
+  markSynced,
+  pullConfig,
   refreshRemoteStatus,
   scheduleConfigSync,
   stopConfigSync,
-  syncConfigNow
+  syncConfigNow,
+  syncRev
 } from './composables/useBackendSync'
 import { featureState } from './composables/useAiExtras'
 import {
@@ -282,7 +289,13 @@ import {
   stopUptimeHeartbeat,
   touchRunSession
 } from './composables/useSystemUptime'
-import { clearFaces, clearPendingFaces, faces as faceList, getAllFaces } from './composables/useFaceLib'
+import {
+  clearFaces,
+  clearPendingFaces,
+  faces as faceList,
+  getAllFaces,
+  replaceFaces
+} from './composables/useFaceLib'
 import {
   clearWatch,
   onWatchCommand,
@@ -339,12 +352,14 @@ const saved = loadSaved()
 const cameras = ref(
   saved
     ? saved.cameras.map((c) =>
-        normalizeCameraChannels({
-          ...c,
-          channels: c.channels ? { ...c.channels } : undefined,
-          roi: c.roi ? { ...c.roi } : null,
-          rect: c.rect ? { ...c.rect } : null
-        })
+        normalizeCameraSilent(
+          normalizeCameraChannels({
+            ...c,
+            channels: c.channels ? { ...c.channels } : undefined,
+            roi: c.roi ? { ...c.roi } : null,
+            rect: c.rect ? { ...c.rect } : null
+          })
+        )
       )
     : cloneDefaultCameras()
 )
@@ -977,16 +992,97 @@ const backendSyncSignature = computed(() =>
 )
 void backendSyncSignature
 
+/*
+ * 「后端手上已经是这一份配置了」的指纹。
+ * ----------------------------------------------------------------------------
+ * 拉取采用、推送成功、以及"确认已对齐"这三处各记一次；推送之前比一下 ——
+ * 一致就说明后端手上就是这一份，再推一次只会把 rev 空涨一格：
+ * 别的机器立刻从"已对齐"变成"后端有更新"，那条提示就成了常驻噪音。
+ *
+ * 为什么不能只靠 applyingRemote 那个瞬时标志来拦回推：
+ * 自动推送是 900ms 节流（scheduleConfigSync 收的是**取 payload 的函数**），
+ * 「正在采用远端配置」期间排上的那个定时器，醒来时标志早就复位了 ——
+ * payload 现算一份、原样推回去，rev +1。本项目真踩过：探针里一个从没发过
+ * POST 的页面，后端 rev 却涨了（服务日志"配置已应用（rev 8）"）。
+ *
+ * 用「指纹」而不是「有没有改动过」的布尔量：用户改完又改回来 = 后端那份没变，
+ * 这一发同样不该发出去。
+ */
+const syncedPushSig = ref('')
+const pushSignature = computed(
+  () =>
+    backendSyncSignature.value +
+    '|' +
+    faceList.value.map((f) => `${f.id}:${f.name}:${f.updatedAt || 0}`).join(',')
+)
+
+/** 取一份"要推给后端"的配置；跟后端手上那份一致时返回 null（同步层会跳过） */
+async function pushPayload() {
+  if (pushSignature.value === syncedPushSig.value) return null
+  return await backendPayload()
+}
+
+/** 统一的推送入口：成功之后把指纹记上（所有推送点都走这里，别直接调 syncConfigNow） */
+async function pushConfigNow({ silent = true } = {}) {
+  if (!options.backend || !options.backend.url) return { ok: false, error: '未配置服务地址' }
+  // 先记下"送出去的是哪一份"：请求在飞时用户又改了配置的话，
+  // 那一次改动不该被当成已同步（宁可多发一次，也不能漏发）
+  const sig = pushSignature.value
+  const r = await syncConfigNow(pushPayload, { url: options.backend.url, silent })
+  if (r && r.ok) syncedPushSig.value = sig
+  return r
+}
+
+/** 记下"后端手上就是这一份"（不推送时用：刚采用完远端配置 / 确认已对齐） */
+function markPushSynced() {
+  syncedPushSig.value = pushSignature.value
+}
+
+/*
+ * 「正在采用远端拉下来的配置」标志。
+ * 采用过程会整体改写 cameras / options / 人脸库 —— 那三处都挂着**自动回推**的监听，
+ * 不拦住就会立刻把刚拉下来的东西原样推回去（rev 空涨一格），
+ * 更糟的是如果中间还掺着本机残留，推回去的就未必是拉下来的那一份了。
+ * 置位 → 改写 → nextTick（Vue 的 watch 在这之前跑完）→ 复位。
+ *
+ * ⚠️ 必须声明在下面那个 `{ immediate: true }` 的监听**之前**：
+ * 它的回调会在 setup() 里同步跑一次，而 alignWithBackend() 会读这个标志 ——
+ * 声明在后就是 TDZ（`Cannot access '…' before initialization`），
+ * 那一抛会把「开机对齐」整条链路带走：本机明明该拉配置，结果原地不动（空大屏）。
+ */
+let applyingRemote = false
+
+/*
+ * ⚠️ 监听源是**拼好的一个字符串**，不是 `() => [enabled, url, pollMs]`。
+ *
+ * 返回数组的 getter 在 Vue 里"永远变了"：每次求值都是新数组实例，
+ * 浅比较（hasChanged）恒不等 —— 于是**任何一次 options 改写**都会把它抖起来，
+ * 包括"采用后端配置"时那次整体重写（先 delete 掉所有键再铺新的）。
+ * 后果很隐蔽：那一刻 cameras 已经换成后端那份、而"本机版本号"还没记上
+ * （localRev 仍是 0），于是 alignWithBackend() 判定"本机从没跟这个后端交换过"
+ * → 把刚拉下来的配置原样推回去，rev 空涨一格。
+ * 本项目真踩过，探针里抓到的那一发 POST 就是 `baseRev: 0, cams: 2`（采用完的配置）。
+ *
+ * 拼成字符串之后，只有这三个值**真的**变了才会进回调 —— 正好是下面注释里写的时机。
+ */
 watch(
-  () => [options.backend && options.backend.enabled, options.backend && options.backend.url, options.backend && options.backend.pollMs],
+  () =>
+    `${options.backend && options.backend.enabled}|${(options.backend && options.backend.url) || ''}|` +
+    `${(options.backend && options.backend.pollMs) || ''}`,
   () => {
     if (backendActive.value) {
       startBackendPolling(options, onBackendEvent)
-      // 开关一打开就先把配置推过去（否则后端不知道拉哪路流、往哪推）
-      syncConfigNow(backendPayload, { url: options.backend.url, silent: false }).then(() => {
-        refreshRemoteStatus(options.backend.url)
-        refreshBackendWatchdog(options)
-      })
+      /*
+       * 「与后端对齐」——注意**不是**无条件把本机配置推过去。
+       *
+       * 原来的写法是开关一打开就 syncConfigNow()，于是局域网里另一台机器
+       * （本机没有存档，跑的是空的初始化配置）只要把开关一打开，就会把
+       * 那份空白配置整体推给后端，把常驻设备上配好的通道与凭据一起清掉 ——
+       * 这是「先推后问」的必然结果。现在统一走 alignWithBackend()：
+       * 本机是空大屏就先**拉**、本机落后就只提示、已对齐就不重复推。
+       */
+      alignWithBackend()
+      refreshBackendWatchdog(options)
     } else {
       stopBackendPolling()
       stopConfigSync()
@@ -1006,20 +1102,22 @@ watch(
   () => [backendActive.value, backendSyncSignature.value],
   () => {
     if (!backendActive.value) return
-    scheduleConfigSync(backendPayload, { url: options.backend.url })
+    if (applyingRemote) return
+    scheduleConfigSync(pushPayload, { url: options.backend.url })
   }
 )
 
 /** 人脸库变动后立即同步一份（录完人马上生效，不等下一个周期） */
 async function pushFacesToBackend() {
   if (!backendActive.value) return
-  await syncConfigNow(backendPayload, { url: options.backend.url, silent: true })
+  if (applyingRemote) return
+  await pushConfigNow({ silent: true })
 }
 
 /** 设置页「立即同步」按钮 */
 async function onBackendSyncNow() {
   if (!options.backend || !options.backend.url) return
-  await syncConfigNow(backendPayload, { url: options.backend.url, silent: false })
+  await pushConfigNow({ silent: false })
   await refreshRemoteStatus(options.backend.url)
 }
 
@@ -1034,6 +1132,276 @@ watch(
     if (backendActive.value) pushFacesToBackend()
   }
 )
+
+/* ==================== 配置反向同步（从后端拉取） ==================== */
+/*
+ * 为什么需要这一段：
+ * 配置原本只存在**配它的那个浏览器**的 localStorage 里（外加后端手上那一份）。
+ * 于是局域网里另一台机器打开同一个地址，看到的是它自己的初始化配置 ——
+ * 一块空大屏、什么通道都没有，而后端明明有 7 路在跑。
+ *
+ * 三个入口共用同一套「拉取 → 采用」：
+ *   ① 本机一路通道都没有、而后端那边有 → 页面载入 / 打开后端开关时自动拉（先拉后推）
+ *   ② 设置页「从后端拉取配置」按钮
+ *   ③ 本机落后于后端时的提示（也走 ②）
+ * （"本页是不是后端发出来的"那一步在门禁里做，见 src/LoginGate.vue ——
+ *   前端模式下 App 根本不挂载，写在这儿的自动发现永远跑不到。）
+ *
+ * ⚠️ 方向相反的那条路（推）保留原样：本机有配置、且没落后，仍然由本机说了算。
+ *    两边都改 = 两台机器互相覆盖，谁也不服谁。
+ */
+
+/**
+ * 与后端做一次对齐（三种时机共用：页面载入 / 开关打开 / 地址变更）。
+ *
+ * 决策表：
+ *   本机一路通道都没有        → 只拉不推（把后端那份整体取回来）
+ *   本机落后（localRev < 后端 rev）→ 不推、不覆盖，只把"后端有更新"标出来给用户看
+ *   本机从没跟这个后端交换过  → 推（这是"配好之后第一次开开关"的正常路径）
+ *   已对齐                    → 什么都不做（避免每次打开页面都把 rev 推高一格，
+ *                              那会让"落后"提示对所有机器都变成噪音）
+ */
+async function alignWithBackend() {
+  if (!backendActive.value) return
+  /*
+   * 正在采用远端配置时**不参与对齐**：那一刻本机状态是半新半旧的
+   * （cameras 已换成后端那份，而 localRev 还没记上），任何判定都会得出
+   * "本机从没对齐过 → 推上去"的错误结论。等这次采用结束自然会有下一次触发。
+   */
+  if (applyingRemote) return
+  const url = options.backend.url
+  // 先问一次后端当前状态：既是"连得上吗"，也是"后端是哪个版本"
+  const st = await refreshRemoteStatus(url)
+  if (!st) {
+    // 连不上：不拉也不推（推了也是白推，只会把 syncState 弄成 error）
+    return
+  }
+
+  if (cameras.value.length === 0) {
+    await pullFromBackend({ confirm: false, reason: 'empty' })
+    return
+  }
+
+  if (localRev.value > 0 && syncRev.value > localRev.value) {
+    /*
+     * 后端比本机新 —— 说明**别的设备**改过后端。
+     * 这里刻意不静默覆盖本机：本机可能也有还没推上去的改动，
+     * 直接以后端为准会把它悄悄抹掉；反过来直接推翻后端则会抹掉别人刚做的修改。
+     * 所以只把事实摆出来（设置页的「配置同步」区），由用户点一下决定。
+     */
+    console.warn(`⚠️  后端配置（rev ${syncRev.value}）比本机（rev ${localRev.value}）新，请在设置页选择以哪边为准`)
+    return
+  }
+
+  if (localRev.value > 0 && localRev.value === syncRev.value) {
+    // 本机这份配置就是后端手上那一份，不用重复推
+    // （把指纹记上：之后任何一次"改了又改回来"也不会白发一发出去）
+    markPushSynced()
+    return
+  }
+
+  // 走到这里说明本机配置确实需要推上去（首次接触 / 后端那份丢了）——给个可见反馈
+  await pushConfigNow({ silent: false })
+}
+
+/**
+ * 从后端拉取整份配置并**采用**。
+ * @param {{confirm?:boolean, reason?:string}} opts confirm=true 时先弹确认（覆盖本机配置是有代价的）
+ * @returns {Promise<boolean>} 是否真的采用了
+ */
+async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
+  if (!options.backend || !options.backend.url) return false
+  const r = await pullConfig(options.backend.url)
+  if (!r.ok) {
+    if (reason === 'manual') showToast(`拉取失败：${r.error}`)
+    return false
+  }
+  const data = r.data
+  const remoteCams = Array.isArray(data.cameras) ? data.cameras.length : 0
+
+  if (confirm) {
+    const local = cameras.value.length
+    const msg =
+      `用后端配置覆盖本机？\n\n` +
+      `后端：${remoteCams} 路通道 · ${(data.faces || []).length} 人底库 · rev ${data.configRev}\n` +
+      `本机：${local} 路通道\n\n` +
+      `本机的通道 / 区域 / 推送凭据 / 人脸库会被后端那份整体替换（可撤销：改完再点「立即同步」推回去）。`
+    if (typeof window !== 'undefined' && !window.confirm(msg)) return false
+  }
+
+  await applyPulledConfig(data, reason)
+  return true
+}
+
+/**
+ * 采用一份从后端拉下来的配置。
+ *
+ * 与设置页「保存配置」(applyConfig) 的区别只有一处：**人脸库也要重建**
+ * （后端有向量，前端本地库得跟着换，否则设置页显示的人脸与后端认识的人会对不上）。
+ *
+ * 顺序上先停掉一切不该再跑的东西，再整体换配置，最后落盘 ——
+ * 换到一半被定时器读到旧配置是最难查的一类问题。
+ */
+async function applyPulledConfig(data, reason = 'manual') {
+  applyingRemote = true
+  try {
+    // 通道：与载入存档时走同一条归一化链路（少了它，老字段形态会让画面出不来）
+    cameras.value = (Array.isArray(data.cameras) ? data.cameras : []).map((c) =>
+      normalizeCameraSilent(
+        normalizeCameraChannels({
+          ...c,
+          channels: c.channels ? { ...c.channels } : undefined,
+          roi: c.roi ? { ...c.roi } : null,
+          rect: c.rect ? { ...c.rect } : null
+        })
+      )
+    )
+
+    /*
+     * options：整体换成后端那一份 —— 不能只 Object.assign，本机可能留着后端没有的
+     * 旧键（例如已经删掉的配置项），只覆盖同名键的话那些残留会一直跟着本机，
+     * 下次推上去又回到后端。
+     *
+     * ⚠️ 但**不能**把 `options.backend` 也一起清掉再补：那会让它在中间有一瞬间是
+     *    undefined，`backendActive` 跟着闪一下 false —— 够把正在跑的轮询停掉，
+     *    也够把**排队中的一次自动推送取消掉**（那个 watch 的 else 支路会 stopConfigSync）。
+     *    于是"采用完还会不会回推"这件事就变成了"取决于有没有恰好闪一下"，
+     *    谁也说不清（本项目真踩过：探针里那条断言一直是绿的，因为推送是被这个
+     *    副作用挡住的，而不是被守卫挡住的）。这里改成：清掉**除 backend 以外**的键，
+     *    backend 段最后单独合并 —— 全程不出现半成品状态。
+     */
+    const localBackend = { ...(options.backend || {}) }
+    const defOpts = cloneDefaultOptions()
+    const defaultBackend = { ...(defOpts.backend || {}) }
+    delete defOpts.backend
+    const incoming = JSON.parse(JSON.stringify(data.options || {}))
+    const pulledBackend = { ...(incoming.backend || {}) }
+    delete incoming.backend
+    Object.keys(options).forEach((k) => {
+      if (k !== 'backend') delete options[k]
+    })
+    Object.assign(options, defOpts, incoming)
+    normalizeDingTalk(options.dingtalk)
+    fillMissingOptions(options)
+    migrateSecretFields(options)
+
+    /*
+     * `options.backend` 里混着两类字段，必须分开对待：
+     *   · 本机的  —— enabled（这台机器当不当客户端）、url（连哪个地址）、pollMs（本机轮询节奏）
+     *   · 后端的  —— ffmpegPath（后端解码用哪个 ffmpeg，得以后端为准）
+     * 整体替换会把「本机是不是客户端」也按后端手上那一份改掉 —— 而那份里的 enabled
+     * 其实是当初**某个客户端**推上去的（完全可能是 false），于是刚拉完配置就把自己的
+     * 后端模式关掉了：画面当场切回前端模式，这台机器开始自己拉流、自己检测、
+     * 自己推送（同一路流被两台机器各推一遍）。
+     *
+     * 本项目真踩过这个：探针里拉完以后 `options.backend.enabled` 变成 false，
+     * 「同源接管」那条断言就红了 —— 而且真机上不会报任何错，只会"拉完反而更乱"。
+     */
+    options.backend = {
+      ...defaultBackend,
+      enabled: !!localBackend.enabled,
+      // 本机那份地址优先（拉回来那份可能是**别的机器**的地址），空了才用后端的
+      url: backendBase(localBackend.url) || pulledBackend.url || '',
+      pollMs: localBackend.pollMs || pulledBackend.pollMs,
+      ffmpegPath: pulledBackend.ffmpegPath || ''
+    }
+
+    // 后端地址：本机连不上的话这份配置等于废的（见 resolveBackendUrl）
+    const fixedUrl = await resolveBackendUrl(options.backend.url)
+    if (fixedUrl) options.backend.url = fixedUrl
+
+    hiddenIds.value = []
+    zoomIndex.value = null
+    if (layoutKey.value === 'free') ensureFreeRects()
+
+    // 渠道级监听名单跟着通道级开关走（后端那份可能来自更老的版本）
+    syncChannelCameras(cameras.value, options)
+
+    // 人脸库整体替换（失败不阻断：通道与凭据已经可用，人要另说的是另一件事）
+    try {
+      const n = (data.faces || []).length
+      await replaceFaces(data.faces || [])
+      if (n) console.log(`👤 人脸库已从后端拉取：${n} 人`)
+    } catch (e) {
+      console.warn('⚠️  人脸库拉取失败：', (e && e.message) || e)
+    }
+
+    /*
+     * 记下"本机这份配置对应后端的哪个版本"。
+     * 必须在**采用之后**才记：拉了但没采用（用户取消）时记上，
+     * 落后判定就永久失效了 —— 本机明明还是旧配置，却显示"已对齐"。
+     */
+    markSynced(data.configRev)
+    /*
+     * 同时记下"后端手上就是这一份" —— 否则自动推送那个 900ms 节流定时器
+     * 醒来时（applyingRemote 早已复位）会把刚拉下来的配置原样推回去，
+     * rev 空涨一格，别的机器立刻显示"后端有更新"。
+     */
+    markPushSynced()
+
+    persistNow()
+    settingsOpen.value = false
+    await nextTick()
+    // 画面按新配置重连（与 applyConfig 一致：80ms 后让播放器重来一次）
+    setTimeout(() => tileRefs.forEach((t) => t && t.reconnect()), 80)
+
+    const label = reason === 'empty' || reason === 'auto' ? '已接管后端配置' : '已从后端拉取配置'
+    showToast(`${label}（${cameras.value.length} 路通道）`)
+  } finally {
+    applyingRemote = false
+  }
+}
+
+/**
+ * 校正后端地址：**本机能连上的优先**。
+ *
+ * 起因：A 机器上那个地址很可能是 `http://127.0.0.1:8787`（自己连自己）。
+ * B 机器把配置拉过去之后，这个地址指向的是 **B 自己**，于是"拉到了配置却
+ * 一路都连不上"。规则按顺序试：
+ *   ① 拉回来那个地址本机连得上 → 原样保留（不动正常工作着的配置）
+ *   ② 本页面的同源地址是监测后端 → 用它
+ *   ③ 都不行 → 原样返回（让用户自己去设置页改，别擅自改成别的机器）
+ *
+ * 认领判据用 `/api/auth/info` 的 service 字段 —— 与 useAuth.detectBackend()、
+ * 与门禁判断"本页是不是后端发出来的"是**同一份判据**。
+ * 别改成"请求成功就算"：任何一个静态服务器都可能对这个路径回 200
+ * （SPA 落回 index.html 还会给你一坨 HTML），那样会把普通网页服务器当后端。
+ */
+async function resolveBackendUrl(url) {
+  const cur = backendBase(url)
+  const origin = typeof location !== 'undefined' ? location.origin : ''
+  const sameOriginOk = (u) => backendBase(u) === backendBase(origin)
+  const reachable = async (u) => {
+    if (!u) return false
+    try {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 4000)
+      try {
+        const res = await fetch(`${backendBase(u)}/api/auth/info`, { signal: ctrl.signal })
+        if (!res.ok) return false
+        const d = await res.json()
+        return !!(d && d.ok && d.service === 'BossMonitor')
+      } finally {
+        clearTimeout(t)
+      }
+    } catch (e) {
+      return false
+    }
+  }
+  if (!cur) return origin || url
+  if (sameOriginOk(cur)) return cur
+  if (await reachable(cur)) return cur
+  if (await reachable(origin)) {
+    console.warn(`🔀 后端地址已按当前页面地址校正：${cur} → ${origin}（原地址在本机连不上）`)
+    return origin
+  }
+  return cur
+}
+
+/** 设置页「从后端拉取配置」按钮 */
+async function onBackendPull() {
+  await pullFromBackend({ confirm: true, reason: 'manual' })
+}
 
 /* ==================== 可见列表与布局 ==================== */
 const visibleCameras = computed(() => cameras.value.filter((c) => !hiddenIds.value.includes(c.id)))
@@ -1584,7 +1952,13 @@ const push = useAlertPush(options, {
   onState: (key, state, error) => markPush(key, state, error),
   notify: (msg) => showToast(msg),
   // 后端模式下推送由服务端负责，免打扰提醒也交给服务端发，前端不重复发
-  preSilenceEnabled: () => !backendActive.value
+  preSilenceEnabled: () => !backendActive.value,
+  /*
+   * 通道列表单独传：它不在 options 里（是另一个 ref），而推送调度器要靠它判断
+   * 「这一条属于哪一路、那一路有没有在通道静默」。写成 options.cameras 会多存一份
+   * 镜像，且一旦不同步就是"配了通道静默却不生效"。
+   */
+  getCameras: () => cameras.value
 })
 
 function markPush(key, state, error, channels, results) {
@@ -2229,7 +2603,7 @@ async function toggleAppFullscreen() {
 
 /* ==================== 设置保存 ==================== */
 function applyConfig({ cameras: cams, options: opts, hiddenIds: hidden }) {
-  cameras.value = cams.map((c) => normalizeCameraChannels({ ...c }))
+  cameras.value = cams.map((c) => normalizeCameraSilent(normalizeCameraChannels({ ...c })))
   Object.assign(options, opts)
   // 渠道级监听名单始终跟着通道级推送开关走（用户可能只改了「监控通道」那页）
   syncChannelCameras(cameras.value, options)

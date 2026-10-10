@@ -62,7 +62,65 @@ export function normalizeTelegram(tg) {
    *                     这种情况由指令层拒绝开启并回提示（见 headless-monitor.mjs）。
    */
   if (!Array.isArray(r.silentChannels)) r.silentChannels = [...DEFAULT_SILENT_CHANNELS]
+
+  /* ---- 关键事件单独提醒（私聊推送）配置 ----
+   * 同样是逐字段兜底：老存档没有这一块，整体赋值会把将来的字段冲掉。 */
+  const dp = tg.directPush || (tg.directPush = {})
+  if (dp.enabled === undefined) dp.enabled = false
+  if (!Array.isArray(dp.chatIds)) dp.chatIds = []
+  /*
+   * 三类关键事件的勾选状态。
+   * ⚠️ 判据统一是「!== false」（缺省即开），判定在 useAlertPush.directEventOn 里 ——
+   * 这里只保证 events 是个对象，**不**替用户把缺失的键填成 true：
+   * 填了就等于"用户从没选过"和"用户明确勾了"被写成了同一个状态，
+   * 将来想区分（比如迁移时按版本给不同默认）就没法区分了。
+   */
+  if (!dp.events || typeof dp.events !== 'object') dp.events = {}
   return tg
+}
+
+/**
+ * 「关键事件单独提醒」的接收人列表（纯函数、不 mutate、无副作用）。
+ *
+ * 接收人 = 「远程控制 → 授权用户」+ directPush.chatIds，去重、去空，
+ * 并**排除主会话**（telegram.chatId）—— 主会话本来就会收到这条，
+ * 不排除就等于同一条消息发两遍。
+ *
+ * ⚠️ 提到这里（而不是留在使用方）是因为有**两个**使用方：推送调度器
+ * （决定真正发给谁）与设置页（显示"将推送给 N 人"）。各写一份迟早在
+ * 「授权用户名单算不算」这种细节上漂移，于是界面写着 3 人、实际发 2 条。
+ *
+ * 默认带授权用户名单还有一个现实原因：Telegram 机器人**不能主动**给
+ * 从没跟它对话过的用户发消息（会 403 / chat not found），而授权用户
+ * 本来就是私聊过机器人的自己人。
+ */
+export function directPushRecipients(tgCfg) {
+  const dp = (tgCfg && tgCfg.directPush) || null
+  if (!dp || dp.enabled !== true) return []
+  const main = String((tgCfg && tgCfg.chatId) || '').trim()
+  const out = []
+  const add = (v) => {
+    const s = String(v == null ? '' : v).trim()
+    if (s && s !== main && !out.includes(s)) out.push(s)
+  }
+  const remote = (tgCfg && tgCfg.remote) || {}
+  if (Array.isArray(remote.allowUserIds)) remote.allowUserIds.forEach(add)
+  if (Array.isArray(dp.chatIds)) dp.chatIds.forEach(add)
+  return out
+}
+
+/**
+ * 这一类关键事件要不要单独提醒。
+ *
+ * ⚠️ 判据是 `!== false`（**缺省即开**）：与渠道「推送哪些事件」的分组勾选
+ * 同一套语义 —— 老配置里没有 events 字段时按三类全开处理，而不是一个都不发。
+ * 写反了会让升级上来的用户默默收不到提醒。
+ */
+export function directPushEventOn(tgCfg, kind) {
+  const dp = (tgCfg && tgCfg.directPush) || null
+  if (!dp || dp.enabled !== true) return false
+  const ev = dp.events || {}
+  return ev[kind] !== false
 }
 
 function apiUrl(token, method) {

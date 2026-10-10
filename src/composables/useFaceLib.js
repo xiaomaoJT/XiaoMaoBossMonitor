@@ -140,6 +140,49 @@ export function clearFaces() {
 }
 
 /**
+ * 用一整份人脸库**整体替换**本地库 —— 给「从后端拉取配置」用。
+ *
+ * 与后端 face-lib.mjs 的 replaceAll 对称：**整体替换**（不是合并）、
+ * 没有向量的记录直接跳过（正是为了不让"半条记录"混进底库）。
+ * 两端的语义必须一致，否则"拉回来的人数"和"后端认识的人数"会对不上。
+ *
+ * @param {Array<{name:string, vector:number[], thumb?:string, createdAt?:number}>} list
+ * @returns {Promise<{ok:true, count:number}>}
+ */
+export function replaceFaces(list) {
+  return runExclusive(async () => {
+    const items = (Array.isArray(list) ? list : []).filter(
+      (f) => f && f.name && Array.isArray(f.vector) && f.vector.length
+    )
+    const db = await openDB()
+    await new Promise((resolve, reject) => {
+      // 清空 + 批量写入放在**同一个事务**里：中途失败要么全成要么全不成，
+      // 不会出现"旧的清掉了、新的没写进去"（那等于把底库弄丢了）
+      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+      const os = tx.objectStore(FACE_STORE_NAME)
+      os.clear()
+      const now = Date.now()
+      items.forEach((f) => {
+        os.add({
+          name: String(f.name),
+          // 统一转普通数组：TypedArray 在部分老 WebView 的 IndexedDB 里克隆不可靠
+          vector: Array.from(f.vector),
+          thumb: f.thumb || '',
+          createdAt: Number(f.createdAt) || now,
+          updatedAt: Number(f.updatedAt) || now,
+          samples: Number(f.samples) || 1
+        })
+      })
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error)
+    })
+    await refreshFaces()
+    return { ok: true, count: items.length }
+  })
+}
+
+/**
  * 用新样本增强某个人的特征。
  * 做法：向量按样本数做增量平均再重新归一化——比只留第一张稳，
  * 又不需要长期保存全部历史样本。

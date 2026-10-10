@@ -20,6 +20,33 @@ const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_0000000000000
 const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
 
 /**
+ * 通道静默的默认渠道：三端全静默。
+ * 用户主动为某一路配静默，本意就是"这一路别吵我"，所以默认三端都静。
+ *
+ * ⚠️ 定义放在文件顶部（而不是它语义上所属的「通道级静默」那一节）是因为
+ * `makeCamera` 会在**模块初始化时**被执行（HIDDEN_CAMERAS = ….map(makeCamera)），
+ * 那里要用到它 —— 放到文件下方会撞上 const 的 TDZ 报错。
+ * 详细说明见文件下方「通道级静默」一节。
+ */
+export const DEFAULT_CAM_SILENT_CHANNELS = ['ding', 'wecom', 'tg']
+
+/**
+ * 一路通道的静默配置默认值（新建通道 / 载入内置配置都用它）。
+ * 默认**关闭**：没配过的通道不参与通道静默，行为与老版本完全一致。
+ */
+export function defaultCamSilent() {
+  return {
+    enabled: false,
+    slots: [],
+    channels: [...DEFAULT_CAM_SILENT_CHANNELS],
+    tempUntil: 0,
+    tempSince: 0,
+    tempChannels: [],
+    tempLabel: ''
+  }
+}
+
+/**
  * 内置隐藏配置的通道预置（真实名称 / 检测开关 / 摆放坐标）。
  * 仅在「配置方案 → 加载内置配置」输入密码后载入，不出现在初始默认值里。
  * 数组顺序 = 大屏里的默认排列顺序；
@@ -96,7 +123,9 @@ function makeCamera(preset) {
      */
     rect: preset.rect ? { ...preset.rect } : null,
     /** 检测区域列表（区域进出 / 徘徊检测用），空 = 不启用区域规则 */
-    zones: []
+    zones: [],
+    /** 通道静默（对某一路在指定时段静默指定渠道）；默认关，不配就不生效 */
+    silent: defaultCamSilent()
   }
 }
 
@@ -804,6 +833,32 @@ export const HIDDEN_OPTIONS = {
        * ⚠️ 清空 = 拒绝开启（不是「静默全部」），详见 DEFAULT_SILENT_CHANNELS 的说明。
        */
       silentChannels: [...DEFAULT_SILENT_CHANNELS]
+    },
+
+    /* ---- 关键事件单独提醒（私聊推送） --------------------------------
+     * 场景：群 / 频道里消息多，半夜静默了更是什么都收不到；但「静默开没开」
+     * 「静默期间到底怎么了」「库内的人来了」这几件事，哪怕在静默里也想第一时间知道。
+     * 打开后，这几类关键事件会**除了走正常渠道**之外，再由机器人私聊推给你指定的人。
+     *
+     * ⚠️ Telegram 的硬限制：机器人**不能主动**给「从没跟它对话过」的用户发消息
+     * （会返回 chat not found / 403）。所以接收人必须先在 TG 里私聊机器人发一条
+     * 任意消息，把会话打开，之后才收得到。这一点在设置页也提示了。
+     *
+     * 接收人 = 「远程控制 → 授权用户」名单（他们本来就是私聊过机器人的自己人）
+     *        + 这里的 chatIds（额外补充，一般是别人的用户 id）。
+     * 主会话（telegram.chatId）自动排除，避免同一条消息发两遍。
+     */
+    directPush: {
+      /** 总开关，默认关：不配好接收人之前不要悄悄多发消息 */
+      enabled: false,
+      /**
+       * 哪几类关键事件要单独提醒。
+       * 判据统一是「!== false」，即缺省视为开 —— 与渠道事件的勾选语义一致，
+       * 老配置里没有这个字段时也能按默认的三类生效。
+       */
+      events: { silence: true, summary: true, face: true },
+      /** 额外接收人（Telegram 用户 id，纯数字） */
+      chatIds: []
     }
   },
 
@@ -978,6 +1033,15 @@ export const DEFAULT_OPTIONS = (() => {
    * 否则「恢复初始化」之后白名单还在，等于把授权 id 写死进了空白配置。
    */
   if (o.telegram.remote) o.telegram.remote.allowUserIds = []
+  /*
+   * 「关键事件单独提醒」同理：接收人是一份**人**的名单，属于个人化数据。
+   * 空白配置里既不开这个开关，也不留任何接收 id —— 否则恢复初始化后
+   * 机器人还会主动私聊一个已经不该再收到消息的人。
+   */
+  if (o.telegram.directPush) {
+    o.telegram.directPush.enabled = false
+    o.telegram.directPush.chatIds = []
+  }
 
   return o
 })()
@@ -1090,7 +1154,8 @@ export function cloneDefaultCameras() {
     rect: c.rect ? { ...c.rect } : null,
     channels: { ...c.channels },
     aiExt: { ...c.aiExt },
-    zones: (c.zones || []).map((z) => ({ ...z, rect: { ...z.rect } }))
+    zones: (c.zones || []).map((z) => ({ ...z, rect: { ...z.rect } })),
+    silent: defaultCamSilent()
   }))
 }
 
@@ -1215,6 +1280,253 @@ export function normalizeCameraChannels(cam) {
     zone: ext.zone !== false
   }
   return cam
+}
+
+/* ==================== 静默时段匹配（全局静默与通道静默共用） ====================
+ * ⚠️ 这几个函数原本长在 useAlertPush 内部、只服务全局静默。通道静默（对某一路
+ * 监控在指定时段静默指定渠道）需要**同一套时段语义** —— 跨零点怎么算、命中多个
+ * 时段取哪个、非法项怎么滤。各写一份，迟早会出现「全局静默 22-2 跨零点、通道静默
+ * 却不跨」这种对不上的行为。所以整套提到这里，两边共用同一份。
+ */
+
+/** '20:00' / '8:00' / 1200 → 当天第几分钟；认不出返回 null */
+export function hmToMinutes(hm) {
+  if (typeof hm === 'number' && Number.isFinite(hm)) return ((Math.round(hm) % 1440) + 1440) % 1440
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hm === undefined || hm === null ? '' : hm).trim())
+  if (!m) return null
+  return Number(m[1]) * 60 + Number(m[2])
+}
+
+/**
+ * 把一处静默配置读成 [{start:分钟, end:分钟}]。
+ *
+ * 兼容老配置：有 slots 就用 slots；没有但有 start/end 就当成单个时段
+ * （用户升级后原有的夜间时段不会丢，也不用写迁移脚本）。
+ * 非法项（认不出、start === end 的 0 长度窗口）直接过滤掉。
+ */
+export function parseSilentSlots(cfg) {
+  const c = cfg || {}
+  const out = []
+  const push = (s, e) => {
+    const a = hmToMinutes(s)
+    const b = hmToMinutes(e)
+    if (a === null || b === null || a === b) return
+    out.push({ start: a, end: b })
+  }
+  if (Array.isArray(c.slots) && c.slots.length) {
+    c.slots.forEach((it) => {
+      if (it && it.start !== undefined && it.end !== undefined) push(it.start, it.end)
+    })
+  } else if (c.start !== undefined && c.end !== undefined) {
+    push(c.start, c.end)
+  }
+  return out
+}
+
+/**
+ * 「今天零点 + 距天分钟数」→ 时间戳；dayOff 用于跨天（-1 昨天 / 1 明天）。
+ *
+ * ⚠️ 导出是为了让**不在时段内**的场景（设置页「试发一条结束提醒」要造一个
+ * 像样的窗口）也能用同一份跨天规则。别在外面另写一遍 —— 提走
+ * matchSilentSlotAt 时漏改了那个调用点，静默结束提醒直接 ReferenceError
+ * （运行时才炸，只有跑回归才看得见）。
+ */
+export function slotBoundaryAt(now, min, dayOff) {
+  const d = new Date(now)
+  d.setFullYear(d.getFullYear(), d.getMonth(), d.getDate() + (dayOff || 0))
+  d.setHours(0, 0, 0, 0)
+  return d.getTime() + min * 60000
+}
+
+/**
+ * 在 slots 上匹配「此刻命中的那个时段」，并算出起止时间戳。
+ * 多个时段重叠时取**结束最晚**的那个（免打扰当然按最宽的窗口算）。
+ * @returns {{start:number,end:number,startMs:number,endMs:number,crossDay:boolean}|null}
+ */
+export function matchSilentSlotAt(slots, now) {
+  const d = new Date(now)
+  const m = d.getHours() * 60 + d.getMinutes()
+  const today = d.getDate()
+  let best = null
+  ;(Array.isArray(slots) ? slots : []).forEach((s) => {
+    const hit = s.start < s.end ? m >= s.start && m < s.end : m >= s.start || m < s.end
+    if (!hit) return
+    let startMs
+    let endMs
+    if (s.start < s.end) {
+      startMs = slotBoundaryAt(now, s.start, 0)
+      endMs = slotBoundaryAt(now, s.end, 0)
+    } else if (m >= s.start) {
+      // 跨零点：现在处于「开始之后」那半段 → 结束在明天
+      startMs = slotBoundaryAt(now, s.start, 0)
+      endMs = slotBoundaryAt(now, s.end, 1)
+    } else {
+      // 跨零点：现在处于「结束之前」那半段 → 开始在昨天
+      startMs = slotBoundaryAt(now, s.start, -1)
+      endMs = slotBoundaryAt(now, s.end, 0)
+    }
+    if (!best || endMs > best.endMs) best = { start: s.start, end: s.end, startMs, endMs }
+  })
+  if (best) best.crossDay = new Date(best.endMs).getDate() !== today
+  return best
+}
+
+/* ==================== 通道级静默 ====================
+ * 对「指定的监控通道」在指定时段静默指定渠道。
+ *
+ * 与全局静默（options.silent）是**并集**关系：对某渠道而言，只要全局静默或
+ * 该通道的通道静默任一命中，它就被静默。通道静默是全局静默的**补充**
+ * —— 全局静默覆盖「全通道」，通道静默覆盖「指定的那几路」。
+ *
+ * 配置挂在每路通道上（cam.silent），字段与 options.silent 对齐：
+ *   enabled       是否开启该通道的**定时**静默
+ *   slots         每日时段，可多个，支持跨零点
+ *   channels      定时时段内静默哪些渠道
+ *   tempUntil / tempSince / tempChannels / tempLabel   远程指令下发的临时静默
+ *
+ * ⚠️ 为什么挂在 cam 上而不是另开一张表：通道会被增删、拖拽排序（设置页）。
+ * 另开一张 `_camSilent: { 'cam-1': … }` 就得自己维护「通道删了要清、重命名要跟」，
+ * 迟早留下指向不存在通道的僵尸配置。挂在 cam 上则随通道一起生灭。
+ */
+
+/* 默认渠道常量 DEFAULT_CAM_SILENT_CHANNELS 与 defaultCamSilent() 定义在**文件顶部**
+ * （makeCamera 在模块初始化时就要用它，放这里会撞 const 的 TDZ），见那里的说明。 */
+
+/**
+ * 归一化一路通道的静默配置（老存档补字段）。
+ * ⚠️ 与 normalizeCameraChannels 一样是**就地改**，只在载入 / 保存路径上调用，
+ * 别在渲染期调（渲染期读配置就改配置，会让响应式状态在渲染中突变）。
+ */
+export function normalizeCameraSilent(cam) {
+  if (!cam || typeof cam !== 'object') return cam
+  const s = cam.silent && typeof cam.silent === 'object' ? cam.silent : (cam.silent = {})
+  if (s.enabled === undefined) s.enabled = false
+  if (!Array.isArray(s.slots)) s.slots = []
+  if (!Array.isArray(s.channels)) s.channels = [...DEFAULT_CAM_SILENT_CHANNELS]
+  s.tempUntil = Number(s.tempUntil) || 0
+  s.tempSince = Number(s.tempSince) || 0
+  if (!Array.isArray(s.tempChannels)) s.tempChannels = []
+  if (typeof s.tempLabel !== 'string') s.tempLabel = ''
+  return cam
+}
+
+/**
+ * 某一路通道此刻的静默状态（定时时段 ∨ 临时静默），临时优先。
+ * 语义与全局静默的 silentState 对齐：两者并存时取更晚的结束时刻、临时静默优先级更高。
+ *
+ * @returns {{active:false}
+ *          |{active:true, temp:boolean, startMs:number, endMs:number,
+ *            channels:string[], rangeLabel:string, endLabel:string, reason?:string}}
+ */
+export function camSilentState(cam, now = Date.now()) {
+  const s = (cam && cam.silent) || null
+  if (!s) return { active: false }
+
+  // 临时静默优先（与全局静默同序）
+  const until = Number(s.tempUntil) || 0
+  if (until > now) {
+    const chans = Array.isArray(s.tempChannels) && s.tempChannels.length ? s.tempChannels : (s.channels || [])
+    if (chans.length) {
+      const p2 = (n) => String(n).padStart(2, '0')
+      const e = new Date(until)
+      const since = Number(s.tempSince) > 0 && Number(s.tempSince) <= now ? Number(s.tempSince) : now
+      return {
+        active: true,
+        temp: true,
+        startMs: since,
+        endMs: until,
+        channels: chans.slice(),
+        reason: String(s.tempLabel || '').trim(),
+        rangeLabel: `临时静默（至 ${p2(e.getHours())}:${p2(e.getMinutes())}）`,
+        endLabel: `${p2(e.getHours())}:${p2(e.getMinutes())}`
+      }
+    }
+  }
+
+  if (!s.enabled) return { active: false }
+  const chans = Array.isArray(s.channels) ? s.channels : []
+  if (!chans.length) return { active: false }
+  const hit = matchSilentSlotAt(parseSilentSlots(s), now)
+  if (!hit) return { active: false }
+  const p2 = (n) => String(n).padStart(2, '0')
+  const fmt = (ms) => {
+    const x = new Date(ms)
+    return `${p2(x.getHours())}:${p2(x.getMinutes())}`
+  }
+  const endDay = hit.crossDay ? '次日 ' : ''
+  return {
+    active: true,
+    temp: false,
+    startMs: hit.startMs,
+    endMs: hit.endMs,
+    channels: chans.slice(),
+    rangeLabel: `${fmt(hit.startMs)} ~ ${endDay}${fmt(hit.endMs)}`,
+    endLabel: `${endDay}${fmt(hit.endMs)}`
+  }
+}
+
+/**
+ * 按「id / 名称 / 序号」找一路通道 —— 远程指令用。
+ *
+ * 用户在手机上只记得「门口」这个名字，不会去查 cam-1；也可能图快直接发个序号 1。
+ * 匹配优先级：id 精确 > 名称精确 > 名称包含（唯一才认）> 序号（从 1 开始）。
+ * ⚠️ 名称包含命中多个时**报歧义**而不是挑第一个：静默错了通道，用户会以为
+ * 配置没生效，比直接回一句"有多个候选"糟得多。
+ *
+ * @returns {{cam:object}|{error:string, candidates?:string[]}}
+ */
+export function findCamera(cameras, token) {
+  const list = Array.isArray(cameras) ? cameras.filter((c) => c && c.id) : []
+  const t = String(token === undefined || token === null ? '' : token).trim()
+  if (!t) return { error: '没有给出通道' }
+  const lower = t.toLowerCase()
+  let hit = list.find((c) => String(c.id).toLowerCase() === lower)
+  if (hit) return { cam: hit }
+  hit = list.find((c) => String(c.name || '').trim().toLowerCase() === lower)
+  if (hit) return { cam: hit }
+  const partial = list.filter((c) => String(c.name || '').toLowerCase().includes(lower))
+  if (partial.length === 1) return { cam: partial[0] }
+  if (partial.length > 1) {
+    return { error: `「${t}」对应了多个通道`, candidates: partial.map((c) => c.name).filter(Boolean) }
+  }
+  if (/^\d+$/.test(t)) {
+    const i = Number(t) - 1
+    if (i >= 0 && i < list.length) return { cam: list[i] }
+  }
+  return { error: `没有找到通道「${t}」`, candidates: list.map((c) => c.name).filter(Boolean) }
+}
+
+/**
+ * 通道静默状态一览（设置页 / `/cams` 指令共用）。
+ *
+ * 只回「够用且不敏感」的字段 —— 这个函数的结果最终会进 `/cams` 回执，
+ * 别把流地址之类塞进来（那是内网地址，回给聊天窗口不合适）。
+ */
+export function camSilentOverview(cameras, now = Date.now()) {
+  const list = Array.isArray(cameras) ? cameras : []
+  return list
+    .filter((c) => c && c.id)
+    .map((c) => {
+      const st = camSilentState(c, now)
+      const cfg = c.silent || {}
+      return {
+        id: c.id,
+        name: c.name || c.id,
+        active: !!st.active,
+        temp: !!st.temp,
+        /** 生效中覆盖的渠道 */
+        channels: st.active ? st.channels : [],
+        rangeLabel: st.active ? st.rangeLabel : '',
+        endLabel: st.active ? st.endLabel : '',
+        endMs: st.active ? st.endMs : 0,
+        /** 是否配了通道静默（定时开关开 或 有临时静默） */
+        configured: !!cfg.enabled || Number(cfg.tempUntil) > 0,
+        /** 定时时段条数 */
+        slotCount: parseSilentSlots(cfg).length,
+        /** 定时静默的渠道（未生效时也能看到"配的是哪几端"） */
+        slotChannels: Array.isArray(cfg.channels) ? cfg.channels.slice() : []
+      }
+    })
 }
 
 /** 新建摄像头时使用的默认地址模板 */

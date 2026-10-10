@@ -228,6 +228,81 @@
                 </button>
                 <span class="cp-hint">（推送关闭时三个渠道都不推）</span>
               </div>
+
+              <!--
+                通道静默：只让**这一路**在指定时段对指定渠道不推送。
+                与上面「免打扰（静默推送）」是并集关系（任一命中就静默该渠道），
+                但范围只限这一路 —— 那一份是所有通道一起静默。
+              -->
+              <div class="cam-silent" :class="{ on: camSilActive(cam) }">
+                <div class="cs-row">
+                  <button
+                    class="tag mini"
+                    :class="{ on: camSilCfg(cam).enabled }"
+                    title="开启这一路的定时静默（配合下面的时段生效）"
+                    @click="toggleCamSilent(cam)"
+                  >
+                    <svg viewBox="0 0 24 24" width="12" height="12">
+                      <path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"
+                      />
+                    </svg>
+                    通道静默
+                  </button>
+                  <span class="live-tag" v-if="camSilActive(cam)">
+                    静默中 · {{ camSilInfo(cam).rangeLabel }}
+                  </span>
+                  <span class="cs-state" v-else-if="camSilCfg(cam).enabled">
+                    已开启（当前不在时段内）
+                  </span>
+                  <span class="cs-state off" v-else>未开启</span>
+                  <span class="cs-flex"></span>
+                  <span class="cs-label">静默渠道</span>
+                  <button
+                    v-for="ch in CAM_CHANNELS"
+                    :key="'csz-' + ch.key"
+                    class="tag mini ch"
+                    :class="{ on: camSilChannels(cam).includes(ch.key) }"
+                    :title="`这一路的通道静默是否覆盖${ch.label}`"
+                    @click="toggleCamSilChannel(cam, ch.key)"
+                  >
+                    {{ ch.label }}
+                  </button>
+                </div>
+
+                <template v-if="camSilCfg(cam).enabled">
+                  <div class="slot-list">
+                    <div class="slot-row" v-for="(s, si) in camSilCfg(cam).slots" :key="'csl-' + si">
+                      <span class="slot-idx">{{ si + 1 }}</span>
+                      <input class="field mini" type="time" v-model="s.start" @mousedown="openPicker" />
+                      <span class="tilde">~</span>
+                      <input class="field mini" type="time" v-model="s.end" @mousedown="openPicker" />
+                      <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
+                      <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
+                      <button class="btn tiny danger slot-del" title="删除这个时段" @click="removeCamSilSlot(cam, si)">
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                  <div class="slot-actions">
+                    <button class="btn tiny" @click="addCamSilSlot(cam)">+ 添加时段</button>
+                    <span class="cs-state">结束时间早于开始时间 = 跨零点（如 19:00 ~ 08:00）</span>
+                  </div>
+                </template>
+
+                <p class="hint tight">
+                  只影响<b>这一路</b>：命中时段时，所选渠道不再实时推送、改为收存，
+                  时段结束后单独推送<b>本通道汇总</b>（期间没有事件就不打扰）。
+                  与上面「免打扰（静默推送）」是<b>并集</b> —— 任一命中就静默该渠道；
+                  两处同时命中时，事件归整体汇总，不会重复。
+                  临时静默可在手机上发 <code>/csilent {{ cam.name || cam.id }} 2</code>。
+                </p>
+              </div>
             </div>
           </div>
           <div class="empty-tip" v-else>
@@ -1580,6 +1655,32 @@
                 {{ syncState === 'syncing' ? '同步中…' : '立即同步' }}
               </button>
             </div>
+            <!--
+              反方向：从后端拉回整份配置。
+              存在的理由：配置只存在**配它的那个浏览器**里，局域网里另一台机器
+              打开同一个地址看到的是自己的空配置（一块空大屏）。
+              换机器 / 重装 / 清了浏览器数据时，用它把后端那一份整体取回来。
+            -->
+            <div class="opt">
+              <span>
+                <strong>从后端拉取</strong>
+                <em>
+                  把后端正在用的那份配置整体取回本机（通道 / 区域 / 凭据 / 人脸库）。
+                  换一台机器打开本地址时，本机是空的 —— 点这里拿回来即可，不用重配一遍。
+                  <b :class="behindBackend ? 'err-text' : 'ok-text'">本机 {{ localRevText }} · 后端 {{ syncRevText }}</b>
+                </em>
+                <em v-if="behindBackend" class="err-text">
+                  ⚠️ 后端配置比本机新（别的设备改过）。点右边按钮以它为准，本机这份会被替换。
+                </em>
+                <em v-else-if="pushOverwrote" class="err-text">
+                  ⚠️ 上一次同步把其它设备的改动覆盖掉了。
+                </em>
+                <em v-if="pullState === 'error'" class="err-text">拉取失败：{{ pullError }}</em>
+              </span>
+              <button class="tag" :disabled="pullState === 'pulling'" @click="onBackendPull">
+                {{ pullState === 'pulling' ? '拉取中…' : '从后端拉取' }}
+              </button>
+            </div>
             <div class="opt">
               <span>
                 <strong>拉取频率</strong>
@@ -2145,6 +2246,79 @@
             </span>
             <span class="switch" :class="{ on: tg.silent }" @click="tg.silent = !tg.silent"></span>
           </label>
+
+          <!--
+            关键事件单独提醒（私聊推送）。
+            群 / 频道消息多，静默期间更是什么都收不到；但「静默开没开 / 静默期间怎么了 /
+            库内的人来了」这几件事哪怕在静默里也想第一时间知道 —— 这几类事件
+            除了走正常渠道，再由机器人私聊推给指定的人。
+            和「远程控制」一样用 grp 卡片圈起来，视觉上区分"这是额外的一路"。
+          -->
+          <div class="divider"></div>
+          <div class="grp" :class="{ live: tg.directPush.enabled }">
+            <div class="grp-head">
+              <span class="grp-ico">📨</span>
+              <div class="grp-titles">
+                <strong>关键事件单独提醒</strong>
+                <em>
+                  静默提醒、静默汇总、人脸命中这类关键事件，除正常渠道外，
+                  再由机器人<b>私聊</b>推给指定的人（如授权用户）。
+                </em>
+              </div>
+              <span class="switch" :class="{ on: tg.directPush.enabled }" @click="tg.directPush.enabled = !tg.directPush.enabled"></span>
+            </div>
+
+            <div class="grp-body" v-if="tg.directPush.enabled">
+              <div class="sub-label">提醒哪些事件</div>
+              <div class="temp-chips">
+                <button
+                  v-for="e in DIRECT_EVENT_OPTS"
+                  :key="e.id"
+                  class="chip sm"
+                  :class="{ on: directEventOn(e.id) }"
+                  :title="e.desc"
+                  @click="toggleDirectEvent(e.id)"
+                >
+                  {{ e.label }}
+                </button>
+              </div>
+
+              <div class="sub-label mt">接收人</div>
+              <p class="hint tight">
+                默认包含「远程控制 → 授权用户」里的所有人，下面可以再补<b>别人的用户 id</b>。
+                <br />
+                ⚠️ 接收人<b>必须先在 Telegram 里私聊机器人发过一条消息</b>，
+                否则机器人无法主动发起会话（会报 chat not found）—— 这是 Telegram 的限制，不是配置问题。
+              </p>
+              <div class="id-list">
+                <span class="id-chip" v-for="(id, i) in tg.directPush.chatIds" :key="'dp-' + i">
+                  <code>{{ id }}</code>
+                  <button class="id-x" title="移除" @click="tg.directPush.chatIds.splice(i, 1)">×</button>
+                </span>
+                <span class="id-empty" v-if="!tg.directPush.chatIds.length">未额外添加（仅用授权用户名单）</span>
+              </div>
+              <div class="test-row">
+                <input
+                  class="field mini"
+                  v-model.trim="newDirectId"
+                  placeholder="输入用户 id 后回车添加"
+                  @keyup.enter="addDirectId"
+                />
+                <button class="btn tiny" :disabled="!newDirectId" @click="addDirectId">添加</button>
+                <button class="btn tiny" :disabled="directState.kind === 'loading'" @click="testDirectPush">
+                  {{ directState.kind === 'loading' ? '发送中…' : '试发一条' }}
+                </button>
+              </div>
+              <p class="hint err-text" v-if="directIdError">{{ directIdError }}</p>
+              <p class="hint" :class="directState.kind === 'fail' ? 'err-text' : ''" v-if="directState.text">
+                {{ directState.text }}
+              </p>
+              <p class="muted">
+                当前将私聊推送给 <b>{{ directRecipients.length }}</b> 个接收人
+                <template v-if="!directRecipients.length"> —— 授权用户名单为空，且未额外添加</template>
+              </p>
+            </div>
+          </div>
 
           <!--
             远程控制（方案 C，TG 私聊指令）—— item 121 UI 美化。
@@ -2882,11 +3056,14 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   BRAND,
+  camSilentState,
   cloneDefaultCameras,
   cloneDefaultOptions,
   cloneHiddenConfig,
   DEFAULT_BACKEND_URL,
+  DEFAULT_CAM_SILENT_CHANNELS,
   DEFAULT_SILENT_CHANNELS,
+  defaultCamSilent,
   HIDDEN_PASSCODE_HASH,
   syncChannelCameras
 } from '../config/defaults'
@@ -2903,7 +3080,7 @@ import {
   refreshBackendWatchdog,
   testBackendTgRemote
 } from '../composables/useBackendEvents'
-import { syncState, syncStateText } from '../composables/useBackendSync'
+import { syncState, syncStateText, localRev, syncRev, pullState, pullError, pushOverwrote } from '../composables/useBackendSync'
 import { refreshWatchStatus, watchState, watchStatusText } from '../composables/useWatchBridge'
 import {
   AI_MODELS,
@@ -2918,6 +3095,8 @@ import {
 } from '../composables/useAiDetector'
 import { FIELD_KEYS, buildAlarmMessage, fieldLabel, normalizeDingTalk, sendDingTalk } from '../composables/useDingTalk'
 import {
+  directPushEventOn as tgDirectEventOn,
+  directPushRecipients as tgDirectRecipients,
   getBotInfo,
   getChatInfo,
   normalizeTelegram,
@@ -3063,6 +3242,7 @@ const emit = defineEmits([
   'force-exit',
   'watch-sync',
   'backend-sync',
+  'pull-backend',
   'flush-silent',
   'test-pre-silent',
   'test-post-silent',
@@ -3940,6 +4120,22 @@ function onBackendSync() {
   onBackendTest()
 }
 
+/** 从后端整体拉一份配置回来（覆盖本机前 App.vue 会先确认一次） */
+function onBackendPull() {
+  emit('pull-backend')
+}
+
+/*
+ * 「本机版本 / 后端版本」两个数字，以及"本机落后了"这个结论。
+ * 两个 rev 的语义完全不同，别混：
+ *   localRev = 本机这份配置对应后端的哪个版本（落盘，只有真的推/拉成功才变）；
+ *   syncRev  = 后端当前版本（轮询 /api/status 就会被刷新）。
+ * 用 syncRev 当"本机版本"会让落后判定永远成立 —— 自己一推完就"落后"了。
+ */
+const localRevText = computed(() => (localRev.value > 0 ? `rev ${localRev.value}` : '未对齐'))
+const syncRevText = computed(() => (syncRev.value > 0 ? `rev ${syncRev.value}` : '—'))
+const behindBackend = computed(() => localRev.value > 0 && syncRev.value > localRev.value)
+
 /* ==================== 通道级附加能力（人脸 / 姿态 / 区域） ==================== */
 /**
  * 和「检测识别」页的全局总开关是**两层**控制：
@@ -4155,7 +4351,13 @@ function clone(list) {
     roi: c.roi ? { ...c.roi } : null,
     rect: c.rect ? { ...c.rect } : null,
     channels: c.channels ? { ...c.channels } : { ding: true, wecom: true, tg: true },
-    aiExt: c.aiExt ? { ...c.aiExt } : { face: true, pose: true, zone: true }
+    aiExt: c.aiExt ? { ...c.aiExt } : { face: true, pose: true, zone: true },
+    /*
+     * 通道静默必须**深拷贝**（slots 是数组）。只靠上面的 `...c` 会与外面的
+     * cam.silent 共享同一个对象 —— 在抽屉里改时段会立刻写进真实配置，
+     * 点「取消」也回不去（取消只丢弃本地副本，改动早就漏出去了）。
+     */
+    silent: c.silent ? JSON.parse(JSON.stringify(c.silent)) : defaultCamSilent()
   }))
 }
 
@@ -4278,7 +4480,10 @@ function addCamera() {
     rect: null,
     push: true,
     channels: { ding: true, wecom: true, tg: true },
-    zones: []
+    zones: [],
+    // 通道静默要给默认值，否则新加的通道 cam.silent 是 undefined，
+    // 卡片里的静默开关读不到字段、状态会显示成"未开启"却又点不动时段
+    silent: defaultCamSilent()
   })
 }
 
@@ -4550,6 +4755,75 @@ function togglePushCam(cam) {
   cam.push = cam.push === false
 }
 
+/* ---------- 通道静默（每一路单独配时段 + 渠道） ---------- */
+
+/**
+ * 只读地取这一路的静默配置。不存在时返回一个空常量，**不在渲染期写状态** ——
+ * 渲染期补字段等于边渲染边改响应式数据（本项目对此有前车之鉴）。
+ * 真正要写的时候走下面的 ensureCamSil。
+ */
+const EMPTY_CAM_SILENT = {
+  enabled: false,
+  slots: [],
+  channels: [],
+  tempUntil: 0,
+  tempSince: 0,
+  tempChannels: [],
+  tempLabel: ''
+}
+function camSilCfg(cam) {
+  return cam && cam.silent && typeof cam.silent === 'object' ? cam.silent : EMPTY_CAM_SILENT
+}
+
+/** 写之前才把配置对象补齐（只在事件处理里调用） */
+function ensureCamSil(cam) {
+  if (!cam.silent || typeof cam.silent !== 'object') cam.silent = defaultCamSilent()
+  const s = cam.silent
+  if (!Array.isArray(s.slots)) s.slots = []
+  if (!Array.isArray(s.channels)) s.channels = [...DEFAULT_CAM_SILENT_CHANNELS]
+  return s
+}
+
+function camSilChannels(cam) {
+  const c = camSilCfg(cam).channels
+  return Array.isArray(c) ? c : []
+}
+
+/**
+ * 这一路此刻的通道静默状态 —— 直接调调度器用的同一个纯函数（camSilentState），
+ * 界面与引擎同源。各算一份的话，迟早出现「界面显示静默中、实际没静默」。
+ */
+function camSilInfo(cam) {
+  return camSilentState(cam)
+}
+function camSilActive(cam) {
+  return camSilInfo(cam).active === true
+}
+
+function toggleCamSilent(cam) {
+  const s = ensureCamSil(cam)
+  s.enabled = !s.enabled
+  // 开启时补一个默认时段：开了却没有任何时段，看起来会像"没生效"
+  if (s.enabled && !s.slots.length) s.slots.push({ start: '19:00', end: '08:00' })
+}
+
+function toggleCamSilChannel(cam, ch) {
+  const s = ensureCamSil(cam)
+  /*
+   * 刻意允许取消到空（不像「远程静默默认渠道」那样"一个都不选就拒绝"）：
+   * 这里是长期配置，先清空再逐个勾是很自然的操作，卡住反而别扭。
+   * 空数组在 camSilentState 里就是不生效，行为明确、不会静默掉别的东西。
+   */
+  s.channels = s.channels.includes(ch) ? s.channels.filter((x) => x !== ch) : [...s.channels, ch]
+}
+
+function addCamSilSlot(cam) {
+  ensureCamSil(cam).slots.push({ start: '12:00', end: '13:00' })
+}
+function removeCamSilSlot(cam, i) {
+  ensureCamSil(cam).slots.splice(i, 1)
+}
+
 /* ---------- 配置方案（多套配置保存 / 切换 / 导入导出） ---------- */
 const PROFILE_KEY = 'monitor-wall-profiles-v1'
 const profileName = ref('')
@@ -4703,11 +4977,92 @@ async function testTelegram() {
   }
 }
 
+/* ---------------- 关键事件单独提醒（私聊推送） ---------------- */
+
+/** 三类关键事件。key 与 useTelegram.directPushEventOn 的 kind 一一对应 */
+const DIRECT_EVENT_OPTS = [
+  { id: 'silence', label: '静默提醒', desc: '免打扰开始 / 结束的提醒' },
+  { id: 'summary', label: '静默汇总', desc: '静默结束时的那条汇总（含人脸命中明细）' },
+  { id: 'face', label: '人脸命中', desc: '识别到人脸库里的人时，带图单独提醒' }
+]
+
+const newDirectId = ref('')
+const directIdError = ref('')
+/** 试发结果（贴着按钮显示，不弹窗） */
+const directState = reactive({ kind: '', text: '' })
+
+/**
+ * 判据与调度层同源（useTelegram 的纯函数），不在组件里再推一遍逻辑 ——
+ * 否则界面"已勾选"和实际"发不发"会走偏。
+ * ⚠️ 判据是 `!== false`（缺省即开）：老配置没有这个字段时照样算勾上。
+ */
+function directEventOn(kind) {
+  return tgDirectEventOn(tg.value, kind)
+}
+
+function toggleDirectEvent(kind) {
+  const dp = tg.value.directPush
+  if (!dp) return
+  if (!dp.events || typeof dp.events !== 'object') dp.events = {}
+  dp.events[kind] = !directEventOn(kind)
+}
+
+/** 与推送调度器同一份计算（含「授权用户名单 + 额外 id，去重去主会话」） */
+const directRecipients = computed(() => tgDirectRecipients(tg.value))
+
+function addDirectId() {
+  const v = String(newDirectId.value || '').trim()
+  // 只收纯数字：填 @用户名 / 群 id 都发给不了私聊，早点报错比运行时静默失败好
+  if (!/^\d+$/.test(v)) {
+    directIdError.value = '用户 id 应为纯数字（在 Telegram 里找 @userinfobot 查询）'
+    return
+  }
+  directIdError.value = ''
+  if (!tg.value.directPush.chatIds.includes(v)) tg.value.directPush.chatIds.push(v)
+  newDirectId.value = ''
+}
+
+/**
+ * 试发一条私聊，逐个接收人串行发（与调度层一致，避免并发触发 TG 限流）。
+ * 走的是真实 Bot API，所以能直接验证「这个人到底收不收得到」——
+ * 最常见的失败原因就是对方从没私聊过机器人。
+ */
+async function testDirectPush() {
+  const to = directRecipients.value
+  if (!to.length) {
+    directIdError.value = '没有可用的接收人：授权用户名单为空，且未额外添加'
+    return
+  }
+  directIdError.value = ''
+  directState.kind = 'loading'
+  directState.text = '正在发送…'
+  const results = []
+  for (const id of to) {
+    try {
+      await sendTelegramText(
+        { ...tg.value, chatId: id },
+        '✅ <b>关键事件单独提醒 · 测试</b>\n收到这条说明机器人可以私聊推送给这个会话。'
+      )
+      results.push(`${id} ✅`)
+    } catch (e) {
+      results.push(`${id} ❌ ${(e && e.message) || '失败'}`)
+    }
+  }
+  const allOk = results.every((r) => r.endsWith('✅'))
+  directState.kind = allOk ? 'ok' : 'fail'
+  directState.text = `试发结果：${results.join('；')}`
+}
+
 /* ---------------- 远程控制（方案 C，TG 私聊指令） ---------------- */
 /**
  * 指令清单。与后端 server/tg-remote.mjs 的 COMMANDS 一一对应 ——
- * 那份才是真正注册到 TG 命令菜单的，这里只是把说明也展示出来，
- * 免得用户还要去翻后端代码才知道有哪些指令。
+ * 那份才是真正注册到 TG 命令菜单的（`/help` 与命令菜单都由它生成），
+ * 这里只是把说明也展示出来，免得用户还要去翻后端代码才知道有哪些指令。
+ *
+ * ⚠️ 这是**有意为之的第二份**：前端不能直接 import 那个模块（它顶层用了
+ * node:fs / node:path，进不了浏览器打包）。所以**新增指令时两处都要改**。
+ * 只改后端 → 指令能用但设置页看不到；只改这里 → 列表里有但发出去是「未知指令」。
+ * `/tmp/collect-probe/ui-probe.mjs` 里有一条断言专门盯着这份列表。
  */
 const TG_COMMANDS = [
   {
@@ -4718,7 +5073,22 @@ const TG_COMMANDS = [
   { cmd: 'until', usage: '/until <HH:MM> [渠道]', desc: '静默到指定时刻（已过则顺延到明天），同样可以跟渠道' },
   { cmd: 'resume', usage: '/resume', desc: '立刻结束静默，并推送结束提醒 + 汇总' },
   { cmd: 'patrol', usage: '/patrol', desc: '立即推送一次巡检报告' },
-  { cmd: 'status', usage: '/status', desc: '查看在线路数 / 静默状态 / 事件数' },
+  {
+    cmd: 'status',
+    usage: '/status',
+    desc: '完整运行状态：运行时长（含中断）/ 通道出帧 / 检测能力 / 推送渠道 / 静默 / 远程控制 / 记录与登录'
+  },
+  {
+    cmd: 'collect',
+    usage: '/collect [T|Y] [起-止] [img]',
+    desc: '时段内事件汇总：T=今日、Y=昨日（省略为今日），起止按小时如 9-18（省略为全天）；加 img 连截图一起推'
+  },
+  {
+    cmd: 'csilent',
+    usage: '/csilent <通道> <小时数|HH:MM|off> [渠道]',
+    desc: '通道静默：只让某一路监控在指定时段不推送。如 /csilent 门口 2（2 小时）、/csilent 门口 08:00（到 08:00）、/csilent off 门口（恢复）'
+  },
+  { cmd: 'cams', usage: '/cams', desc: '通道状态一览：每路是否在线出帧、是否正处在通道静默（含到几点、静默哪些渠道）' },
   { cmd: 'check', usage: '/check duty', desc: '静默查岗：把静默期间积压的事件汇总推过来（含全部截图）' },
   { cmd: 'duty', usage: '/duty', desc: '静默查岗（/check duty 的短别名，两者等效）' },
   { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）' },
@@ -6468,6 +6838,36 @@ function loadHidden() {
   color: var(--err-text);
   border-color: color-mix(in srgb, var(--err) 38%, transparent);
   background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+/* ---------- 通道静默（监控通道卡片内） ---------- */
+.cam-silent {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cam-silent.on {
+  border-top-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.cs-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.cs-flex {
+  flex: 1 1 auto;
+}
+.cs-label,
+.cs-state {
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+}
+.cs-state.off {
+  opacity: 0.72;
 }
 
 .slot-del {

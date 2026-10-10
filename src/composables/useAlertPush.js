@@ -20,6 +20,7 @@ import {
   buildAlarmMessage,
   buildMergedMessage,
   buildSilentEndMessages,
+  buildSilentSummary,
   formatTime,
   normalizeDingTalk,
   sendDingTalk,
@@ -30,10 +31,20 @@ import { recordPush } from './usePushStats.js'
 import { uploadToLitterbox } from './useImageHost.js'
 import { EVENT_GROUPS, TYPE_GROUP, featureText, normalizeEvents } from './useAlarmText.js'
 import { runtimeLine } from './useDeviceInfo.js'
-import { BRAND, channelCredReady } from '../config/defaults.js'
+import {
+  BRAND,
+  camSilentOverview,
+  camSilentState,
+  channelCredReady,
+  matchSilentSlotAt,
+  parseSilentSlots,
+  slotBoundaryAt
+} from '../config/defaults.js'
 import {
   buildTelegramCaption,
   buildTelegramMergedText,
+  directPushEventOn,
+  directPushRecipients,
   normalizeTelegram,
   sendTelegramAlarm,
   sendTelegramText,
@@ -93,6 +104,18 @@ export function useAlertPush(options, hooks = {}) {
 
   /** 每次创建实例时按当前 options 生成（read 是闭包，取的时候仍读实时配置） */
   const CHANNEL_DEFS = makeChannelDefs(options)
+
+  /**
+   * 取当前通道列表。
+   *
+   * ⚠️ 通道列表在**前后端都不在 options 里**：前端是独立的 cameras ref，后端是
+   * config.cameras（与 config.options 平级）。所以由调用方通过 hooks.getCameras 提供；
+   * 没传时回落到 options.cameras，只是给老调用方留的兼容路径。
+   * 硬去读 options.cameras 的后果是「通道静默看着配好了、却永远不生效」——
+   * 因为那里根本没有通道。
+   */
+  const camerasOf =
+    typeof hooks.getCameras === 'function' ? hooks.getCameras : () => (options ? options.cameras : null)
 
   const pendingCount = ref(0)
 
@@ -174,6 +197,7 @@ export function useAlertPush(options, hooks = {}) {
   /* 全局静默时段（免打扰推送）：收存报警，截止时刻统一发汇总              */
   /* ------------------------------------------------------------------ */
 
+  /** 渠道级静默（options.<渠道>.quietStart/quietEnd）仍用这个；时段匹配见下面 readSlots */
   const toMin = (s) => {
     const [h, m] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
     return h * 60 + m
@@ -183,70 +207,20 @@ export function useAlertPush(options, hooks = {}) {
   /**
    * 读出所有定时静默时段（item 114：支持多个时段）。
    *
-   * 兼容老配置：老版本只有 start / end 两个字段、没有 slots。
-   * 这里做一次归一化 —— 有 slots 就用 slots；没有但有 start/end 就当成单个时段。
-   * 用户升级后原有的夜间时段不会丢，也不用写数据迁移脚本。
-   * 非法项（start === end，等于 0 长度窗口）会被过滤掉。
+   * ⚠️ 实现搬到了 defaults.js 的 `parseSilentSlots` —— 通道静默要用**同一套**
+   * 时段语义（同一个 slots 结构、同样兼容老配置的 start/end、同样过滤 0 长度窗口）。
+   * 各写一份迟早会出现「全局静默 22-2 跨零点、通道静默却不跨」这种对不上的行为。
    */
   function readSlots() {
-    const c = silentCfg()
-    if (!c) return []
-    const out = []
-    const push = (s, e) => {
-      const a = toMin(s)
-      const b = toMin(e)
-      if (a === b) return
-      out.push({ start: a, end: b })
-    }
-    if (Array.isArray(c.slots) && c.slots.length) {
-      c.slots.forEach((it) => {
-        if (it && it.start !== undefined && it.end !== undefined) push(it.start, it.end)
-      })
-    } else if (c.start !== undefined && c.end !== undefined) {
-      // 老配置：单时段
-      push(c.start, c.end)
-    }
-    return out
-  }
-
-  /** 「今天零点 + 距天分钟数」换算成时间戳；dayOff 用于跨天（-1=昨天，1=明天） */
-  function slotBoundary(now, min, dayOff) {
-    const d = new Date(now)
-    d.setFullYear(d.getFullYear(), d.getMonth(), d.getDate() + (dayOff || 0))
-    d.setHours(0, 0, 0, 0)
-    return d.getTime() + min * 60000
+    return parseSilentSlots(silentCfg())
   }
 
   /**
    * 找出当前命中的那个时段，并算出它的起止时间戳。
-   * 多个时段重叠时取**结束最晚**的那个（免打扰当然按最宽的窗口算）。
+   * 实现同样在 defaults.js（`matchSilentSlotAt`）—— 与通道静默共用同一份。
    */
   function matchSlot(now) {
-    const d = new Date(now)
-    const m = d.getHours() * 60 + d.getMinutes()
-    const today = d.getDate()
-    let best = null
-    readSlots().forEach((s) => {
-      const hit = s.start < s.end ? m >= s.start && m < s.end : m >= s.start || m < s.end
-      if (!hit) return
-      let startMs
-      let endMs
-      if (s.start < s.end) {
-        startMs = slotBoundary(now, s.start, 0)
-        endMs = slotBoundary(now, s.end, 0)
-      } else if (m >= s.start) {
-        // 跨零点，现在处于「开始之后」那半段 → 结束在明天
-        startMs = slotBoundary(now, s.start, 0)
-        endMs = slotBoundary(now, s.end, 1)
-      } else {
-        // 跨零点，现在处于「结束之前」那半段 → 开始在昨天
-        startMs = slotBoundary(now, s.start, -1)
-        endMs = slotBoundary(now, s.end, 0)
-      }
-      if (!best || endMs > best.endMs) best = { start: s.start, end: s.end, startMs, endMs }
-    })
-    if (best) best.crossDay = new Date(best.endMs).getDate() !== today
-    return best
+    return matchSilentSlotAt(readSlots(), now)
   }
 
   /**
@@ -380,6 +354,59 @@ export function useAlertPush(options, hooks = {}) {
   const silentBuffer = []
   const silentSeen = new Set()
   let silentTimer = null
+
+  /* ---------------- 通道级静默：收存缓冲与窗口状态 ---------------- */
+
+  /**
+   * 每路通道一份的收存状态（惰性创建）。字段与全局那套一一对应，只是按 camId 分了份。
+   *   buf / seen      收存的报警快照与去重集合
+   *   win             当前所处的窗口（结束汇总要用它的 rangeLabel）
+   *   timer/armedEnd  结束汇总的定时器与它对应的 endMs
+   *   flushedEnd      已收尾过的 endMs（定时器与心跳都想去收尾，靠它只发一次）
+   */
+  const camStore = new Map()
+  function camSlot(id) {
+    let st = camStore.get(id)
+    if (!st) {
+      st = { buf: [], seen: new Set(), win: null, timer: null, armedEnd: 0, flushedEnd: 0 }
+      camStore.set(id, st)
+    }
+    return st
+  }
+
+  /** 按 id 找一路通道配置（找不到返回 null） */
+  function camById(id) {
+    const list = camerasOf()
+    return (Array.isArray(list) ? list : []).find((c) => c && c.id === id) || null
+  }
+
+  /** 这条 record 所属通道此刻的通道静默状态 */
+  function recordCamSilent(record, now) {
+    const cam = camById(record && record.id)
+    return cam ? camSilentState(cam, now) : { active: false }
+  }
+
+  /**
+   * 静默收存用的报警快照。
+   * ⚠️ 刻意**不**收 faceThumb / thumb —— 那是几万字符的 dataURL，收进来会让
+   * 静默缓冲整体膨胀几个量级，而汇总与查岗都不展示图片内容（图另有 store 里的路径）。
+   * 相似度 faceScore 要收：汇总里「人脸命中」分区要显示「相似度 92%」，少了就只能列名字。
+   */
+  function silentSnapshot(record) {
+    return {
+      key: record.key,
+      time: record.time,
+      name: record.name,
+      type: record.type,
+      ratio: record.ratio,
+      faceName: record.faceName,
+      faceScore: record.faceScore,
+      counts: record.counts,
+      zoneName: record.zoneName,
+      dwellMs: record.dwellMs,
+      text: record.text
+    }
+  }
 
   /** 当前所处的静默窗口（开始/结束提醒、收尾文案都靠它定位）；null = 不在静默中 */
   let activeWin = null
@@ -594,8 +621,241 @@ export function useAlertPush(options, hooks = {}) {
             : `静默结束提醒已推送（${sent.join(' + ')}）`
         )
       }
+      /*
+       * 关键事件单独提醒（静默汇总）。
+       * 放在这里而不是 pushSilentSummary 内部：一个是"渠道分发"，
+       * 一个是"额外私聊"，混在一起将来加渠道会互相牵连。
+       * 汇总正文里已经含「人脸命中」单列分区（见 buildSilentSummary）。
+       */
+      pushDirectToUsers('summary', {
+        title: summary.title,
+        text: summary.plain,
+        html: summary.html || summary.plain
+      }).catch(() => {})
     }
     return summary
+  }
+
+  /* ==================== 通道级静默：收存 → 结束汇总 ==================== */
+
+  /**
+   * 排程某一路通道静默窗口的结束汇总。
+   * 与全局那套同构：不管窗口里有没有报警都排（宁可排了空跑，也别漏收尾）。
+   */
+  function scheduleCamFlush(camId, now = Date.now()) {
+    const st = camSlot(camId)
+    const s = camSilentState(camById(camId), now)
+    if (!s.active) {
+      if (st.timer) {
+        clearTimeout(st.timer)
+        st.timer = null
+      }
+      st.armedEnd = 0
+      st.win = null
+      return
+    }
+    if (st.timer && st.armedEnd === s.endMs) return
+    if (st.timer) {
+      clearTimeout(st.timer)
+      st.timer = null
+    }
+    st.win = s
+    st.armedEnd = s.endMs
+    // +800ms 与全局一致：让「到点」这件事在内层判定里也真的算过了（时段是左闭右开）
+    const wait = Math.max(1000, s.endMs - Date.now() + 800)
+    st.timer = setTimeout(() => {
+      st.timer = null
+      st.armedEnd = 0
+      flushCamSilent(camId, { endMs: s.endMs, window: s }).catch(() => {})
+    }, wait)
+  }
+
+  /**
+   * 通道静默收尾：把这一路攒下的事件汇总发出去。
+   *
+   * 三处与全局静默**刻意不同**：
+   *   1) **没有事件就不发**。全局静默即使一条都没有也要报「已结束」（否则用户会以为
+   *      静默卡住了）；但通道静默图的就是"这一路这段别吵我"，为"什么都没发生"
+   *      再补一条通知，等于把刚省下的打扰又还回去。
+   *   2) **只发给被静默的那几个渠道**。全局汇总发给全部已配置渠道；但通道静默只
+   *      静默了部分渠道，其余渠道这些事件早就实时收到了，再发一份就是重复打扰。
+   *   3) **不发「开始提醒」**。通道静默大多是按天固定时段，每天两条提醒太吵；
+   *      要确认是否生效，用 `/cams` 查（那里有实时状态）。
+   */
+  async function flushCamSilent(camId, opts = {}) {
+    const st = camSlot(camId)
+    const endMs = Number(opts.endMs) > 0 ? Number(opts.endMs) : Date.now()
+    /*
+     * 这批事件是在**哪个窗口**下被收存的 —— 用来决定汇总发给谁。
+     * 必须在下面清 st.win 之前取出来（清完就取不到了）。
+     */
+    const bufferedWin = st.win
+    // 定时器与心跳都想来收尾，谁先到谁发 —— 后到的看到 flushedEnd 就退出
+    if (!opts.test && endMs <= st.flushedEnd) return null
+    const buf = opts.test ? st.buf.slice() : st.buf.splice(0, st.buf.length)
+    if (!opts.test) {
+      st.seen.clear()
+      st.flushedEnd = Math.max(st.flushedEnd, endMs)
+      if (st.win && (!opts.window || st.win.endMs === opts.window.endMs)) st.win = null
+    }
+    if (!buf.length) return null
+
+    const cam = camById(camId)
+    const name = (cam && cam.name) || camId
+    /*
+     * 只发给**被静默的那几个渠道**：
+     *   1) 调用方显式给的窗口渠道（定时器 / 心跳都走这条）；
+     *   2) 收存这批事件时的窗口渠道 —— 临时静默会用 tempChannels，**不能**拿
+     *      cam.silent.channels（那是"定时时段静默哪几端"的配置）顶上：静态配置与实际
+     *      生效的窗口经常不是同一组，用错了就会把汇总发给早就实时收到过这些事件的那一端，
+     *      正是这里要避免的重复打扰；
+     *   3) 都没有（历史残留缓冲）才退回配置。
+     * restrictIds 还会再剔掉"没配置好"的渠道。
+     */
+    const targetChans =
+      (opts.window && opts.window.channels) ||
+      (bufferedWin && bufferedWin.channels) ||
+      opts.onlyIds ||
+      (cam && cam.silent && Array.isArray(cam.silent.channels) ? cam.silent.channels : null)
+    const ids = restrictIds(targetChans && targetChans.length ? targetChans : null)
+    if (!ids.length) return null
+
+    const startMs = opts.window
+      ? opts.window.startMs
+      : buf.reduce((m, r) => Math.min(m, r.time || endMs), endMs)
+    const summary = buildSilentSummary(buf, silentCfg(), {
+      startMs,
+      endMs,
+      variant: 'cam',
+      scopeName: name,
+      rangeLabel: opts.window ? opts.window.rangeLabel : ''
+    })
+    const sent = await pushSilentSummary(ids, summary)
+    if (!opts.test && sent.length) {
+      notify(`「${name}」通道静默结束汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
+    }
+    return summary
+  }
+
+  /**
+   * 通道静默的心跳：逐路检查窗口进出。
+   * 与全局那套（tickSilentWindow）同构 —— 签名比对 + 到点兜底补发，
+   * 只是**每路独立**：多路可能各处在不同的窗口里。
+   */
+  function tickCamSilent(now = Date.now()) {
+    const raw = camerasOf()
+    const list = Array.isArray(raw) ? raw : []
+    const alive = new Set()
+    list.forEach((cam) => {
+      if (!cam || !cam.id) return
+      alive.add(cam.id)
+      const st = camSlot(cam.id)
+      const s = camSilentState(cam, now)
+      const key = s.active ? `${s.temp ? 't' : 's'}:${s.endMs}` : ''
+      const prevKey = st.win ? `${st.win.temp ? 't' : 's'}:${st.win.endMs}` : ''
+      if (key === prevKey) return
+      /*
+       * 旧窗口刚走完、但定时器没跑到（休眠 / 卡顿 / 进程重启）→ 在这里补发。
+       * `!st.timer` 很关键：定时器故意排在 endMs+800ms，心跳完全可能先一步到，
+       * 不拦一下就会连发两条一模一样的汇总。
+       */
+      if (st.win && st.win.endMs <= now && st.win.endMs > st.flushedEnd && !st.timer) {
+        flushCamSilent(cam.id, { endMs: st.win.endMs, window: st.win }).catch(() => {})
+      }
+      if (!s.active) {
+        st.win = null
+        if (st.timer) {
+          clearTimeout(st.timer)
+          st.timer = null
+        }
+        st.armedEnd = 0
+        return
+      }
+      scheduleCamFlush(cam.id, now)
+    })
+    /*
+     * 通道被删掉 → 连同它的缓冲与定时器一起清掉。
+     * 不清的话：汇总迟早会发往一个已经不存在（或已被别的通道占用同名 id）的通道，
+     * 而且 Map 会随着反复增删通道无限长大。
+     */
+    for (const id of [...camStore.keys()]) {
+      if (alive.has(id)) continue
+      const st = camStore.get(id)
+      if (st.timer) clearTimeout(st.timer)
+      camStore.delete(id)
+    }
+  }
+
+  /**
+   * 开启某一路通道的临时静默（远程 `/csilent` 与设置页共用）。
+   * 与全局 startTempSilent 同构：渠道显式传空数组一律拒绝（**不**回落默认，
+   * 否则「一个都不选」反而静默掉了配置里的渠道，比不选还糟）。
+   * @returns {{ok:boolean, until?:number, reason?:string}}
+   */
+  function startCamTempSilent(camId, hours, channels, label, untilAt) {
+    const cam = camById(camId)
+    if (!cam) return { ok: false, reason: '找不到该监控通道' }
+    if (Array.isArray(channels) && !channels.length) {
+      return { ok: false, reason: '请至少选一个静默渠道 —— 一个都不选的话，静默不静默就没区别了' }
+    }
+    const now = Date.now()
+    let until = 0
+    if (Number(untilAt) > 0) {
+      until = Number(untilAt)
+      if (until <= now) return { ok: false, reason: '结束时间必须晚于当前时间' }
+    } else {
+      const h = Number(hours)
+      if (!Number.isFinite(h) || h <= 0) {
+        return { ok: false, reason: '请选择时长，或指定一个晚于当前时间的结束时刻' }
+      }
+      until = now + Math.min(h, 168) * 3600000
+    }
+    if (until - now > 7 * 24 * 3600000) return { ok: false, reason: '单次临时静默最长 7 天' }
+    const s = cam.silent && typeof cam.silent === 'object' ? cam.silent : (cam.silent = {})
+    s.tempUntil = until
+    /*
+     * 与全局一致，记下**开始时刻** —— 通道静默的汇总区间与将来的查岗都要用它；
+     * 重复下发（延长）时一并重置，因为用户说的是"从现在起再静默 N 小时"。
+     */
+    s.tempSince = now
+    if (Array.isArray(channels) && channels.length) s.tempChannels = channels.slice()
+    if (label) s.tempLabel = String(label).slice(0, 40)
+    // 立刻对齐窗口并排程（不等心跳那 30 秒，否则这几秒内的事件会被当成"没静默"实时推出去）
+    const st = camSlot(camId)
+    const win = camSilentState(cam, now)
+    st.win = win.active ? win : null
+    if (win.active) scheduleCamFlush(camId, now)
+    return { ok: true, until }
+  }
+
+  /**
+   * 提前结束某一路的临时静默。
+   * flush=true 时把已收存的汇总发出去（与全局 endTempSilent 一致）；
+   * 即使 flush=false 也要收尾 —— 否则心跳 30 秒后会再补一条。
+   */
+  function endCamTempSilent(camId, flush = true) {
+    const cam = camById(camId)
+    if (!cam) return { ok: false, reason: '找不到该监控通道' }
+    const s = cam.silent || {}
+    if (!Number(s.tempUntil)) return { ok: false, reason: '该通道当前没有临时静默' }
+    const st = camSlot(camId)
+    const win = st.win && st.win.temp ? st.win : null
+    s.tempUntil = 0
+    s.tempSince = 0
+    s.tempLabel = ''
+    if (st.timer) {
+      clearTimeout(st.timer)
+      st.timer = null
+    }
+    st.armedEnd = 0
+    // 临时静默底下可能还压着定时时段 → 立刻按新状态重排（否则中间空一截没人收尾）
+    const next = camSilentState(cam, Date.now())
+    st.win = next.active ? next : null
+    if (next.active) scheduleCamFlush(camId)
+    if (flush) {
+      return flushCamSilent(camId, { endMs: Date.now(), window: win }).then(() => ({ ok: true }))
+    }
+    return { ok: true }
   }
 
   /* ---------------- 免打扰「开启 / 结束」提醒（preNotify，默认开） ---------------- */
@@ -736,7 +996,17 @@ export function useAlertPush(options, hooks = {}) {
       onlyIds: opts.onlyIds
     })
     // sendDirect 成功时返回 { ok, reason }（reason 为空=全渠道成功，非空=部分失败说明），没有 sent 字段
-    if (r && r.ok) notify(r.reason ? `免打扰开始提醒已推送（${r.reason}）` : '免打扰开始提醒已推送')
+    if (r && r.ok) {
+      notify(r.reason ? `免打扰开始提醒已推送（${r.reason}）` : '免打扰开始提醒已推送')
+      /*
+       * 关键事件单独提醒（静默开始）。
+       * 试发（设置页「试发一条开始提醒」）不私聊打扰别人 —— 那个按钮只是看文案。
+       */
+      if (!opts.test) {
+        pushDirectToUsers('silence', { title: msg.title, text: msg.markdown, html: msg.html })
+          .catch(() => {})
+      }
+    }
     return r
   }
 
@@ -752,7 +1022,8 @@ export function useAlertPush(options, hooks = {}) {
     const useSlot = slot || hit || slots[0] || null
     // 试发时若正处在临时静默里，用临时静默的文案更贴近真实
     const win = currentWindow(Date.now())
-    return pushStartNotice(win && win.temp ? win : { temp: false }, useSlot, opts)
+    // test：这是"预览文案"，不是真的静默了 —— 别把关键事件单独提醒也发出去
+    return pushStartNotice(win && win.temp ? win : { temp: false }, useSlot, { ...opts, test: true })
   }
 
   /**
@@ -767,11 +1038,11 @@ export function useAlertPush(options, hooks = {}) {
       // 不在窗口里就拿最近一个时段造一个，方便看清楚「结束提醒」长什么样
       const s = readSlots()[0]
       if (s) {
-        const endMs = s.start < s.end ? slotBoundary(now, s.end, 0) : slotBoundary(now, s.end, 1)
+        const endMs = s.start < s.end ? slotBoundaryAt(now, s.end, 0) : slotBoundaryAt(now, s.end, 1)
         win = {
           key: `slot:${endMs}`,
           temp: false,
-          startMs: slotBoundary(now, s.start, 0),
+          startMs: slotBoundaryAt(now, s.start, 0),
           endMs,
           rangeLabel: `${min2hm(s.start)} ~ ${s.end < s.start ? '次日 ' : ''}${min2hm(s.end)}`,
           endLabel: min2hm(s.end),
@@ -796,6 +1067,11 @@ export function useAlertPush(options, hooks = {}) {
    */
   let silentHeartbeat = null
   function tickSilentWindow(now = Date.now()) {
+    /*
+     * 通道静默与全局静默各自独立，先跑通道那套 —— 下面的全局逻辑有好几处 early return，
+     * 把通道检查放在后面会被跳过（表现成"配了通道静默却永远不结算"）。
+     */
+    tickCamSilent(now)
     const win = currentWindow(now)
     const prev = activeWin
     const key = win ? win.key : ''
@@ -1413,6 +1689,11 @@ export function useAlertPush(options, hooks = {}) {
     flushedEndMs = 0
     silentBuffer.length = 0
     silentSeen.clear()
+    // 通道静默同理：缓冲、去重、定时器、窗口一并拆掉（"立刻安静下来"必须包含它）
+    camStore.forEach((st) => {
+      if (st.timer) clearTimeout(st.timer)
+    })
+    camStore.clear()
     pendingCount.value = 0
   }
 
@@ -1424,51 +1705,94 @@ export function useAlertPush(options, hooks = {}) {
     let queue = decisions.filter((d) => d.overflow && readCfg(d.id).overflowMode === 'merge')
 
     /*
-     * 全局静默时段：被选中的渠道在时段内「不实时推」，改为收存到 silentBuffer，
-     * 等时段结束统一发一条汇总。判定「该渠道本应收到」时忽略渠道级 quiet，
-     * 避免和这里的全局收存打架（全局优先级更高）。
-     * 临时静默（item 112）也走这里，只是渠道集合来自 silentState().channels。
+     * 静默收存。两个来源**取并集**：
+     *   · 全局静默（options.silent）—— 覆盖全通道，被选中的渠道在时段内不实时推；
+     *   · 通道静默（cam.silent）—— 只覆盖这一路，对指定的那几个渠道不实时推。
+     * 判定「该渠道本应收到」时忽略渠道级 quiet，避免和这里的收存打架
+     * （全局 / 通道静默的优先级都更高）。临时静默（全局的与通道的）走同一套判断，
+     * 只是渠道集合换成各自的 tempChannels。
      */
     const sState = silentState(now)
-    const quietChans = sState.temp
-      ? sState.channels || []
-      : (silentCfg().channels || [])
-    const suppressIds =
-      sState.active && quietChans.length
-        ? CHANNEL_DEFS.filter(
-            (d) => quietChans.includes(d.id) && checkChannel(d.id, record, now, true).ok
-          ).map((d) => d.id)
-        : []
+    const quietChans = sState.temp ? sState.channels || [] : (silentCfg().channels || [])
+    const camS = recordCamSilent(record, now)
+
+    /*
+     * 这条事件「本来能推」的渠道。ignoreQuiet=true 已经排除了"这一路自己关了某渠道"
+     * "变动幅度低于阈值"等本就不推的情况 —— 用它区分"被静默"和"本来就不推"，
+     * 免得把后者也算进收存，汇总里冒出一堆根本没打算推的事件。
+     */
+    const liveOk = CHANNEL_DEFS.filter((d) => checkChannel(d.id, record, now, true).ok).map((d) => d.id)
+    const byGlobal =
+      sState.active && quietChans.length ? liveOk.filter((id) => quietChans.includes(id)) : []
+    const byCam =
+      camS.active && camS.channels.length ? liveOk.filter((id) => camS.channels.includes(id)) : []
+
+    /*
+     * suppressIds 是**集合语义**（只用来把渠道从 send / queue 里剔掉），
+     * 所以两个来源重叠也不会"算两次"，这里不需要去重。
+     * ⚠️ 「这条事件归哪个汇总」**不由这个并集决定**，由下面那个 if 决定
+     * （byGlobal 非空就整条进整体汇总）。别把归属逻辑塞进这里 ——
+     * 曾经写过 `byCam` 里排除 byGlobal 的写法，那是彻底的死代码：
+     * 它只影响这个集合，看起来却像在实现"汇总归整体"，很能误导人。
+     */
+    const suppressIds = [...byGlobal, ...byCam]
     let buffered = false
     if (suppressIds.length) {
       send = send.filter((id) => !suppressIds.includes(id))
       queue = queue.filter((id) => !suppressIds.includes(id))
-      if (!silentSeen.has(record.key)) {
-        silentSeen.add(record.key)
-        silentBuffer.push({
-          key: record.key,
-          time: record.time,
-          name: record.name,
-          type: record.type,
-          ratio: record.ratio,
-          faceName: record.faceName,
-          counts: record.counts,
-          zoneName: record.zoneName,
-          dwellMs: record.dwellMs,
-          text: record.text
-        })
+      /*
+       * 归属「汇总归整体」：只要这条事件**有渠道被整体静默覆盖**，就整条进整体汇总，
+       * 通道汇总里不再出现它（否则同一条会在两个汇总里各出现一次）。
+       * 两个汇总的归属判据就这一处，别改成两个缓冲都写。
+       */
+      if (byGlobal.length) {
+        if (!silentSeen.has(record.key)) {
+          silentSeen.add(record.key)
+          silentBuffer.push(silentSnapshot(record))
+        }
+        scheduleSilentFlush()
+      } else {
+        // 只被通道静默 → 进这一路自己的汇总
+        const st = camSlot(record.id)
+        if (!st.seen.has(record.key)) {
+          st.seen.add(record.key)
+          st.buf.push(silentSnapshot(record))
+        }
+        scheduleCamFlush(record.id, now)
       }
-      scheduleSilentFlush()
       buffered = true
     }
 
     // 完全被静默收存（没有任何渠道在本条事件上实时发送 / 排队）→ 标记「静默待推送」
     if (buffered && !send.length && !queue.length) {
-      onState(
-        record.key,
-        'silent',
-        `静默时段（${sState.rangeLabel}）已收存，将于 ${sState.endLabel} 推送结束提醒 + 汇总`
-      )
+      const isGlobal = byGlobal.length > 0
+      const label = isGlobal ? sState.rangeLabel : camS.rangeLabel
+      const endLabel = isGlobal ? sState.endLabel : camS.endLabel
+      const scope = isGlobal ? '静默时段' : `通道静默（${record.name || record.id}）`
+      onState(record.key, 'silent', `${scope}（${label}）已收存，将于 ${endLabel} 推送结束汇总`)
+    }
+
+    /*
+     * 关键事件单独提醒（人脸命中）。
+     *
+     * ⚠️ 刻意**不受静默影响、也不依赖是否被收存**：静默的本意就是"别打扰"，
+     * 而这条开关存在的唯一理由恰恰是"静默了也想第一时间知道库内的人来了"。
+     * 若跟着静默一起收存，它就和普通报警没区别了，功能等于不存在。
+     * 只在**命中在库人脸**（有 faceName）时发 —— 陌生人脸不在此列，
+     * 否则门口路过一个人就打一条私聊，比不静默还吵。
+     */
+    if (record.type === 'face' && record.faceName) {
+      const shot = record.faceThumb || record.thumb || ''
+      const who = `${record.faceName}（相似度 ${Math.round((Number(record.faceScore) || 0) * 100)}%）`
+      pushDirectToUsers('face', {
+        image: shot,
+        caption: [
+          `🙂 <b>人脸命中 · ${tgEsc(record.name || '')}</b>`,
+          `认出：<b>${tgEsc(who)}</b>`,
+          `时间：${tgEsc(formatTime(record.time))}`
+        ].join('\n'),
+        text: `人脸命中 · ${record.name || ''} / ${who} / ${formatTime(record.time)}`
+      }).catch(() => {})
     }
 
     if (send.length) await deliver([record], false, send)
@@ -1577,6 +1901,63 @@ export function useAlertPush(options, hooks = {}) {
     }
     if (key && cb) cb(key, 'fail', reason)
     return { ok: false, reason }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 关键事件「单独提醒」：由机器人私聊推给指定用户                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 关键事件的接收人 / 事件开关都走 useTelegram 里的**纯函数**（同一份定义）。
+   * 设置页显示"将推送给 N 人"用的也是那两个函数 —— 否则界面说 3 人、
+   * 实际发 2 条这种事迟早发生。
+   */
+
+  /**
+   * 把一条关键事件私聊推给「单独提醒」的接收人。
+   *
+   * 刻意**逐个串行**：Telegram 对同一 Bot 的连发有限流，接收人一多，
+   * 并发轰过去一旦被 429 拒掉，后面的就全丢；慢一点但一条不落更划算。
+   * 单个接收人失败不影响其他人，最后把失败原因汇总进 notify。
+   *
+   * @param {'silence'|'summary'|'face'} kind 事件类别（决定要不要发）
+   * @param {object} payload { title, text, html, image, caption }
+   *        image 存在时发图片（caption 优先于 html/text）；否则发纯文本。
+   */
+  async function pushDirectToUsers(kind, payload = {}) {
+    let tg = null
+    try {
+      tg = readCfg('tg')
+    } catch (e) {
+      return { ok: false, sent: 0, reason: '读取 Telegram 配置失败' }
+    }
+    if (!directPushEventOn(tg, kind)) return { ok: false, sent: 0, reason: '该类关键事件未开启单独提醒' }
+    if (!isReady('tg')) return { ok: false, sent: 0, reason: 'Telegram 未启用或凭据不全' }
+    const to = directPushRecipients(tg)
+    if (!to.length) return { ok: false, sent: 0, reason: '没有可用的接收人' }
+
+    // 文本消息上限 4096，留出转义与余量；图片说明上限 1024
+    const body = String(payload.html || plainFromMarkdown(payload.text || payload.title || '')).slice(0, 3500)
+    const caption = String(payload.caption || body).slice(0, 1024)
+    let sent = 0
+    const fails = []
+    for (const chatId of to) {
+      const cfg = { ...tg, chatId }
+      try {
+        if (payload.image) await sendTelegramAlarm(cfg, { image: payload.image, caption, mode: tg.sendMode })
+        else await sendTelegramText(cfg, body)
+        sent += 1
+      } catch (e) {
+        /*
+         * 刻意**不计入推送统计**（usePushStats）：这条消息是同一事件的
+         * 补充副本，主渠道那边已经计过一次；再计一遍会让"累计推送/成功率"
+         * 随着接收人数量膨胀，那个数字就不再代表报警量了。
+         */
+        fails.push(`${chatId}：${(e && e.message) || '未知错误'}`)
+      }
+    }
+    if (fails.length) notify(`关键事件单独提醒有 ${fails.length} 个接收人失败：${fails.join('；')}`)
+    return { ok: sent > 0, sent, reason: fails.join('；') }
   }
 
   /* ------------------------------------------------------------------ */
@@ -1931,8 +2312,32 @@ export function useAlertPush(options, hooks = {}) {
     pendingCount,
     rateLimit,
     channels,
+    /** 关键事件单独提醒（私聊推送）；导出来是为了单测与设置页「试发」 */
+    pushDirectToUsers,
+    directPushRecipients,
+    /**
+     * 通道静默：立即汇总 / 状态一览 / 临时静默开关。
+     * 指令层与设置页都从这里取 —— 各写一份迟早会漂移（典型症状：界面显示静默中、
+     * 实际调度器读的是另一个字段，于是"看着配好了却没生效"）。
+     */
+    flushCamSilent,
+    camSilentList: (now) => camSilentOverview(camerasOf(), now),
+    startCamTempSilent,
+    endCamTempSilent,
     stopAll
   }
+}
+
+/**
+ * Telegram parse_mode=HTML 只需要转义这三个字符（其余原样）。
+ * 提到模块级是因为现在有三处在拼 TG HTML：人脸特写、关键事件私聊提醒、
+ * 未来还会更多 —— 每处各写一份转义迟早会漂移。
+ */
+function tgEsc(s) {
+  return String(s === undefined || s === null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 /** 把 markdown 里的标记去掉，得到一个可读的纯文本（Telegram 兜底用） */
