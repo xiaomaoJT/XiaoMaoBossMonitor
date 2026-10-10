@@ -131,28 +131,12 @@
             </div>
           </label>
 
+          <!--
+            「保持登录 30 天」已取消（公用值守机免密风险太大）——
+            现在会话只存 sessionStorage：关掉标签页即失效。
+            这一行只剩大小写锁定提示，没有勾选项了。
+          -->
           <div class="opts">
-            <button
-              type="button"
-              class="check"
-              :class="{ on: remember }"
-              :aria-pressed="String(remember)"
-              @click="remember = !remember"
-            >
-              <i class="box">
-                <svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
-                  <path
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="3"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    d="M4.5 12.5 9.5 17.5 19.5 6.5"
-                  />
-                </svg>
-              </i>
-              保持登录 {{ AUTH_REMEMBER_DAYS }} 天
-            </button>
             <span class="caps" v-if="capsOn">大写锁定已开启</span>
           </div>
 
@@ -192,7 +176,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BRAND } from '../config/defaults'
-import { AUTH_REMEMBER_DAYS, AUTH_REMEMBER_KEY } from '../config/auth'
 import { DEFAULT_USERNAME, authState, detectBackend, lockSecondsLeft, login } from '../composables/useAuth'
 
 const emit = defineEmits(['success'])
@@ -250,31 +233,6 @@ const shaking = ref(false)
 const capsOn = ref(false)
 const now = ref(Date.now())
 
-/** 「保持登录」记在上次的选择上（共用机器上取消过就别自动勾回来） */
-const remember = ref(readRememberPref())
-let rememberTimer = null
-watch(remember, (v) => {
-  clearTimeout(rememberTimer)
-  rememberTimer = setTimeout(() => writeRememberPref(v), 100)
-})
-
-function readRememberPref() {
-  try {
-    const v = typeof localStorage !== 'undefined' ? localStorage.getItem(AUTH_REMEMBER_KEY) : null
-    return v === null ? true : v !== '0'
-  } catch (e) {
-    return true
-  }
-}
-
-function writeRememberPref(v) {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(AUTH_REMEMBER_KEY, v ? '1' : '0')
-  } catch (e) {
-    /* 存不下就用默认值，不影响登录 */
-  }
-}
-
 /* ---------- 时钟 / 锁定倒计时 ---------- */
 let ticker = null
 onMounted(() => {
@@ -295,7 +253,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   clearInterval(ticker)
-  clearTimeout(rememberTimer)
   ticker = null
 })
 
@@ -372,7 +329,7 @@ let programmaticClear = false
 async function submit() {
   if (authState.busy || lockLeft.value > 0) return
   // 先取口令再登录：明文只在这里出现一次，交给 login() 变成摘要
-  const ok = await login(username.value, password.value, remember.value)
+  const ok = await login(username.value, password.value)
   if (ok) {
     emit('success', authState.user)
     return
@@ -867,45 +824,17 @@ watch([username, password], () => {
   background: var(--accent-soft);
 }
 
+/*
+ * 「保持登录」勾选框已取消，这一行现在只承载大小写锁定提示（靠右）。
+ * 保留 min-height 是为了勾选框消失后行高不塌，密码框位置不跳。
+ */
 .opts {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 10px;
   margin: 4px 0 2px;
   min-height: 20px;
-}
-
-.check {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-  color: var(--text-dim);
-  padding: 2px 0;
-  transition: color 0.15s ease;
-}
-
-.check:hover {
-  color: var(--text-soft);
-}
-
-.check .box {
-  width: 15px;
-  height: 15px;
-  border-radius: 5px;
-  border: 1px solid var(--line-strong);
-  display: grid;
-  place-items: center;
-  color: transparent;
-  transition: all 0.16s ease;
-}
-
-.check.on .box {
-  color: #fff;
-  border-color: color-mix(in srgb, var(--accent) 75%, transparent);
-  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 78%, #000));
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
 .caps {
@@ -1127,10 +1056,6 @@ watch([username, password], () => {
 
   .submit {
     height: 50px;
-  }
-
-  .check {
-    padding: 6px 0;
   }
 }
 

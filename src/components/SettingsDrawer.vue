@@ -1474,8 +1474,8 @@
                 <strong>待录入人脸（{{ allPendingFaces.length }}）</strong>
                 <em>点「录入」建档并自动编号，之后可以在人脸库里改名</em>
               </span>
-              <div class="face-grid">
-                <div class="face-card pending" v-for="pf in allPendingFaces" :key="pf.id">
+              <div class="face-grid" ref="pendingGridEl">
+                <div class="face-card pending" v-for="pf in pagedPending" :key="pf.id">
                   <img :src="pf.thumb" alt="待录入人脸" />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <div class="face-acts">
@@ -1483,6 +1483,11 @@
                     <button class="mini-btn ghost" @click="doIgnorePending(pf)">忽略</button>
                   </div>
                 </div>
+              </div>
+              <div class="face-pager" v-if="pendingPageCount > 1">
+                <button class="mini-btn ghost" :disabled="pendingPage <= 1" @click="pendingPage -= 1">上一页</button>
+                <span class="face-page-text">{{ pendingPage }} / {{ pendingPageCount }}</span>
+                <button class="mini-btn ghost" :disabled="pendingPage >= pendingPageCount" @click="pendingPage += 1">下一页</button>
               </div>
               <div class="face-acts">
                 <button class="mini-btn danger" @click="doIgnoreAllPending">全部忽略</button>
@@ -1502,8 +1507,8 @@
                 </strong>
                 <em>报警推送里显示的就是这里的名字</em>
               </span>
-              <div class="face-grid" v-if="faceLibOpen">
-                <div class="face-card" v-for="f in faceLib" :key="f.id">
+              <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
+                <div class="face-card" v-for="f in pagedFaceLib" :key="f.id">
                   <img v-if="f.thumb" :src="f.thumb" alt="人脸" />
                   <div class="face-meta" v-if="faceRenameId === f.id">
                     <input
@@ -1520,6 +1525,11 @@
                   </div>
                 </div>
                 <p class="hint tight" v-if="!faceLib.length">人脸库还是空的：先让摄像头拍到人，出现的脸会进「待录入」。</p>
+              </div>
+              <div class="face-pager" v-if="faceLibOpen && libPageCount > 1">
+                <button class="mini-btn ghost" :disabled="libPage <= 1" @click="libPage -= 1">上一页</button>
+                <span class="face-page-text">{{ libPage }} / {{ libPageCount }}</span>
+                <button class="mini-btn ghost" :disabled="libPage >= libPageCount" @click="libPage += 1">下一页</button>
               </div>
               <div class="face-acts" v-if="faceLibOpen && faceLib.length">
                 <button class="mini-btn danger" @click="doClearFaces">清空人脸库</button>
@@ -3061,7 +3071,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   BRAND,
   camSilentState,
@@ -4306,7 +4316,80 @@ async function doClearFaces() {
 }
 
 watch(faceLibOpen, (v) => {
-  if (v) refreshFaces().catch(() => {})
+  if (v) {
+    refreshFaces().catch(() => {})
+    libPage.value = 1
+  }
+})
+
+/* ---------- 人脸库分页：默认最多 4 行，超出翻页 ----------
+ * 为什么不写死"每页 N 个"：卡片宽度固定 88px，**一行能放几个随抽屉宽度变**
+ * （桌面宽、手机窄），所以每页数量必须现算 —— 读 grid 实际布局出的列数
+ * （`auto-fill` 会把空轨道也铺满一行，因此就算没几张脸也能量到真实列数），
+ * 再乘 4 行。已录入 / 待录入两张网格**各自独立分页**，互不影响。
+ */
+const FACE_ROWS = 4
+const libGridEl = ref(null)
+const pendingGridEl = ref(null)
+/** 上次量到的列数（读不到时保留旧值；初值给 6 只是兜底，挂载后会立刻校准） */
+const libCols = ref(6)
+const pendingCols = ref(6)
+const libPage = ref(1)
+const pendingPage = ref(1)
+
+/** 读 grid 真正布局出来的列数（`gridTemplateColumns` 的已解析值就是各轨道宽度） */
+function countCols(el) {
+  if (!el) return 0
+  try {
+    const tpl = getComputedStyle(el).gridTemplateColumns || ''
+    return tpl.split(' ').filter((s) => s && s !== 'none').length
+  } catch (e) {
+    return 0
+  }
+}
+
+function measureFaceCols() {
+  const lc = countCols(libGridEl.value)
+  if (lc) libCols.value = lc
+  const pc = countCols(pendingGridEl.value)
+  if (pc) pendingCols.value = pc
+}
+
+const libPageSize = computed(() => Math.max(1, libCols.value * FACE_ROWS))
+const pendingPageSize = computed(() => Math.max(1, pendingCols.value * FACE_ROWS))
+const libPageCount = computed(() =>
+  Math.max(1, Math.ceil((faceLib.value.length || 0) / libPageSize.value))
+)
+const pendingPageCount = computed(() =>
+  Math.max(1, Math.ceil((allPendingFaces.value.length || 0) / pendingPageSize.value))
+)
+const pagedFaceLib = computed(() => {
+  const p = Math.min(Math.max(1, libPage.value), libPageCount.value)
+  return faceLib.value.slice((p - 1) * libPageSize.value, p * libPageSize.value)
+})
+const pagedPending = computed(() => {
+  const p = Math.min(Math.max(1, pendingPage.value), pendingPageCount.value)
+  return allPendingFaces.value.slice((p - 1) * pendingPageSize.value, p * pendingPageSize.value)
+})
+
+/** 数据变短（删除 / 录入后）当前页可能越界，拉回最后一页，避免停在空白页 */
+watch(libPageCount, (n) => {
+  if (libPage.value > n) libPage.value = n
+})
+watch(pendingPageCount, (n) => {
+  if (pendingPage.value > n) pendingPage.value = n
+})
+
+/** 网格可见性或数据变化后重新量列数（不可见时量到的是 "none"） */
+watch([faceLibOpen, faceLib, allPendingFaces], () => nextTick(measureFaceCols))
+
+onMounted(() => {
+  // 抽屉宽度会随窗口 / 横竖屏变化，列数跟着变 → 重新量一次并让分页自动纠正
+  window.addEventListener('resize', measureFaceCols)
+  nextTick(measureFaceCols)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', measureFaceCols)
 })
 
 /** 区域归属：把各通道的区域汇总成一张列表，方便统一改名 / 开关 */
@@ -5908,9 +5991,15 @@ function loadHidden() {
 }
 
 /* ---------- 人脸库 ---------- */
+/*
+ * 固定卡片宽度 88px + auto-fill 自动铺列：一行几列随抽屉宽度变。
+ * 脚本据此（读 auto-fill 解析出的列数）算「每页 = 列数 × 4 行」，超出翻页。
+ * 用 grid 而不是 flex-wrap，是为了让"列数"可被稳定读出（空轨道也会铺出来）。
+ */
 .face-grid {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 88px);
+  justify-content: start;
   gap: 8px;
   width: 100%;
   margin-top: 4px;
@@ -5925,6 +6014,27 @@ function loadHidden() {
   border-radius: 10px;
   border: 1px solid var(--line-soft);
   background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+
+/* 空态提示要跨整行，否则在 grid 里会被塞进一个 88px 的格子 */
+.face-grid > .hint {
+  grid-column: 1 / -1;
+}
+
+/* 分页条：超过 4 行时才出现 */
+.face-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.face-page-text {
+  font-size: 12px;
+  color: var(--text-dim-2);
+  min-width: 44px;
+  text-align: center;
 }
 
 .face-card.pending {
@@ -6216,6 +6326,14 @@ function loadHidden() {
   padding: 0 8px;
   border-radius: 7px;
   font-size: 12px;
+  /*
+   * 不参与 flex 收缩 + 不换行：`.tag` 常作为 `.opt`（flex 行）里的尾部按钮，
+   * 默认 flex-shrink:1 会在窄抽屉 / 手机端被挤到比文字还窄，文字折成两行后
+   * 塞在固定 24px 高里就**溢出边框**（「从后端拉取」按钮踩过这个）。
+   * 固定按内容宽度 + nowrap，放不下时整行换行（移动端 .opt 已是 flex-wrap）。
+   */
+  flex: 0 0 auto;
+  white-space: nowrap;
   color: var(--text-dim);
   background: var(--panel-2);
   border: 1px solid var(--line);

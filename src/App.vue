@@ -953,6 +953,12 @@ async function backendPayload() {
   return {
     options: { ...options },
     cameras: cameras.value,
+    /*
+     * 「显示 / 隐藏」状态（hiddenIds）必须一起推上去 —— 它决定哪几路真正在看。
+     * 不带它的话：A 机把 4 路隐藏、只留 3 路，B 机从后端拉回来会得到"7 路全开"
+     * （那 4 个 id 从没进过后端），用户会以为"只开了 3 路"的配置没被同步。
+     */
+    hiddenIds: [...hiddenIds.value],
     faces: faces.map((f) => ({
       name: f.name,
       vector: f.vector,
@@ -987,7 +993,12 @@ const backendSyncSignature = computed(() =>
       channels: c.channels,
       zones: c.zones,
       roi: c.roi
-    }))
+    })),
+    /*
+     * 「显示 / 隐藏」也要进指纹：否则在设置页把某路隐藏之后，
+     * 指纹没变 → 不会触发自动重推 → 后端那份还是旧的开合状态。
+     */
+    hiddenIds: hiddenIds.value
   })
 )
 void backendSyncSignature
@@ -1230,6 +1241,24 @@ async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
   }
 
   await applyPulledConfig(data, reason)
+
+  /*
+   * 用户**手动确认过**的那一次，采用完直接整页重载。
+   *
+   * 为什么不是就地切换就好：采用是"停掉一切 → 整体换配置 → 落盘"的一大串动作，
+   * 就地替换后仍可能残留半新半旧的状态（自由布局的 rect、播放器句柄、
+   * hiddenIds、统计面板的缓存…），个别细节要等下一次交互才纠正过来，
+   * 看起来就像"拉取没拉干净"。整页重载是最省心、也最可预期的收口。
+   *
+   * 只重载 confirm===true 这条路径（用户点「从后端拉取」并确认 / 点「以后端为准」）：
+   * 「B 机是空大屏 → 自动接管」走的是 confirm:false，不能重载 ——
+   * 否则每台新机器首次打开都会白刷一次页面。
+   *
+   * 延迟 700ms：让「已从后端拉取配置（N 路通道）」的提示先露个面再刷。
+   */
+  if (confirm && typeof location !== 'undefined' && typeof location.reload === 'function') {
+    setTimeout(() => location.reload(), 700)
+  }
   return true
 }
 
@@ -1310,7 +1339,18 @@ async function applyPulledConfig(data, reason = 'manual') {
     const fixedUrl = await resolveBackendUrl(options.backend.url)
     if (fixedUrl) options.backend.url = fixedUrl
 
-    hiddenIds.value = []
+    /*
+     * 「显示 / 隐藏」状态也要跟着后端走 —— 这正是「A 机只显示 3 路、B 机拉回来
+     * 却 7 路全开」的根因：hiddenIds 原来是纯本机状态，从没进过配置。
+     *
+     * 用本机当前 cameras 过滤一遍：后端那份可能带着本机没有的通道 id（换过机器的
+     * 老配置），留着它们没有意义（visibleCameras 是按 id 过滤的，不会报错，
+     * 但会把列表撑脏）。老后端不带这个字段 → 回落成空数组（= 全部显示，与旧行为一致）。
+     */
+    const validCamIds = new Set(cameras.value.map((c) => c.id))
+    hiddenIds.value = (Array.isArray(data.hiddenIds) ? data.hiddenIds : []).filter((id) =>
+      validCamIds.has(id)
+    )
     zoomIndex.value = null
     if (layoutKey.value === 'free') ensureFreeRects()
 

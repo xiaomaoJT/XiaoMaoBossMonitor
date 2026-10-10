@@ -29,11 +29,13 @@
  *   之后上传的只有 sha256(`H1:nonce`)；本地兜底比的也是摘要。
  *   所以抓包、控制台、localStorage 里都翻不到密码本身。
  *
- * 会话持久化：
- *   - 勾选「保持登录」→ localStorage，30 天；
- *   - 不勾选        → sessionStorage，12 小时（关掉标签页即失效）。
+ * 会话持久化：**只存 sessionStorage**（12 小时，关掉标签页即失效）。
+ *   —— 原来还有一条「保持登录 30 天」的长效分支（localStorage），已按需求**取消**：
+ *      公用值守机上"关掉浏览器 30 天还免密"风险太大。
  *   后端签发的会话在恢复时会再向服务端 /api/auth/verify 核对一次；
  *   服务端明确说失效就清掉，只是**连不上**则沿用本地会话（离线容忍）。
+ *   ⚠️ 升级后要**主动清掉**历史遗留的 localStorage 会话（旧的长效 token），
+ *      否则老机器上那枚 30 天 token 会一直躺着（见 purgeLegacyLocalSession）。
  */
 import { reactive } from 'vue'
 import { DEFAULT_BACKEND_URL, STORAGE_KEY } from '../config/defaults.js'
@@ -42,7 +44,6 @@ import {
   AUTH_KEY,
   AUTH_PROBE_TIMEOUT_MS,
   AUTH_PROOF_ALGO,
-  AUTH_REMEMBER_DAYS,
   AUTH_SESSION_HOURS,
   AUTH_SESSION_KEY,
   DEFAULT_AUTH,
@@ -79,8 +80,6 @@ export const authState = reactive({
   backendReachable: false,
   /** 会话到期时刻（毫秒，0 = 未知） */
   expiresAt: 0,
-  /** 是否勾选了「保持登录」 */
-  remember: true,
   /** 错误提示（红） */
   error: '',
   /** 中性提示（灰 / 蓝） */
@@ -140,39 +139,31 @@ function removeKey(store, key) {
   }
 }
 
-/** 读回当前会话（先看「保持登录」那份，再看标签页级那份） */
+/** 读回当前会话（只认标签页级那份 —— 长效登录已取消） */
 export function readSession() {
-  const a = readKey(area('local'), AUTH_KEY)
-  const b = readKey(area('session'), AUTH_SESSION_KEY)
-  const s = a || b
+  const s = readKey(area('session'), AUTH_SESSION_KEY)
   if (!s) return null
   return {
     token: String(s.token || ''),
     user: String(s.user || ''),
     expiresAt: Number(s.expiresAt) || 0,
     via: String(s.via || 'local'),
-    backendUrl: String(s.backendUrl || ''),
-    remember: s.remember !== false
+    backendUrl: String(s.backendUrl || '')
   }
 }
 
-function commitSession(session, remember) {
+function commitSession(session) {
   const payload = {
     token: session.token || '',
     user: session.user || '',
     expiresAt: session.expiresAt || 0,
     via: session.via || 'local',
     backendUrl: session.backendUrl || '',
-    remember: !!remember,
     at: Date.now()
   }
-  if (remember) {
-    writeKey(area('local'), AUTH_KEY, payload)
-    removeKey(area('session'), AUTH_SESSION_KEY)
-  } else {
-    writeKey(area('session'), AUTH_SESSION_KEY, payload)
-    removeKey(area('local'), AUTH_KEY)
-  }
+  // 只写标签页级；顺手清掉历史遗留的长效会话
+  writeKey(area('session'), AUTH_SESSION_KEY, payload)
+  removeKey(area('local'), AUTH_KEY)
 }
 
 function clearSession() {
@@ -180,12 +171,18 @@ function clearSession() {
   removeKey(area('session'), AUTH_SESSION_KEY)
 }
 
-/** 有效期：勾选保持登录 = N 天，否则 = N 小时 */
-function ttlOf(remember) {
-  const ms = remember
-    ? AUTH_REMEMBER_DAYS * 24 * 3600 * 1000
-    : AUTH_SESSION_HOURS * 3600 * 1000
-  return Date.now() + ms
+/**
+ * 清掉「保持登录」时代遗留在 localStorage 里的长效会话。
+ * 恢复会话时调一次：不主动清的话，老机器上那枚 30 天 token 虽然已不再被读取，
+ * 但会一直躺在 localStorage 里（换回旧版本又会被认），属于该清的残留。
+ */
+function purgeLegacyLocalSession() {
+  removeKey(area('local'), AUTH_KEY)
+}
+
+/** 会话有效期：固定 N 小时（只存标签页级，关掉标签页即失效） */
+function ttlOf() {
+  return Date.now() + AUTH_SESSION_HOURS * 3600 * 1000
 }
 
 /* ==================== 后端探测 ==================== */
@@ -406,7 +403,6 @@ function adopt(session, notice = '') {
   authState.mode = session.via || 'local'
   authState.expiresAt = Number(session.expiresAt) || 0
   authState.backendUrl = session.backendUrl || authState.backendUrl || ''
-  authState.remember = session.remember !== false
   authState.notice = notice
   authState.error = ''
   return true
@@ -416,10 +412,9 @@ function adopt(session, notice = '') {
  * 登录。
  * @param {string} username
  * @param {string} password
- * @param {boolean} remember 勾选「保持登录」→ 会话存 localStorage（30 天）
  * @returns {Promise<boolean>} 是否通过
  */
-export async function login(username, password, remember = true) {
+export async function login(username, password) {
   if (authState.busy) return false
   const now = Date.now()
   if (authState.lockedUntil > now) {
@@ -459,8 +454,7 @@ export async function login(username, password, remember = true) {
           username: u,
           nonce: String(ch.body.nonce),
           // proof = sha256(`H1:nonce`)：报文里没有密码，也没有可重放的固定值
-          proof: loginProof(h1, ch.body.nonce),
-          remember: !!remember
+          proof: loginProof(h1, ch.body.nonce)
         },
         timeout: AUTH_FETCH_TIMEOUT_MS
       })
@@ -482,7 +476,7 @@ export async function login(username, password, remember = true) {
         session = {
           token: String(r.body.token),
           user: String(r.body.user || u),
-          expiresAt: Number(r.body.expiresAt) || ttlOf(remember),
+          expiresAt: Number(r.body.expiresAt) || ttlOf(),
           via: 'backend',
           backendUrl: be.base
         }
@@ -526,7 +520,7 @@ export async function login(username, password, remember = true) {
       session = {
         token: '',
         user: u,
-        expiresAt: ttlOf(remember),
+        expiresAt: ttlOf(),
         via: backendDown && be ? 'local-fallback' : 'local',
         backendUrl: be ? be.base : ''
       }
@@ -534,7 +528,7 @@ export async function login(username, password, remember = true) {
     }
 
     resetFail()
-    commitSession(session, remember)
+    commitSession(session)
     return adopt(session, authState.notice)
   } finally {
     authState.busy = false
@@ -554,6 +548,8 @@ export async function restoreSession() {
    * 否则登录页会先按前端模式渲染一帧再跳成遮罩。
    */
   refreshBackendMode()
+  // 取消长效登录：顺手清掉历史遗留的 localStorage 会话（不再读它，但要清干净）
+  purgeLegacyLocalSession()
   const s = readSession()
 
   if (!s) {

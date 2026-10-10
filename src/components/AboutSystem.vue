@@ -120,7 +120,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { BRAND } from '../config/defaults'
-import { AUTH_REMEMBER_DAYS } from '../config/auth'
 import {
   authModeText,
   authState as sessionState,
@@ -500,11 +499,7 @@ const sections = computed(() => [
         v: authModeText(sessionState),
         tone: sessionState.mode === 'backend' ? 'ok' : sessionState.mode === 'local' ? '' : 'warn'
       },
-      { k: '会话到期', v: expiryText(sessionState.expiresAt) },
-      {
-        k: '保持登录',
-        v: sessionState.remember ? `是（${AUTH_REMEMBER_DAYS} 天）` : '否（关掉标签页即失效）'
-      }
+      { k: '会话到期', v: expiryText(sessionState.expiresAt) }
     ]
   },
   {

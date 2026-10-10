@@ -55,17 +55,16 @@
  *   （前端那份只当离线兜底），必要时再上真正的会话鉴权（HMAC/TLS）。
  */
 
-/** localStorage 键名：勾选「保持登录」时会话存这里（关掉浏览器仍在） */
+/**
+ * localStorage 键名：**历史遗留的长效会话**（「保持登录 30 天」时代用的）。
+ * 长效登录已按需求取消，现在不再往里写；保留这个常量只为在升级时把它**清掉**
+ * （见 useAuth 的 purgeLegacyLocalSession）—— 不清的话、老机器上那枚 30 天 token
+ * 会一直躺在 localStorage 里，换回旧版本又会被认。
+ */
 export const AUTH_KEY = 'monitor-wall-auth-v1'
 
-/** sessionStorage 键名：不勾选「保持登录」时存这里（关掉标签页即失效） */
+/** sessionStorage 键名：现在会话**只**存这里（关掉标签页即失效） */
 export const AUTH_SESSION_KEY = 'monitor-wall-auth-session-v1'
-
-/**
- * 「保持登录」这个勾选框本身的记忆（1 / 0）。
- * 共用机器上有人特意取消勾选，下次打开不该又给他勾回来。
- */
-export const AUTH_REMEMBER_KEY = 'monitor-wall-auth-remember-v1'
 
 /**
  * 默认账号 + **口令摘要**（不是密码本身）。
@@ -82,10 +81,7 @@ export const DEFAULT_AUTH = {
   passwordHash: '16cf0cb21f9f2ac4a8a029a18b987593194494f8217477b6a08efa0cb99903fe'
 }
 
-/** 勾选「保持登录」时的会话有效期（天） */
-export const AUTH_REMEMBER_DAYS = 30
-
-/** 不勾选「保持登录」时的会话有效期（小时） */
+/** 会话有效期（小时）：会话只存标签页级，关掉标签页即失效 */
 export const AUTH_SESSION_HOURS = 12
 
 /**
