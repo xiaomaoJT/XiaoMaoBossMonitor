@@ -1317,11 +1317,24 @@ async function applyPulledConfig(data, reason = 'manual') {
     // 渠道级监听名单跟着通道级开关走（后端那份可能来自更老的版本）
     syncChannelCameras(cameras.value, options)
 
-    // 人脸库整体替换（失败不阻断：通道与凭据已经可用，人要另说的是另一件事）
+    /*
+     * 人脸库整体替换（失败不阻断：通道与凭据已经可用，人要另说的是另一件事）。
+     *
+     * ⚠️ 注意 `skipped`：后端那份底库是**空的**、而本机有人的时候，
+     *    replaceFaces 会**保住本机**（见 useFaceLib.replaceFaces 的说明）——
+     *    「以后端为准」不等于"以后端的空为准"。这时候必须让用户知道，
+     *    否则界面显示 3 人、后端认为 0 人，两边对同一件事各说一套。
+     */
+    let facesSkippedLocal = 0
     try {
       const n = (data.faces || []).length
-      await replaceFaces(data.faces || [])
-      if (n) console.log(`👤 人脸库已从后端拉取：${n} 人`)
+      const r = await replaceFaces(data.faces || [])
+      if (r && r.skipped) {
+        facesSkippedLocal = Number(r.count) || 0
+        console.warn(`⚠️  后端人脸库是空的，本机 ${facesSkippedLocal} 人已保留（没被清空）`)
+      } else if (n) {
+        console.log(`👤 人脸库已从后端拉取：${n} 人`)
+      }
     } catch (e) {
       console.warn('⚠️  人脸库拉取失败：', (e && e.message) || e)
     }
@@ -1346,7 +1359,11 @@ async function applyPulledConfig(data, reason = 'manual') {
     setTimeout(() => tileRefs.forEach((t) => t && t.reconnect()), 80)
 
     const label = reason === 'empty' || reason === 'auto' ? '已接管后端配置' : '已从后端拉取配置'
-    showToast(`${label}（${cameras.value.length} 路通道）`)
+    showToast(
+      `${label}（${cameras.value.length} 路通道）` +
+        // 人脸库被保住时要说清楚：否则"拉完人还在"看起来像没生效
+        (facesSkippedLocal ? ` · 后端人脸库为空，本机 ${facesSkippedLocal} 人已保留` : '')
+    )
   } finally {
     applyingRemote = false
   }

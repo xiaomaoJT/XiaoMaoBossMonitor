@@ -51,6 +51,13 @@ export const pullAt = ref(0)
 export const localRev = ref(0)
 /** 上一次推送把别的设备的改动覆盖掉了（服务端回执 overwrote） */
 export const pushOverwrote = ref(false)
+/**
+ * 上一次推送里，后端**跳过了**这份「空的人脸库」（服务端回执 facesSkipped）。
+ * 场景：本机底库是空的（新机器 / 刚清过站点数据），而后端还有 N 个人 ——
+ * 后端会保住自己那份不被人推空。这件事必须回执出来，
+ * 否则用户只看到"同步成功"，却不知道自己的本机底库与后端已经不一致了。
+ */
+export const pushFacesSkipped = ref(false)
 
 const SYNC_REV_KEY = 'monitor-wall-sync-rev-v1'
 
@@ -227,6 +234,7 @@ export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
     // 推送成功 = 本机这份配置已经与后端对齐到这个版本
     markSynced(syncRev.value)
     pushOverwrote.value = !!data.overwrote
+    pushFacesSkipped.value = !!data.facesSkipped
     return { ok: true, data }
   } catch (e) {
     syncState.value = 'error'

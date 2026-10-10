@@ -16,6 +16,26 @@
  *   - 推送：三端各自的成功 / 失败次数 → 成功率
  *   - 识别：出现过的人次、唯一人数（按人名去重）
  *   - 通道：断线 / 恢复次数
+ *
+ * 小时桶（v1 存档的增量，2026-10-10 加）
+ * ----------------------------------------------------------------------------
+ * 统计页的热力图是「日期 × 小时」的，光有按天汇总画不出来 —— 缺的是**小时维度**。
+ * 所以每天额外挂一层 `hours`：
+ *
+ *   hours.alarms[24]        每个本地小时的报警次数
+ *   hours.push[24]          每个小时**实际发出**的推送条数（成功 + 失败）
+ *   hours.hits[24]          每个小时的识别人次
+ *   hours.types[typeId][24] 每个小时按报警类型的次数（只给热力图「类型」维度用）
+ *
+ * 三条刻意的取舍：
+ *  1. **只存计数，不存明细**。7 天 × 24 小时 × 几种指标 = 几百个整数，JSON 十几 KB。
+ *     存明细（哪一秒、哪一路）体积会随报警量线性涨，而这个页面只需要"哪几个小时忙"。
+ *  2. **小时是本地小时**（`new Date(ts).getHours()`），和 `dayKey()` 同一套口径 ——
+ *     用 UTC 会让 08:00 的报警记到 00:00 格子里，跨时区看起来像"半夜异常高发"。
+ *  3. **存储 key 不做版本升级**。这是纯增量的字段追加：`prune()` 是唯一的归一化收口，
+ *     旧存档（没有 `hours` 字段）载入时由它补零，日汇总一个数不丢。
+ *     换 key 反而要写迁移 + 处理"迁移到一半失败"，收益是负的。
+ *     （反过来，新版本写的存档被**旧版本**读到也没事：旧代码压根不看这些字段。）
  */
 import { reactive } from 'vue'
 
@@ -38,13 +58,83 @@ const ALARM_TYPES = [
   { id: 'count', label: '计数' }
 ]
 
-export { CHANNELS as STAT_CHANNELS, ALARM_TYPES as STAT_ALARM_TYPES }
+/**
+ * 区域事件在事件库里是 enter / exit / loiter 三个细分，统计时**都归到 zone 一类**
+ * （但细分本身也各自留一份计数，谁也不丢）。
+ * 放在模块级：`statAlarm` 与 `normHourTypes` 都要用，写在两处迟早漂移。
+ */
+const ZONE_ALIASES = ['enter', 'exit', 'loiter']
+
+/** 小时桶里允许出现的类型键：6 个已知类型 + 区域事件的 3 个细分（有上界，不会被子存档撑大） */
+const HOUR_TYPE_KEYS = [...ALARM_TYPES.map((t) => t.id), ...ZONE_ALIASES]
+
+/** 热力图的指标维度（值取自 `hours[metric]`） */
+const HOUR_METRICS = [
+  { id: 'alarms', label: '报警' },
+  { id: 'push', label: '推送' },
+  { id: 'hits', label: '识别' }
+]
+
+export { CHANNELS as STAT_CHANNELS, ALARM_TYPES as STAT_ALARM_TYPES, HOUR_METRICS as STAT_HOUR_METRICS }
 
 /** 本地日期键 YYYY-MM-DD（不用 toISOString，那是 UTC，会在时区上错一天） */
 export function dayKey(ts = Date.now()) {
   const d = new Date(ts)
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 某天的本地小时（0~23）；时间戳不可解析时落到 0，绝不产生 NaN 下标 */
+function hourOf(ts) {
+  const h = new Date(ts).getHours()
+  return Number.isFinite(h) && h >= 0 && h <= 23 ? h : 0
+}
+
+/**
+ * 24 个小时的零桶。
+ * ⚠️ 必须是**函数**、每次调用都新建数组：写成模块级常量的话，
+ * 所有天共用同一个数组，今天 +1 会让前天一起变（这种 bug 极难看出来）。
+ */
+function zeros24() {
+  return new Array(24).fill(0)
+}
+
+/** 把「任意长度 / 缺失 / 脏值」的小时数组规整成 24 个非负整数 */
+function norm24(a) {
+  const out = zeros24()
+  if (!Array.isArray(a)) return out
+  for (let i = 0; i < 24; i += 1) {
+    const v = Number(a[i])
+    out[i] = Number.isFinite(v) && v > 0 ? Math.floor(v) : 0
+  }
+  return out
+}
+
+/**
+ * 规整「类型 → 24 小时数组」这张表（只认白名单里的键，键序也固定下来）。
+ *
+ * **稀疏**：全零的行不写进存档。7 天 × 9 个类型键全量存 = 1512 个数字，
+ * 其中绝大多数天数是全零 —— 存档体积会白涨几 KB，而读的地方本来就要兜"没有这一行"。
+ */
+function normHourTypes(src) {
+  const out = {}
+  if (!src || typeof src !== 'object') return out
+  HOUR_TYPE_KEYS.forEach((t) => {
+    const a = norm24(src[t])
+    if (a.some((v) => v > 0)) out[t] = a
+  })
+  return out
+}
+
+/** 某天的小时桶。缺了就补上零结构 —— 兼容"内存里手工构造出来的旧结构" */
+function hoursOf(d) {
+  if (!d.hours || typeof d.hours !== 'object') d.hours = emptyDay().hours
+  const H = d.hours
+  if (!Array.isArray(H.alarms)) H.alarms = zeros24()
+  if (!Array.isArray(H.push)) H.push = zeros24()
+  if (!Array.isArray(H.hits)) H.hits = zeros24()
+  if (!H.types || typeof H.types !== 'object') H.types = {}
+  return H
 }
 
 function emptyDay() {
@@ -60,7 +150,9 @@ function emptyDay() {
     people: [],
     /** 通道断线 / 恢复次数 */
     offline: 0,
-    online: 0
+    online: 0,
+    /** 小时桶（热力图用），见文件头说明 */
+    hours: { alarms: zeros24(), push: zeros24(), hits: zeros24(), types: {} }
   }
 }
 
@@ -68,7 +160,13 @@ function emptyState() {
   return { days: {} }
 }
 
-/** 只保留最近 KEEP_DAYS 天，顺手保证结构完整 */
+/**
+ * 只保留最近 KEEP_DAYS 天，顺手保证结构完整。
+ *
+ * ⚠️ 这里是**唯一的归一化收口** —— 载入（load）与落盘（save）都走它，
+ *    所以「旧存档没有小时桶」这件事只需要在这里补一次，不必写独立的迁移步骤。
+ *    任何新增字段都照这个套路加：在这里补缺省，读的地方就不用到处判空。
+ */
 function prune(days) {
   const keys = Object.keys(days).sort()
   const cutoff = keys.length > KEEP_DAYS ? keys.slice(-KEEP_DAYS) : keys
@@ -76,6 +174,7 @@ function prune(days) {
   cutoff.forEach((k) => {
     const d = days[k] || {}
     const base = emptyDay()
+    const dh = d.hours && typeof d.hours === 'object' ? d.hours : {}
     out[k] = {
       ...base,
       ...d,
@@ -85,7 +184,15 @@ function prune(days) {
         wecom: { ...base.push.wecom, ...((d.push || {}).wecom || {}) },
         tg: { ...base.push.tg, ...((d.push || {}).tg || {}) }
       },
-      people: Array.isArray(d.people) ? d.people.slice(0, 200) : []
+      people: Array.isArray(d.people) ? d.people.slice(0, 200) : [],
+      // 小时桶：旧存档（无 hours / 长度不对 / 脏值）在这里被补成整齐的 24 长数组。
+      // `...d` 已经把 dh 带进来了，这里整段覆盖成规整过的版本。
+      hours: {
+        alarms: norm24(dh.alarms),
+        push: norm24(dh.push),
+        hits: norm24(dh.hits),
+        types: normHourTypes(dh.types)
+      }
     }
   })
   return out
@@ -134,15 +241,29 @@ function bucket(ts) {
 
 /* ==================== 记录接口（供各处调用） ==================== */
 
+/** 给「类型 → 24 小时」表加一次（顺手把类型键补出来） */
+function bumpTypeHour(types, type, h) {
+  if (!Array.isArray(types[type])) types[type] = zeros24()
+  types[type][h] += 1
+}
+
 /** 记一次报警（事件产生时调） */
 export function statAlarm(type, ts = Date.now()) {
   try {
     const d = bucket(ts)
+    const h = hourOf(ts)
+    const H = hoursOf(d)
     d.alarms += 1
-    if (type) d.byType[type] = (d.byType[type] || 0) + 1
-    // 区域事件在库里是 enter/exit/loiter 三个细分，归到 zone 一类
-    if (['enter', 'exit', 'loiter'].includes(type)) {
-      d.byType.zone = (d.byType.zone || 0) + 1
+    H.alarms[h] += 1
+    if (type) {
+      d.byType[type] = (d.byType[type] || 0) + 1
+      bumpTypeHour(H.types, type, h)
+      // 区域事件在库里是 enter/exit/loiter 三个细分，归到 zone 一类
+      // （细分与 zone 各记一份，日汇总与小时桶保持同一口径）
+      if (ZONE_ALIASES.includes(type)) {
+        d.byType.zone = (d.byType.zone || 0) + 1
+        bumpTypeHour(H.types, 'zone', h)
+      }
     }
     save()
   } catch (e) {
@@ -154,7 +275,9 @@ export function statAlarm(type, ts = Date.now()) {
 export function statPersonHit(faceName, ts = Date.now()) {
   try {
     const d = bucket(ts)
+    const H = hoursOf(d)
     d.personHits += 1
+    H.hits[hourOf(ts)] += 1
     const name = String(faceName || '').trim()
     if (name && !d.people.includes(name) && d.people.length < 200) d.people.push(name)
     save()
@@ -163,14 +286,16 @@ export function statPersonHit(faceName, ts = Date.now()) {
   }
 }
 
-/** 记一次推送结果 */
+/** 记一次推送结果（小时桶只关心"这个小时发了几条"，成功失败在日汇总里分开看） */
 export function statPush(channelId, ok, ts = Date.now()) {
   try {
     if (!channelId) return
     const d = bucket(ts)
+    const H = hoursOf(d)
     if (!d.push[channelId]) d.push[channelId] = { ok: 0, fail: 0 }
     if (ok) d.push[channelId].ok += 1
     else d.push[channelId].fail += 1
+    H.push[hourOf(ts)] += 1
     save()
   } catch (e) {
     /* 忽略 */
@@ -222,6 +347,7 @@ export function statsOf(key) {
  */
 export function aggregate(keys) {
   const total = emptyDay()
+  const th = hoursOf(total)
   keys.forEach((k) => {
     const d = dailyStats.days[k]
     if (!d) return
@@ -241,9 +367,87 @@ export function aggregate(keys) {
     ;(d.people || []).forEach((n) => {
       if (!total.people.includes(n)) total.people.push(n)
     })
+    // 小时桶按位相加（缺 hours 的旧结构由 norm24 兜住，不会产生 NaN）
+    const dh = d.hours || {}
+    const a = norm24(dh.alarms)
+    const p = norm24(dh.push)
+    const hi = norm24(dh.hits)
+    for (let i = 0; i < 24; i += 1) {
+      th.alarms[i] += a[i]
+      th.push[i] += p[i]
+      th.hits[i] += hi[i]
+    }
+    // 类型 × 小时是稀疏的：没数的行直接跳过，有数才建
+    const dt = dh.types || {}
+    HOUR_TYPE_KEYS.forEach((t) => {
+      const arr = norm24(dt[t])
+      if (!arr.some((v) => v > 0)) return
+      if (!Array.isArray(th.types[t])) th.types[t] = zeros24()
+      const dst = th.types[t]
+      for (let i = 0; i < 24; i += 1) dst[i] += arr[i]
+    })
   })
   total.days = keys.length
   return total
+}
+
+/**
+ * 「日期 × 小时」的热力行（热力图默认维度）。
+ * @param {string[]} keys 日期键（早 → 晚）
+ * @param {'alarms'|'push'|'hits'} metric 取哪个指标的小时桶
+ * @returns {{id:string,label:string,cells:number[],sum:number}[]}
+ */
+export function hourRows(keys, metric = 'alarms') {
+  const m = ['alarms', 'push', 'hits'].includes(metric) ? metric : 'alarms'
+  return keys.map((k) => {
+    const d = dailyStats.days[k] || {}
+    const cells = norm24((d.hours || {})[m])
+    return {
+      id: k,
+      // 只显示"月/日"，跨度大时更清爽（与趋势图同一个写法）
+      label: k.slice(5).replace('-', '/'),
+      cells,
+      sum: cells.reduce((a, b) => a + b, 0)
+    }
+  })
+}
+
+/**
+ * 「报警类型 × 小时」的热力行（热力图「类型」维度：哪种报警在哪个时段高发）。
+ * 只列**本周期内有数**的类型，顺序按总数从多到少 —— 零行不占版面。
+ * @returns {{id:string,label:string,cells:number[],sum:number}[]}
+ */
+export function hourTypeRows(keys) {
+  const merged = {}
+  HOUR_TYPE_KEYS.forEach((t) => (merged[t] = zeros24()))
+  keys.forEach((k) => {
+    const d = dailyStats.days[k]
+    const t = (d && d.hours && d.hours.types) || {}
+    HOUR_TYPE_KEYS.forEach((id) => {
+      const arr = norm24(t[id])
+      for (let i = 0; i < 24; i += 1) merged[id][i] += arr[i]
+    })
+  })
+  return ALARM_TYPES.map((t) => {
+    const cells = merged[t.id]
+    return { id: t.id, label: t.label, cells, sum: cells.reduce((a, b) => a + b, 0) }
+  })
+    .filter((r) => r.sum > 0)
+    .sort((a, b) => b.sum - a.sum)
+}
+
+/** 小时分布里最忙的那个小时（全零返回 -1，代表"没有可说的峰值"） */
+export function peakHour(arr) {
+  const a = norm24(arr)
+  let best = -1
+  let bestV = 0
+  for (let i = 0; i < 24; i += 1) {
+    if (a[i] > bestV) {
+      bestV = a[i]
+      best = i
+    }
+  }
+  return best
 }
 
 /** 某渠道的推送成功率（0~1，无数据返回 -1 表示"暂无数据"） */

@@ -21,6 +21,16 @@ export const DEFAULT_FACE_MAX = 50
 export const faces = ref([])
 /** 加载状态 */
 export const facesReady = ref(false)
+/**
+ * 「人脸库」那一块展开着吗。
+ *
+ * ⚠️ 刻意放在**模块级**而不是设置抽屉的组件里：抽屉是 `v-if` 挂载的，
+ *    组件内部的 ref 每次关掉设置都会跟着销毁 —— 于是「点开管理 → 看到人 →
+ *    关了设置再打开 → 又是个折叠的 + 要重新点」，
+ *    用起来就像"人脸库一会有一会又不见了"。展开状态属于"用户看这一块的偏好"，
+ *    不该被一次抽屉的开关重置掉。
+ */
+export const faceLibOpen = ref(false)
 
 /** 简单互斥，避免并发写坏自增 id */
 let writeChain = Promise.resolve()
@@ -146,15 +156,45 @@ export function clearFaces() {
  * 没有向量的记录直接跳过（正是为了不让"半条记录"混进底库）。
  * 两端的语义必须一致，否则"拉回来的人数"和"后端认识的人数"会对不上。
  *
+ * ----------------------------------------------------------------------------
+ * ⚠️ **空数组不许清掉非空底库**（除非显式 force）。
+ *
+ * 起因是一次真事故：后端那份底库是空的（比如它被人推空过 / 从来没人推上去过），
+ * 本机 IndexedDB 里明明有 3 个人，用户在设置页点了一下「从后端拉取」——
+ * 一份 `faces: []` 就把本机底库整体清掉，而且**不报任何错**：
+ * 界面上只会看到"人脸库（0 / 50）"，推送里从此全是"未录入"。
+ * 「拉取」这个动作的语义是"以后端为准"，但"以后端为准"不该把**空的**一份
+ * 当成有效的覆盖源 —— 那更可能是后端那边出了问题，而不是用户真想清空。
+ *
+ * 守卫只放在这**一个收口处**（而不是每个调用点各判一次）：调用点有三处
+ * （自动接管 / 手动拉取 / 设置页按钮），各判一次迟早漏一处，而且三处判据会漂。
+ * 真要从后端清空本机底库，走设置页那个「清空人脸库」按钮（clearFaces），
+ * 或显式传 { force: true }。
+ *
  * @param {Array<{name:string, vector:number[], thumb?:string, createdAt?:number}>} list
- * @returns {Promise<{ok:true, count:number}>}
+ * @param {{force?:boolean}} [opts]
+ * @returns {Promise<{ok:true, count:number, skipped?:boolean}>} count = 替换后的人数
  */
-export function replaceFaces(list) {
+export function replaceFaces(list, { force = false } = {}) {
   return runExclusive(async () => {
     const items = (Array.isArray(list) ? list : []).filter(
       (f) => f && f.name && Array.isArray(f.vector) && f.vector.length
     )
     const db = await openDB()
+    if (!force && items.length === 0) {
+      // 先看一眼本机还有没有人：有就**什么都不做**（连 clear 都不发）
+      const cur = await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readonly')
+        const req = tx.objectStore(FACE_STORE_NAME).count()
+        req.onsuccess = () => resolve(Number(req.result) || 0)
+        req.onerror = () => reject(req.error)
+      })
+      if (cur > 0) {
+        console.warn(`👤 收到一份空的人脸库，本机已有 ${cur} 人 —— 已忽略（不清空底库）`)
+        await refreshFaces()
+        return { ok: true, count: cur, skipped: true }
+      }
+    }
     await new Promise((resolve, reject) => {
       // 清空 + 批量写入放在**同一个事务**里：中途失败要么全成要么全不成，
       // 不会出现"旧的清掉了、新的没写进去"（那等于把底库弄丢了）

@@ -1675,6 +1675,14 @@
                 <em v-else-if="pushOverwrote" class="err-text">
                   ⚠️ 上一次同步把其它设备的改动覆盖掉了。
                 </em>
+                <!--
+                  本机底库是空的、后端还有人时，后端会**保住自己那份**（不让人推空）。
+                  这件事必须说出来并给出下一步，否则用户只会看到"同步成功"，
+                  而本机与后端的人脸库其实不一致。
+                -->
+                <em v-if="pushFacesSkipped" class="err-text">
+                  ⚠️ 本机人脸库是空的，后端已保留它自己的底库（没被推空）。点「从后端拉取」把后端的人取回来。
+                </em>
                 <em v-if="pullState === 'error'" class="err-text">拉取失败：{{ pullError }}</em>
               </span>
               <button class="tag" :disabled="pullState === 'pulling'" @click="onBackendPull">
@@ -3080,7 +3088,7 @@ import {
   refreshBackendWatchdog,
   testBackendTgRemote
 } from '../composables/useBackendEvents'
-import { syncState, syncStateText, localRev, syncRev, pullState, pullError, pushOverwrote } from '../composables/useBackendSync'
+import { syncState, syncStateText, localRev, syncRev, pullState, pullError, pushOverwrote, pushFacesSkipped } from '../composables/useBackendSync'
 import { refreshWatchStatus, watchState, watchStatusText } from '../composables/useWatchBridge'
 import {
   AI_MODELS,
@@ -3118,6 +3126,7 @@ import {
   clearPendingFaces,
   deleteFace,
   dropBackendPendingFace,
+  faceLibOpen,
   faces as faceLib,
   loadBackendPendingFaces,
   pendingFaces,
@@ -3528,6 +3537,18 @@ const nowTs = ref(Date.now())
 let _silentTick = null
 onMounted(() => {
   _silentTick = setInterval(() => (nowTs.value = Date.now()), 30000)
+  /*
+   * 人脸库**打开设置页就加载**，不要等用户点「管理」。
+   *
+   * `faces` 这个 ref 是模块级的，但只有 `refreshFaces()` 会填它，而原先只有
+   * 「管理」按钮的 watch 会调 —— 于是刚打开设置页时标题写的是
+   * 「人脸库（0 / 50）」、名单是空的。用户看到的是**底库丢了**，
+   * 而不是"还没加载"（没有任何加载中状态，就是干干净净的 0）。
+   *
+   * 抽屉是 `v-if`，每次打开都会重新挂载 —— 所以这里挂一次就等价于
+   * "每次打开设置页都刷一次"，正好也是我们想要的时效性。
+   */
+  refreshFaces().catch(() => {})
 })
 onUnmounted(() => {
   if (_silentTick) clearInterval(_silentTick)
@@ -4231,7 +4252,7 @@ const gpuText = computed(() => {
 })
 
 /** 人脸库 */
-const faceLibOpen = ref(false)
+// faceLibOpen 来自 useFaceLib（模块级）：抽屉关掉再打开时展开状态要保留，见那里的说明
 const faceRenameId = ref(null)
 const faceRenameText = ref('')
 

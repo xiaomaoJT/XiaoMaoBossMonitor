@@ -24,17 +24,31 @@
     </p>
 
     <template v-else>
-      <!-- ============ 概览数字 ============ -->
+      <!-- ============ 概览数字（报警 / 识别两张卡内嵌迷你趋势） ============ -->
       <div class="kpi-row">
         <div class="kpi">
           <i>报警次数</i>
           <b>{{ total.alarms }}</b>
           <em>{{ perDayText }}</em>
+          <SparkLine
+            v-if="trend.length > 1"
+            class="kpi-spark"
+            :values="trendValues"
+            color="var(--accent)"
+            label="报警次数趋势"
+          />
         </div>
         <div class="kpi">
           <i>识别人次</i>
           <b>{{ total.personHits }}</b>
           <em>唯一 {{ total.people.length }} 人</em>
+          <SparkLine
+            v-if="trend.length > 1"
+            class="kpi-spark"
+            :values="hitValues"
+            color="var(--type-face)"
+            label="识别人次趋势"
+          />
         </div>
         <div class="kpi">
           <i>推送总数</i>
@@ -48,52 +62,70 @@
         </div>
       </div>
 
-      <!-- ============ 报警趋势（柱状） ============ -->
+      <!-- ============ 报警趋势（面积折线） ============ -->
       <section class="card">
-        <h4>报警趋势<em>按天</em></h4>
-        <div class="bars" v-if="trend.some((d) => d.alarms > 0)">
-          <div class="bar-col" v-for="d in trend" :key="d.key" :title="`${d.label}：${d.alarms} 次报警`">
-            <div class="bar-track">
-              <div class="bar-fill" :style="{ height: barH(d.alarms) }"></div>
-            </div>
-            <span class="bar-num">{{ d.alarms || '' }}</span>
-            <span class="bar-label">{{ d.label }}</span>
-          </div>
-        </div>
+        <h4>报警趋势<em>按天 · 共 {{ total.alarms }} 次</em></h4>
+        <TrendArea v-if="total.alarms > 0" :points="trend" unit="次" />
+        <p class="no-data" v-else>该周期没有报警记录。</p>
+        <p class="tip-line" v-if="trend.length > 1">点曲线上的某一天可以钉住数值，再点一下取消。</p>
+      </section>
+
+      <!-- ============ 报警类型占比（环形 + 图例） ============ -->
+      <section class="card">
+        <h4>报警类型占比<em>{{ typeTotal }} 次</em></h4>
+        <DonutShare v-if="typeTotal > 0" :items="typeItems" unit="次" />
         <p class="no-data" v-else>该周期没有报警记录。</p>
       </section>
 
-      <!-- ============ 报警类型分布（横向条） ============ -->
+      <!-- ============ 报警类型分布（统一刻度横条） ============ -->
       <section class="card">
-        <h4>报警类型分布</h4>
-        <div class="hbar-list" v-if="typeRows.length">
-          <div class="hbar" v-for="r in typeRows" :key="r.id" :title="`${r.label}：${r.n} 次`">
-            <span class="hb-label">{{ r.label }}</span>
-            <span class="hb-track">
-              <span class="hb-fill" :class="r.id" :style="{ width: hbW(r.n) }"></span>
-            </span>
-            <span class="hb-num">{{ r.n }}</span>
-          </div>
-        </div>
+        <h4>报警类型分布<em>同一把尺子</em></h4>
+        <DistBars v-if="typeTotal > 0" :rows="typeItems" unit="次" />
         <p class="no-data" v-else>该周期没有报警记录。</p>
       </section>
 
-      <!-- ============ 三端推送（成功率条） ============ -->
+      <!-- ============ 时段热力图（日期/类型 × 24 小时） ============ -->
+      <section class="card">
+        <h4>时段热力图<em>{{ heatMetricLabel }}</em></h4>
+        <div class="seg heat-seg">
+          <button
+            v-for="m in HEAT_METRICS"
+            :key="m.id"
+            class="seg-btn"
+            :class="{ on: heatMetric === m.id }"
+            @click="heatMetric = m.id"
+          >
+            {{ m.label }}
+          </button>
+        </div>
+        <HeatGrid
+          v-if="heatRows.length"
+          :rows="heatRows"
+          :color="heatColor"
+          :metric-label="heatMetricLabel"
+          unit="次"
+        />
+        <p class="no-data" v-else>这个维度本周期没有记录，换上面的指标看看。</p>
+        <!--
+          差额必须说出来：上面写"报警 17 次"、这张图写"共 13 次"，
+          不解释的话看起来就是有一边算错了。差额只可能来自"升级前的老记录
+          （当时只有按天汇总）"，等 7 天窗口滚过去就自然归零、提示自动消失。
+        -->
+        <p class="tip-line gap" v-if="heatGap > 0">
+          注：按天汇总的{{ heatMetricName }}是 <b>{{ heatSummaryTotal }}</b> 次，这里只有
+          <b>{{ heatTotal }}</b> 次 —— 差额来自<b>升级前</b>的老记录（当时只存按天合计，
+          没有小时明细）。等这一周滚出 7 天窗口就会对齐。
+        </p>
+        <p class="tip-line">
+          格子按<b>本机时钟的小时</b>聚合（不是 UTC）。每格只存计数、不存明细，所以历史不会因为
+          事件列表被清空而消失；换时区看同一份历史时，横向会整体平移。
+        </p>
+      </section>
+
+      <!-- ============ 三端推送（成功率刻度） ============ -->
       <section class="card">
         <h4>三端推送<em>成功 / 失败 / 成功率</em></h4>
-        <div class="push-list">
-          <div class="push-row" v-for="c in channelRows" :key="c.id">
-            <span class="pr-name">{{ c.label }}</span>
-            <span class="pr-bar">
-              <span class="pr-ok" :style="{ width: prW(c, 'ok') }"></span>
-              <span class="pr-fail" :style="{ width: prW(c, 'fail') }"></span>
-            </span>
-            <span class="pr-num">
-              <template v-if="c.total === 0">未推送</template>
-              <template v-else>{{ c.ok }}/{{ c.total }} · {{ c.rate }}</template>
-            </span>
-          </div>
-        </div>
+        <PushStack :rows="channelRows" />
         <p class="tip-line">
           成功率按「实际发出的推送」计算（成功 + 失败）。静默时段、限流、未勾选这些压根没发出去的，不计入。
         </p>
@@ -111,19 +143,57 @@
 </template>
 
 <script setup>
+/**
+ * 数据统计页。
+ *
+ * 图表全部**自绘 SVG / CSS，不引任何图表库**，理由（写在这里免得以后有人想换）：
+ *   - 数据量天花板是"7 天 × 24 小时"这个量级 —— ECharts 的强项（大数据量 canvas、
+ *     缩放刷选、地图）一条都用不上，而它的 gzip 体积比整个主包还大；
+ *   - **canvas 读不到 CSS 变量**：主题切换（暗黑 / 亮色 / 液态）靠的是变量，
+ *     用 canvas 就得把整套色板再维护一份，等于同一个事实有两处判定；
+ *   - 自绘 SVG 在四个端（Web / WKWebView / 小程序 web-view / Electron）零适配差异，
+ *     且在 4K 屏上永远锐利。
+ *
+ * 所有颜色一律 `var(--type-*)` / `var(--accent)` 这类变量，代码里**不出现 hex**。
+ */
 import { computed, ref } from 'vue'
 import {
   KEEP_DAYS,
   STAT_ALARM_TYPES,
   STAT_CHANNELS,
+  STAT_HOUR_METRICS,
   aggregate,
   dailyStats,
+  hourRows,
+  hourTypeRows,
+  peakHour,
   recentDayKeys,
   resetDailyStats,
   statsOf
 } from '../composables/useDailyStats'
+import DistBars from './charts/DistBars.vue'
+import DonutShare from './charts/DonutShare.vue'
+import HeatGrid from './charts/HeatGrid.vue'
+import PushStack from './charts/PushStack.vue'
+import SparkLine from './charts/SparkLine.vue'
+import TrendArea from './charts/TrendArea.vue'
 
 const emit = defineEmits(['reset-done'])
+
+/**
+ * 报警类型 → 主题色变量。
+ * 单独开一组 `--type-*` 而不是复用 `--warn` / `--err`：分类色和语义色混用会串味
+ * （区域报警用警告黄，看着像"区域报警是警告级别"）。同一类报警在环形、横条、
+ * 热力图里必须是同一个颜色 —— 共用一个 token 才成立。
+ */
+const TYPE_COLOR = {
+  person: 'var(--type-person)',
+  face: 'var(--type-face)',
+  zone: 'var(--type-zone)',
+  pose: 'var(--type-pose)',
+  motion: 'var(--type-motion)',
+  count: 'var(--type-count)'
+}
 
 /* ==================== 周期切换 ==================== */
 const PERIODS = [
@@ -173,27 +243,36 @@ const perDayText = computed(() => {
   return d > 1 ? `日均 ${avg.toFixed(1)} 次` : '当日'
 })
 
-/* ==================== 趋势柱状图 ==================== */
+/* ==================== 趋势 ==================== */
 const trend = computed(() =>
   rangeKeys.value.map((k) => {
     const d = statsOf(k)
-    // 只显示"月-日"，跨度大时更清爽
-    const label = k.slice(5).replace('-', '/')
-    return { key: k, label, alarms: d.alarms || 0 }
+    return {
+      key: k,
+      // 只显示"月/日"，跨度大时更清爽
+      label: k.slice(5).replace('-', '/'),
+      value: d.alarms || 0
+    }
   })
 )
-
-const maxTrend = computed(() => Math.max(1, ...trend.value.map((d) => d.alarms)))
-const barH = (n) => `${Math.max(n > 0 ? 6 : 0, (n / maxTrend.value) * 100)}%`
+const trendValues = computed(() => trend.value.map((d) => d.value))
+/** 识别人次按天：直接用日汇总的 personHits —— 与小时桶之和恒等，且旧存档（无小时桶）也有值 */
+const hitValues = computed(() => rangeKeys.value.map((k) => statsOf(k).personHits || 0))
 
 /* ==================== 类型分布 ==================== */
-const typeRows = computed(() =>
-  STAT_ALARM_TYPES.map((t) => ({ id: t.id, label: t.label, n: total.value.byType[t.id] || 0 }))
-    .filter((r) => r.n > 0)
-    .sort((a, b) => b.n - a.n)
+/**
+ * 六种类型**都列**（含 0）：零行也占一格，列表长度稳定，切周期时不会跳动。
+ * 按次数降序，并列时保持声明顺序（Array.sort 是稳定排序）。
+ */
+const typeItems = computed(() =>
+  STAT_ALARM_TYPES.map((t) => ({
+    id: t.id,
+    label: t.label,
+    n: total.value.byType[t.id] || 0,
+    color: TYPE_COLOR[t.id] || 'var(--accent)'
+  })).sort((a, b) => b.n - a.n)
 )
-const maxType = computed(() => Math.max(1, ...typeRows.value.map((r) => r.n)))
-const hbW = (n) => `${Math.max(3, (n / maxType.value) * 100)}%`
+const typeTotal = computed(() => typeItems.value.reduce((a, r) => a + r.n, 0))
 
 /* ==================== 三端推送 ==================== */
 const pushTotal = computed(() => {
@@ -208,25 +287,54 @@ const pushTotal = computed(() => {
 const channelRows = computed(() =>
   STAT_CHANNELS.map(({ id, label }) => {
     const p = total.value.push[id]
-    const ok = p.ok || 0
-    const fail = p.fail || 0
-    const n = ok + fail
-    return {
-      id,
-      label,
-      ok,
-      fail,
-      total: n,
-      rate: n ? `${Math.round((ok / n) * 100)}%` : '—'
-    }
+    return { id, label, ok: p.ok || 0, fail: p.fail || 0 }
   })
 )
 
-/** 成功段宽度按"占该渠道全部推送"算，失败段同理，两者拼满整条 */
-function prW(c, kind) {
-  if (!c.total) return '0%'
-  return `${((kind === 'ok' ? c.ok : c.fail) / c.total) * 100}%`
-}
+/* ==================== 热力图 ==================== */
+/** 第四档「类型」不是指标，而是**换行维度**（行 = 报警类型，列 = 小时） */
+const HEAT_METRICS = [...STAT_HOUR_METRICS, { id: 'types', label: '类型' }]
+const heatMetric = ref('alarms')
+
+const METRIC_COLOR = { alarms: 'var(--accent)', push: 'var(--ok)', hits: 'var(--type-face)' }
+const heatColor = computed(() => METRIC_COLOR[heatMetric.value] || 'var(--accent)')
+
+const heatMetricLabel = computed(() => {
+  if (heatMetric.value === 'types') return `${total.value.alarms} 次 · 按类型分行`
+  const m = STAT_HOUR_METRICS.find((x) => x.id === heatMetric.value)
+  return m ? m.label : '报警'
+})
+
+const heatRows = computed(() => {
+  if (heatMetric.value === 'types') {
+    // 类型维度：行 = 类型，每种类型用自己在环形图里的那个颜色
+    return hourTypeRows(rangeKeys.value).map((r) => ({ ...r, color: TYPE_COLOR[r.id] }))
+  }
+  return hourRows(rangeKeys.value, heatMetric.value)
+})
+
+/** 热力图里所有格子的合计 */
+const heatTotal = computed(() =>
+  heatRows.value.reduce((a, r) => a + r.cells.reduce((x, y) => x + y, 0), 0)
+)
+
+/** 同一指标在「按天汇总」里的合计（用来发现"小时明细不全"这件事） */
+const heatSummaryTotal = computed(() => {
+  if (heatMetric.value === 'push') return pushTotal.value.ok + pushTotal.value.fail
+  if (heatMetric.value === 'hits') return total.value.personHits
+  if (heatMetric.value === 'alarms') return total.value.alarms
+  return 0 // 「类型」维度行是类型不是天，同比没有意义
+})
+
+/**
+ * 差额 = 只有按天汇总、没有小时明细的那部分（= 升级前的老记录）。
+ * 必须**说出来**：否则用户看到上面写"报警 17 次"、热力图写"共 13 次"，
+ * 会以为哪边算错了。等这一周滚出 7 天窗口，差额自然归零，提示也就自己消失了。
+ */
+const heatGap = computed(() => Math.max(0, heatSummaryTotal.value - heatTotal.value))
+const heatMetricName = computed(
+  () => (STAT_HOUR_METRICS.find((x) => x.id === heatMetric.value) || {}).label || ''
+)
 
 /* ==================== 操作 ==================== */
 function onReset() {
@@ -244,6 +352,8 @@ function exportStats() {
       const p = d.push[id] || { ok: 0, fail: 0 }
       return `${label} ${p.ok}/${p.ok + p.fail}`
     }).join('  ')
+    const hours = (d.hours && d.hours.alarms) || []
+    const peak = peakHour(hours)
     return {
       日期: k,
       报警次数: d.alarms || 0,
@@ -257,6 +367,9 @@ function exportStats() {
       唯一人数: (d.people || []).length,
       断线: d.offline || 0,
       恢复: d.online || 0,
+      高峰时段: peak >= 0 ? `${String(peak).padStart(2, '0')}:00` : '',
+      // 24 个小时的原始计数：热力图的数据源，原样带出来供外部做分析
+      报警按小时: hours.map((v) => v || 0).join('/'),
       推送明细: push
     }
   })
@@ -292,6 +405,62 @@ void dailyStats
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/*
+ * 周期切换用的分段控件。
+ * ⚠️ 这段样式原本只存在于 EventPanel 的 scoped 块里 —— 统计页用了同样的
+ * `.seg` / `.seg-btn` 类名却**没有任何规则命中**，那排按钮一直是浏览器默认外观
+ * （灰底方角，与玻璃主题完全脱节）。这里补上同一套外观。
+ */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.seg::-webkit-scrollbar {
+  display: none;
+}
+
+.seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.14s ease;
+}
+
+.seg-btn:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--tint) 5%, transparent);
+}
+
+.seg-btn.on {
+  color: var(--panel-deep);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.heat-seg {
+  margin-bottom: 8px;
 }
 
 .sp-note {
@@ -354,6 +523,11 @@ void dailyStats
   color: var(--text-dim-2);
 }
 
+.kpi-spark {
+  margin-top: 5px;
+  opacity: 0.9;
+}
+
 /* ---------- 卡片 ---------- */
 .card {
   padding: 11px 13px 13px;
@@ -387,166 +561,15 @@ void dailyStats
   text-align: center;
 }
 
-/* ---------- 柱状趋势 ---------- */
-.bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  height: 130px;
-  padding-top: 4px;
-}
-
-.bar-col {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  height: 100%;
-}
-
-.bar-track {
-  flex: 1 1 auto;
-  width: 100%;
-  max-width: 34px;
-  display: flex;
-  align-items: flex-end;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  border-radius: 5px 5px 3px 3px;
-  overflow: hidden;
-}
-
-.bar-fill {
-  width: 100%;
-  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 45%, transparent));
-  border-radius: 4px 4px 0 0;
-  transition: height 0.3s ease;
-  min-height: 2px;
-}
-
-.bar-num {
-  font-size: 10px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  height: 12px;
-}
-
-.bar-label {
-  font-size: 10px;
-  color: var(--text-dim-2);
-  white-space: nowrap;
-}
-
-/* ---------- 横向条（类型分布） ---------- */
-.hbar-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.hbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.hb-label {
-  flex: 0 0 34px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-
-.hb-track {
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 15px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  overflow: hidden;
-}
-
-.hb-fill {
-  display: block;
-  height: 100%;
-  border-radius: 4px;
-  background: var(--accent);
-}
-
-.hb-fill.face {
-  background: #9b6dff;
-}
-.hb-fill.pose {
-  background: #ff8a3d;
-}
-.hb-fill.zone {
-  background: #f0b429;
-}
-.hb-fill.motion {
-  background: #4d8ef7;
-}
-.hb-fill.count {
-  background: var(--cyan, #35d0d8);
-}
-
-.hb-num {
-  flex: 0 0 34px;
-  text-align: right;
-  font-size: 11.5px;
-  color: var(--text-soft);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- 三端推送 ---------- */
-.push-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.push-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.pr-name {
-  flex: 0 0 46px;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-
-.pr-bar {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  height: 15px;
-  border-radius: 4px;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-}
-
-.pr-ok {
-  background: var(--ok, #35c98a);
-}
-
-.pr-fail {
-  background: var(--err, #e5484d);
-}
-
-.pr-num {
-  flex: 0 0 96px;
-  text-align: right;
-  font-size: 11px;
-  color: var(--text-soft);
-  font-variant-numeric: tabular-nums;
-}
-
 .tip-line {
   margin: 9px 0 0;
   font-size: 10.5px;
   color: var(--text-dim-2);
   line-height: 1.6;
+}
+
+.tip-line.gap {
+  color: var(--warn-text);
 }
 
 /* ---------- 人员 ---------- */
