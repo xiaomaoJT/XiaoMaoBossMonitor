@@ -868,7 +868,14 @@ function setExt(key, on) {
   emit('update-camera', {
     id: props.cam.id,
     patch: {
-      aiExt: { face: cur.face !== false, pose: cur.pose !== false, zone: cur.zone !== false, [key]: !!on }
+      // hit（人脸命中）同属 aiExt，重建时必须原样带上，否则点一下别的能力就把它抹掉了
+      aiExt: {
+        face: cur.face !== false,
+        pose: cur.pose !== false,
+        zone: cur.zone !== false,
+        hit: cur.hit === true,
+        [key]: !!on
+      }
     },
     notice: needGlobal ? `「${row ? row.label : key}」总开关在 设置 → 检测识别页，需先打开才会生效` : ''
   })

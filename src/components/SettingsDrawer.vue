@@ -190,6 +190,30 @@
                 >
                   {{ e.label }}
                 </button>
+                <!--
+                  人脸命中：与上面三项不同的**推送收窄**开关（缺省关）。
+                  开启后这一路只有命中已录入人脸时才推，故依赖「人脸」；
+                  「人脸」又依赖「人形识别」，所以不可用时置灰。
+                -->
+                <button
+                  class="tag mini hit"
+                  :class="{ on: camHitOn(cam) }"
+                  :disabled="!cam.ai || !camExtOn(cam, 'face')"
+                  :title="camHitTitle(cam)"
+                  @click="toggleCamHit(cam)"
+                >
+                  <svg viewBox="0 0 24 24" width="12" height="12">
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.7"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M9.2 12.2l2 2 3.6-4.2"
+                    />
+                  </svg>
+                  人脸命中
+                </button>
                 <span class="tag-text" v-if="cam.roi">已设置检测区域</span>
                 <button class="tag ghost" v-if="cam.roi" @click="cam.roi = null">清除区域</button>
               </div>
@@ -3128,7 +3152,7 @@ import {
 import { estimateUsage, formatBytes } from '../composables/useEventStore'
 import { EVENT_DEFAULTS, EVENT_GROUPS } from '../composables/useAlarmText'
 import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
-import { camExtOn } from '../composables/useAiExtras'
+import { camExtOn, camHitOn } from '../composables/useAiExtras'
 import {
   addFace,
   backendPendingFaces,
@@ -4201,8 +4225,37 @@ function toggleCamExt(cam, key) {
     face: cur.face !== false,
     pose: cur.pose !== false,
     zone: cur.zone !== false,
+    // 保留「人脸命中」：它不走这个函数（缺省关，判据与上面三条相反），别在这儿弄丢
+    hit: cur.hit === true,
     [key]: cur[key] === false
   }
+}
+
+/**
+ * 人脸命中（通道级推送收窄）。缺省「关」，点击才是开 —— 与上面三条「缺省参与」相反。
+ * 开之前这一路必须有人脸可识别（否则"命中"永远不发生、结果一条都不推），
+ * 所以顺手把这一路的人形 + 人脸补齐。
+ */
+function toggleCamHit(cam) {
+  if (!cam.ai) return
+  const cur = cam.aiExt || {}
+  const next = cur.hit !== true
+  cam.aiExt = {
+    face: cur.face !== false,
+    pose: cur.pose !== false,
+    zone: cur.zone !== false,
+    hit: next
+  }
+  if (next && cam.aiExt.face === false) cam.aiExt.face = true
+}
+
+function camHitTitle(cam) {
+  if (!cam.ai) return '先开启这一路的「人形识别」——人脸命中建立在人形 + 人脸识别之上'
+  if (!camExtOn(cam, 'face')) return '先开启这一路的「人脸」——没有人脸识别就没有「命中」'
+  if (!camHitOn(cam)) {
+    return '开启后这一路只在「命中已录入人脸」时推送；画面变动 / 人形 / 姿态 / 区域 / 计数都不再单独推'
+  }
+  return '已开启：仅推送人脸命中事件。点击关闭，恢复为按上面勾选的各类事件正常推送'
 }
 
 /* ==================== 推送渠道联动 ==================== */
@@ -7325,6 +7378,33 @@ function loadHidden() {
 }
 
 .tag.mini.ext:disabled:hover {
+  border-color: var(--line);
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
+
+/*
+ * 通道级「人脸命中」（推送收窄模式）：
+ *   与附加能力一样用虚/实线区分开关，但打开后用强调色 —— 提醒这是一条**限制型**开关，
+ *   不是"多开一项能力"，而是"把这一路的推送收窄到只剩命中"。
+ *   颜色只吃主题变量，三套主题零适配。
+ */
+.tag.mini.hit {
+  border-style: dashed;
+}
+
+.tag.mini.hit.on {
+  border-style: solid;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.tag.mini.hit:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.tag.mini.hit:disabled:hover {
   border-color: var(--line);
   color: var(--text-dim);
   background: var(--panel-2);

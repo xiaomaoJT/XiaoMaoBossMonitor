@@ -103,11 +103,21 @@ function makeCamera(preset) {
      *    全局开着 + 这里不是 false → 这一路才跑。
      *    所以把不看人脸的通道关掉，就能把算力集中在真正要看的几路上。
      *   face 人脸识别 / pose 人形姿态 / zone 区域规则（进出 · 徘徊 · 计数）
+     *   hit  人脸命中：**推送收窄**模式，语义与上面三项**相反**（缺省关，见下）
      */
     aiExt: {
       face: preset.face !== false,
       pose: preset.pose !== false,
-      zone: preset.zone !== false
+      zone: preset.zone !== false,
+      /**
+       * 人脸命中：这一路**只有命中已录入人脸（在库的人）时才推送**。
+       *
+       * ⚠️ 缺省是**false（关）**，与 face / pose / zone 的「缺省即参与」相反 ——
+       *    它是限制型开关，打开会把这一路的画面变动 / 人形 / 姿态 / 区域推送
+       *    全部收窄掉。默认打开等于悄悄改掉所有人的推送行为，所以必须显式开。
+       *    判定见 features.camHitOn；强依赖：人形识别 → 人脸识别 → 全局人脸总闸。
+       */
+      hit: preset.hit === true
     },
     /** 检测区域（归一化坐标 0~1），null 表示全画面 */
     roi: null,
@@ -1136,7 +1146,13 @@ export const BRAND = {
   fullName: 'BossMonitor',
   slogan: '多通道实时预览 · AI 人形识别 · 多端推送',
   logo: './logo/logo.png',
-  version: '1.0.0'
+  /**
+   * 版本号（唯一权威来源）。
+   * ⚠️ 三处必须同步改：这里、package.json、package-lock.json 根字段 ——
+   *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
+   *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
+   */
+  version: '1.1.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
@@ -1277,7 +1293,9 @@ export function normalizeCameraChannels(cam) {
   cam.aiExt = {
     face: ext.face !== false,
     pose: ext.pose !== false,
-    zone: ext.zone !== false
+    zone: ext.zone !== false,
+    // 人脸命中是「推送收窄」开关，缺省**关**（老存档没有 → false，行为与升级前一致）
+    hit: ext.hit === true
   }
   return cam
 }

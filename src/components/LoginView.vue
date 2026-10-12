@@ -362,7 +362,12 @@ watch([username, password], () => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /*
+   * 不再整体垂直居中：`.shell` 自己 flex:1 撑满，把内容顶在可居中区、
+   * 把 footer 压到最底部。原来的 justify-content:center 会让 footer 跟着
+   * 登录卡片一起浮在页面中间，离底边很远。
+   */
+  justify-content: flex-start;
   gap: 18px;
   overflow: hidden;
   background: var(--bg);
@@ -507,6 +512,12 @@ watch([username, password], () => {
   position: relative;
   z-index: 1;
   width: min(940px, 100%);
+  /*
+   * 撑满「footer 之上」的全部空间：内容仍在本区块内垂直居中（grid align-items:center），
+   * 视觉重心不变，同时把 footer 推到页面最底部。
+   */
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
   grid-template-columns: 1.05fr 0.95fr;
   gap: 38px;
@@ -969,6 +980,10 @@ watch([username, password], () => {
   gap: 7px;
   flex-wrap: wrap;
   justify-content: center;
+  /* 不参与伸缩、占满宽度：`.shell` 撑开后它自然落在页面最底部，内容仍水平居中 */
+  flex: 0 0 auto;
+  width: 100%;
+  padding: 0 4px;
   font-size: 11.5px;
   color: var(--text-dim-2);
   animation: rise 0.6s 0.16s cubic-bezier(0.2, 0.8, 0.2, 1) both;

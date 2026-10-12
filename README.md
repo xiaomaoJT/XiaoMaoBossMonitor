@@ -127,6 +127,7 @@ Monitor/
 ├─ index.html                  入口 HTML（defer 引入 Jessibuca，避免白屏）
 ├─ vite.config.js              Vite 配置（构建时间戳注入 + 钉钉/企微本地代理）
 ├─ package.json                全部 npm 脚本入口
+├─ CHANGELOG.md                版本历史（语义化版本，见 §5.25）
 ├─ capacitor.config.json       iOS 壳配置（appId com.mao.monitorwall）
 ├─ electron-builder.yml        macOS / Windows 桌面端打包配置
 ├─ start-windows.bat           Windows 一键启动后端（双击即用）
@@ -964,6 +965,37 @@ html[data-theme='liquid'] .event-panel :is(.btn, .field, .sf-ctl, .switch, .tag,
 - **取消「保持登录 30 天」。** 只保留 sessionStorage 会话（12 小时，关标签页即失效）。两个关键点：① `readSession()`/启动恢复时**顺手清掉历史遗留的 localStorage 会话**——不清的话老 token 还会继续放行，「取消」形同虚设；② 服务端 `issueSession` 不再按 remember 分叉 TTL。密码本来就从不落盘（摘要认证），这里撤的是**会话长效性**，防共用机器上的滞留登录。
 
 > 验证：专项探针 **22/22**（登录无勾选框 / legacy localStorage 会话被清 / sessionStorage 会话可用 / 拉取后 `hiddenIds` 生效且只有 3 路画面 / `.tag` 不换行溢出 / 人脸 4 行分页·翻页·回退）。回退验证 9 条红且全部可归因（去掉后端回读 hiddenIds → A/F 组红；分页绑定改回全量 → D 组红；去掉 nowrap → E 组红；恢复读 localStorage 会话 → C 组红）。生产 `server/config.json` 与 `server/data/` 全程未被触碰。
+
+### 5.24 「人脸命中」监听类型与事件依赖链
+
+通道级新增第 6 个监听类型 **人脸命中**（`cam.aiExt.hit`）：开启后这一路**只有命中已录入人脸（在库的人）时才推送**，画面变动 / 人形 / 姿态 / 区域 / 计数都不再单独推。它是一次**推送收窄**，不是"多开一项能力"。
+
+**六个监听类型的强依赖关系**（这是设计的核心，不是巧合）：
+
+| 监听类型 | 配置字段 | 依赖 |
+| --- | --- | --- |
+| 画面变动 | `cam.motion` | 无（纯本地帧差） |
+| 人形识别 | `cam.ai` | 无（YOLO 检测人形） |
+| 人脸 | `cam.aiExt.face` | **人形识别** —— 只在检出人形的帧上跑 |
+| 姿态 | `cam.aiExt.pose` | **人形识别** |
+| 区域 | `cam.aiExt.zone` | **人形识别**（+ 真圈了区域才算在跑） |
+| **人脸命中** | `cam.aiExt.hit` | **人形 → 人脸 → 全局人脸总闸**（缺一不可） |
+
+三条取舍：
+
+- **缺省关闭，且与 `face / pose / zone` 的「缺省即参与」相反。** 那三项是"分流"（缺省参与、可关掉省算力），`hit` 是"收窄"（缺省关、开了就限制推送）。沿用同一个 `!== false` 判据会把所有人的推送行为悄悄改掉，所以判定单独写成 `camHitOn(cam) === (ext.hit === true)`。
+- **只收窄报警类事件，不拦系统事件。** 掉线 / 上线（`offline` / `online`）不属于"画面变动"，命中模式下仍要通知 —— 否则机器失联却悄无声息。
+- **判定只有一份。** `features.js` 的 `camHitOn` 是唯一判据：UI（`SettingsDrawer`、`CameraTile` 的画面菜单）、推送调度（`useAlertPush.checkChannel`）、后端（经 `compat.mjs` 复用同一份）都读它，不会出现"界面开了、实际没生效"。
+
+UI 上 `hit` 依赖「人脸」开着才可点（否则置灰并提示去哪开）；勾选时自动补齐这一路的人形 + 人脸，避免"开了命中却永远不命中、于是一条都不推"的死角。
+
+> 验证：数据层单测 **26/26**（缺省语义 / 依赖链 / 老存档兼容）、推送层集成测试 **6/6**（命中模式收窄 + 命中事件照推 + 关闭后的正面基线 + 掉线不受影响）、UI 探针 **8/8**（渲染 / 依赖置灰 / 即时预览 / 落盘 / 重载持久化）。回退验证三组各自精准变红：`camHitOn` 恒 false → 单测 26→20、推送 6→3；去掉 `checkChannel` 的过滤 → 推送 6→3（而单测仍 26/26，证明两层测试互不掩盖）；去掉 UI 的 `:disabled` → 仅"依赖置灰"1 条红。
+
+### 5.25 版本号与更新日志的维护
+
+- **版本号只有一份权威来源**：`src/config/defaults.js` 的 `BRAND.version`（顶栏 / 登录页 / 关于页 / 桌面端都读它）。改版本时**同步改** `package.json` 与 `package-lock.json` 的根字段 —— 三处不一致时 `npm ci` 会告警，桌面端「关于」里的版本也会与安装包对不上。
+- **更新日志在根目录 `CHANGELOG.md`**，按语义化版本分段（加功能 +0.1.0、修 bug +0.0.1）。整理时以 `git log` 为准，把同一主题的若干次提交归并成一条，而不是逐条粘贴提交信息。
+- 当前版本 **1.1.0**。
 
 ---
 

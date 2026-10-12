@@ -30,6 +30,7 @@ import { normalizeWeCom, sendWeCom, sendWeComAlarm } from './useWeCom.js'
 import { recordPush } from './usePushStats.js'
 import { uploadToLitterbox } from './useImageHost.js'
 import { EVENT_GROUPS, TYPE_GROUP, featureText, normalizeEvents } from './useAlarmText.js'
+import { camHitOn } from '../config/features.js'
 import { runtimeLine } from './useDeviceInfo.js'
 import {
   BRAND,
@@ -1329,6 +1330,21 @@ export function useAlertPush(options, hooks = {}) {
       if (Array.isArray(c.cameras) && c.cameras.length && !c.cameras.includes(record.id)) {
         return { ok: false, off: true, reason: '该通道未勾选' }
       }
+    }
+    /*
+     * 人脸命中模式（通道级，见 features.camHitOn）：
+     *   这一路被配成「只有命中已录入人脸（在库的人）才推送」时，其余**报警类**事件
+     *   一律不推 —— 画面变动 / 人形 / 姿态 / 区域 / 计数都在收窄范围内。
+     *
+     * ⚠️ 只收窄报警事件（TYPE_GROUP 里有的类型），**不拦系统事件**：
+     *   掉线 / 上线（offline / online）不属于"画面变动"，通道静默或命中模式下
+     *   仍应把断线告诉用户，否则机器失联了却悄无声息。
+     * ⚠️ 通道配置从 camerasOf() 取（前端 cameras ref / 后端 config.cameras），
+     *   用 record.id 定位；找不到就不过滤，与旧行为一致。
+     */
+    const camCfg = (camerasOf() || []).find((x) => x && x.id === record.id)
+    if (camCfg && camHitOn(camCfg) && TYPE_GROUP[record.type] && !(record.type === 'face' && record.faceName)) {
+      return { ok: false, off: true, reason: '该通道仅推送「人脸命中」事件' }
     }
     const evt = normalizeEvents(c.events)
     const group = TYPE_GROUP[record.type] || record.type
