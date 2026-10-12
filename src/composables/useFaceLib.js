@@ -33,6 +33,16 @@ export const facesReady = ref(false)
  */
 export const faceLibOpen = ref(false)
 
+/**
+ * 「待录入人脸」那一块展开着吗。默认**收起**，与 faceLibOpen 对称。
+ *
+ * 同样刻意放在模块级（理由见 faceLibOpen 上面那段）。
+ * 默认收起是因为待录入常常十几二十张，一打开设置就把它全部铺开，
+ * 会把整页配置项顶到下面去；想看的人自己点一下「管理」。
+ * 收起时标题行仍然带着数量（待录入人脸（N）），不会让人误以为"没有"。
+ */
+export const pendingLibOpen = ref(false)
+
 /** 简单互斥，避免并发写坏自增 id */
 let writeChain = Promise.resolve()
 

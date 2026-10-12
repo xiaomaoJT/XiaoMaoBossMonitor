@@ -1500,11 +1500,16 @@
                  或者以为「抓到的脸没进库」。空态必须自己开口说话。 -->
             <div class="opt col">
               <span>
-                <strong>待录入人脸（{{ allPendingFaces.length }}）</strong>
+                <strong>
+                  待录入人脸（{{ allPendingFaces.length }}）
+                  <button class="mini-btn ghost" @click="pendingLibOpen = !pendingLibOpen">
+                    {{ pendingLibOpen ? '收起' : '管理' }}
+                  </button>
+                </strong>
                 <em>点「录入」建档并自动编号，之后可以在人脸库里改名</em>
               </span>
 
-              <div class="face-grid" ref="pendingGridEl" v-if="allPendingFaces.length">
+              <div class="face-grid" ref="pendingGridEl" v-if="pendingLibOpen && allPendingFaces.length">
                 <div class="face-card pending" v-for="pf in pagedPending" :key="pf.id">
                   <img :src="pf.thumb" alt="待录入人脸" />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
@@ -1515,8 +1520,8 @@
                 </div>
               </div>
 
-              <!-- 空态占位：把「为什么是空的」说清楚，并给一条能立刻做的动作 -->
-              <div class="pending-empty" v-else>
+              <!-- 空态占位（展开且没有待录入时）：把「为什么是空的」说清楚，并给一条能立刻做的动作 -->
+              <div class="pending-empty" v-else-if="pendingLibOpen">
                 <span class="pe-icon" aria-hidden="true">{{ pendingEmpty.icon }}</span>
                 <div class="pe-body">
                   <strong class="pe-title">{{ pendingEmpty.title }}</strong>
@@ -1524,12 +1529,18 @@
                 </div>
               </div>
 
-              <div class="face-pager" v-if="pendingPageCount > 1">
+              <!-- 收起状态下的「空白」摘要：默认收起不等于让空白无声无息 ——
+                   数量为 0 时仍给一行，说明为什么是空的；想知道细节再点「管理」。 -->
+              <p class="hint tight" v-if="!pendingLibOpen && !allPendingFaces.length">
+                {{ pendingEmpty.title }} · 点「管理」查看原因
+              </p>
+
+              <div class="face-pager" v-if="pendingLibOpen && pendingPageCount > 1">
                 <button class="mini-btn ghost" :disabled="pendingPage <= 1" @click="pendingPage -= 1">上一页</button>
                 <span class="face-page-text">{{ pendingPage }} / {{ pendingPageCount }}</span>
                 <button class="mini-btn ghost" :disabled="pendingPage >= pendingPageCount" @click="pendingPage += 1">下一页</button>
               </div>
-              <div class="face-acts">
+              <div class="face-acts" v-if="pendingLibOpen">
                 <button class="mini-btn danger" v-if="allPendingFaces.length" @click="doIgnoreAllPending">全部忽略</button>
                 <button class="mini-btn ghost" v-if="faceBackendOn" @click="refreshBackendPending">刷新待录入</button>
                 <span class="muted" v-if="faceBackendOn">来自后端检测服务</span>
@@ -3182,6 +3193,7 @@ import {
   faces as faceLib,
   loadBackendPendingFaces,
   pendingFaces,
+  pendingLibOpen,
   refreshFaces,
   removePendingFace,
   renameFace
@@ -4398,6 +4410,15 @@ function doIgnorePending(pf) {
 
 /** 一键忽略所有待录入人脸（前端内存队列 + 后端 SQLite 队列都清掉） */
 function doIgnoreAllPending() {
+  const n = allPendingFaces.value.length
+  if (!n) return
+  /*
+   * 必须二次确认：这个动作**不可撤销**，而且一次清掉的是**全部** ——
+   * 前端内存队列与后端 SQLite 队列都会被删，删完只能等它们再出现。
+   * 「清空人脸库」「删除单个人脸」本来就有 confirm，这里没理由例外。
+   */
+  const scope = faceBackendOn.value ? '前端暂存和后端队列都会清掉，' : ''
+  if (!window.confirm(`确定忽略全部 ${n} 张待录入人脸？${scope}此操作不可撤销。`)) return
   // 前端内存队列：直接清空
   clearPendingFaces()
   // 后端队列：逐条回服务端删除，否则下次刷新又冒出来
@@ -4435,13 +4456,20 @@ watch(faceLibOpen, (v) => {
   }
 })
 
+// 待录入对称：展开时回到第一页（收起状态不留页码）
+watch(pendingLibOpen, (v) => {
+  if (v) pendingPage.value = 1
+})
+
 /* ---------- 人脸库分页：默认最多 4 行，超出翻页 ----------
- * 为什么不写死"每页 N 个"：卡片宽度固定 88px，**一行能放几个随抽屉宽度变**
- * （桌面宽、手机窄），所以每页数量必须现算 —— 读 grid 实际布局出的列数
- * （`auto-fill` 会把空轨道也铺满一行，因此就算没几张脸也能量到真实列数），
- * 再乘 4 行。已录入 / 待录入两张网格**各自独立分页**，互不影响。
+ * 卡片宽度固定 88px，**一行能放几个随抽屉宽度变**（桌面宽、手机窄），
+ * 所以每页数量必须现算：一行几张 × 4 行。
+ * 已录入 / 待录入两张网格**各自独立分页**，互不影响。
  */
 const FACE_ROWS = 4
+/** 与 .face-card / .face-grid 的 CSS 保持一致（卡片 88px、间距 8px） */
+const FACE_CARD_W = 88
+const FACE_GAP = 8
 const libGridEl = ref(null)
 const pendingGridEl = ref(null)
 /** 上次量到的列数（读不到时保留旧值；初值给 6 只是兜底，挂载后会立刻校准） */
@@ -4450,15 +4478,25 @@ const pendingCols = ref(6)
 const libPage = ref(1)
 const pendingPage = ref(1)
 
-/** 读 grid 真正布局出来的列数（`gridTemplateColumns` 的已解析值就是各轨道宽度） */
+/**
+ * 一行能放下几张脸 —— 按**容器实际宽度**算。
+ *
+ * ⚠️ 绝对不要用 `getComputedStyle(el).gridTemplateColumns` 去数轨道。
+ *    本抽屉所有标签页用的是 `v-show`（见文件里"所有标签页用的是 v-show"那段）：
+ *    抽屉一打开**全部模板都渲染**，未选中的人脸 tab 只是 `display:none`。
+ *    此时 Chrome 返回的是**未解析的指定值** `"repeat(auto-fill, 88px)"`，
+ *    按空格切正好切成 2 段 —— 于是列数被误判成 2，每页只切 2×4=8 张：
+ *    50 张待录入被分成 **7 页**，而每页实际只用真实宽度（7 列）铺出**两排**
+ *    （第二排还只有 1 张），看起来就像"没铺满就翻页了"。
+ *    （最小复现与对照：/tmp/face-probe/repro.html）
+ *
+ * 元素不可见时 clientWidth 为 0 → 返回 0 → 调用方保留上一次的值，不会被污染。
+ */
 function countCols(el) {
   if (!el) return 0
-  try {
-    const tpl = getComputedStyle(el).gridTemplateColumns || ''
-    return tpl.split(' ').filter((s) => s && s !== 'none').length
-  } catch (e) {
-    return 0
-  }
+  const w = el.clientWidth
+  if (!w) return 0
+  return Math.max(1, Math.floor((w + FACE_GAP) / (FACE_CARD_W + FACE_GAP)))
 }
 
 function measureFaceCols() {
@@ -4466,6 +4504,23 @@ function measureFaceCols() {
   if (lc) libCols.value = lc
   const pc = countCols(pendingGridEl.value)
   if (pc) pendingCols.value = pc
+}
+
+/**
+ * 尺寸一变就重算列数。
+ *
+ * 为什么非要有它：人脸 tab 不是当前页时 grid 是 `display:none`（v-show 的后果），
+ * 这时量不到宽度；用户切到人脸 tab 那一刻它才从 0 变成真实宽度。
+ * ResizeObserver 正好覆盖「从隐藏变可见」「抽屉宽度变化」「首屏布局完成」三种时机，
+ * 不必去猜该在哪个 watch 里补一次测量。
+ */
+let faceColsRO = null
+function observeFaceGrids() {
+  if (typeof ResizeObserver === 'undefined') return
+  if (!faceColsRO) faceColsRO = new ResizeObserver(() => measureFaceCols())
+  faceColsRO.disconnect()
+  if (libGridEl.value) faceColsRO.observe(libGridEl.value)
+  if (pendingGridEl.value) faceColsRO.observe(pendingGridEl.value)
 }
 
 const libPageSize = computed(() => Math.max(1, libCols.value * FACE_ROWS))
@@ -4493,16 +4548,34 @@ watch(pendingPageCount, (n) => {
   if (pendingPage.value > n) pendingPage.value = n
 })
 
-/** 网格可见性或数据变化后重新量列数（不可见时量到的是 "none"） */
-watch([faceLibOpen, faceLib, allPendingFaces], () => nextTick(measureFaceCols))
+/**
+ * 这些变化后都要重量列数：展开/收起、数据增减、**切到人脸 tab**，
+ * 以及两个 grid 元素本身被 `v-if` 重建（元素换了，ResizeObserver 得重新挂）。
+ * 不可见时量不到 → 保留旧值，等它可见时由这里或 ResizeObserver 补上。
+ */
+watch(
+  [faceLibOpen, pendingLibOpen, faceLib, allPendingFaces, tab, libGridEl, pendingGridEl],
+  () =>
+    nextTick(() => {
+      observeFaceGrids()
+      measureFaceCols()
+    })
+)
 
 onMounted(() => {
   // 抽屉宽度会随窗口 / 横竖屏变化，列数跟着变 → 重新量一次并让分页自动纠正
   window.addEventListener('resize', measureFaceCols)
-  nextTick(measureFaceCols)
+  nextTick(() => {
+    observeFaceGrids()
+    measureFaceCols()
+  })
 })
 onUnmounted(() => {
   window.removeEventListener('resize', measureFaceCols)
+  if (faceColsRO) {
+    faceColsRO.disconnect()
+    faceColsRO = null
+  }
 })
 
 /** 区域归属：把各通道的区域汇总成一张列表，方便统一改名 / 开关 */
