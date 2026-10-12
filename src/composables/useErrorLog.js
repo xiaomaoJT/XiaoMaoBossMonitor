@@ -15,6 +15,7 @@
  * 所以所有逻辑都包在 try/catch 里，且同一条错误 1.5 秒内只记一次（防止渲染循环刷屏）。
  */
 import { ref } from 'vue'
+import { isAbortError } from './useNet.js'
 
 /** 当前要在界面上展示的错误（null = 不展示） */
 export const fatalError = ref(null)
@@ -78,6 +79,22 @@ function safeStack(err) {
  */
 export function reportError(err, source = '未知来源', extra = '') {
   try {
+    /*
+     * 「被掐断」不算错误，直接丢掉。
+     *
+     * 为什么必须在**这个唯一收口处**判：本项目所有异步失败最终都汇到这里
+     * （见 main.js 的三层入口），而 AbortError / TimeoutError 是**我们自己**
+     * 设的闸门到点了 —— 它的调用方一定已经就地给出过结论
+     * （「后端事件轮询超时：对方在限定时间内没有响应」这类），
+     * 再弹一条「异步任务：signal is aborted without reason」错误条，
+     * 对用户只是噪音：既没有新信息，也看不懂。
+     *
+     * 这条判据以前是缺的，于是服务重启/网络抖动时界面上会反复看到那句英文。
+     * 真要看超时的来龙去脉，看**调用方**的状态文案（设置页的后端连接状态等），
+     * 那里带的是"谁超时了、等了多少秒"。
+     */
+    if (isAbortError(err)) return
+
     const message = normalizeMessage(err)
     const key = `${source}|${message}`
     const now = Date.now()

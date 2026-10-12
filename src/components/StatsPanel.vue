@@ -51,6 +51,18 @@
           />
         </div>
         <div class="kpi">
+          <i>人脸命中</i>
+          <b>{{ total.faceHits }}</b>
+          <em>{{ hitPeople.length ? `${hitPeople.length} 位库内人员` : '库内的人' }}</em>
+          <SparkLine
+            v-if="trend.length > 1"
+            class="kpi-spark"
+            :values="knownValues"
+            color="var(--type-face)"
+            label="人脸命中趋势"
+          />
+        </div>
+        <div class="kpi">
           <i>推送总数</i>
           <b>{{ pushTotal.ok + pushTotal.fail }}</b>
           <em>成功 {{ pushTotal.ok }} · 失败 {{ pushTotal.fail }}</em>
@@ -131,12 +143,43 @@
         </p>
       </section>
 
-      <!-- ============ 识别到的人 ============ -->
-      <section class="card" v-if="total.people.length">
-        <h4>识别到的人<em>{{ total.people.length }} 位</em></h4>
-        <div class="people">
-          <span class="p-chip" v-for="(n, i) in total.people" :key="i">{{ n }}</span>
+      <!-- ============ 人脸命中（人员榜 + 最近命中记录） ============
+           这张卡取代了原来那张只列名字的「识别到的人」：
+           名字集合其实和这里有计数的那份是同一批（陌生人脸不会有名字），
+           两张卡并列只会让人以为"识别到的人"和"命中的人"是两个集合。
+           老存档里只有名字、没有计数的那几天，用下面的 chip 兜住并说明原因。 -->
+      <section class="card" v-if="total.faceHits > 0 || total.people.length">
+        <h4>
+          人脸命中
+          <em>命中 {{ total.faceHits }} 次 · {{ hitPeople.length || total.people.length }} 位</em>
+        </h4>
+
+        <DistBars v-if="hitPeople.length" :rows="hitPeople" unit="次" />
+
+        <div class="people" v-if="stalePeople.length">
+          <span class="p-chip" v-for="(n, i) in stalePeople" :key="i">{{ n }}</span>
         </div>
+        <p class="tip-line gap" v-if="stalePeople.length">
+          上面这几位只有名字、没有命中次数：<b>升级前</b>的统计只记了"谁出现过"，
+          没有逐人计数。从现在起的新记录都带计数，等这 7 天滚出窗口就自然补齐。
+        </p>
+
+        <h5 class="sub">最近命中记录<em v-if="recentHits.length">最近 {{ recentHits.length }} 条</em></h5>
+        <ul class="hit-log" v-if="recentHits.length">
+          <li v-for="(h, i) in recentHits" :key="`${h.t}-${i}`">
+            <em class="hl-time">{{ fmtHitTime(h.t) }}</em>
+            <b class="hl-name">{{ h.n }}</b>
+            <span class="hl-where">
+              {{ h.c || '未知通道' }}<template v-if="h.s > 0"> · {{ h.s.toFixed(2) }}</template>
+            </span>
+          </li>
+        </ul>
+        <p class="no-data" v-else>该周期还没有「命中已录入人脸」的记录。</p>
+
+        <p class="tip-line">
+          只统计<b>命中人脸库里已录入的人</b>（陌生人脸不算命中，它只记进上面的「识别人次」）。
+          明细最多保留每人每天最近 {{ HIT_LOG_MAX }} 条，完整记录看事件列表或远程 <code>/hits</code> 指令。
+        </p>
       </section>
     </template>
   </div>
@@ -158,12 +201,14 @@
  */
 import { computed, ref } from 'vue'
 import {
+  HIT_LOG_MAX,
   KEEP_DAYS,
   STAT_ALARM_TYPES,
   STAT_CHANNELS,
   STAT_HOUR_METRICS,
   aggregate,
   dailyStats,
+  hitPeopleOf,
   hourRows,
   hourTypeRows,
   peakHour,
@@ -224,6 +269,7 @@ const hasData = computed(() => {
   return (
     t.alarms > 0 ||
     t.personHits > 0 ||
+    t.faceHits > 0 ||
     t.offline > 0 ||
     t.online > 0 ||
     t.people.length > 0 ||
@@ -258,6 +304,8 @@ const trend = computed(() =>
 const trendValues = computed(() => trend.value.map((d) => d.value))
 /** 识别人次按天：直接用日汇总的 personHits —— 与小时桶之和恒等，且旧存档（无小时桶）也有值 */
 const hitValues = computed(() => rangeKeys.value.map((k) => statsOf(k).personHits || 0))
+/** 人脸命中按天：同理取日汇总的 faceHits（不用小时桶求和，避免"老记录没有小时明细"的差） */
+const knownValues = computed(() => rangeKeys.value.map((k) => statsOf(k).faceHits || 0))
 
 /* ==================== 类型分布 ==================== */
 /**
@@ -296,7 +344,14 @@ const channelRows = computed(() =>
 const HEAT_METRICS = [...STAT_HOUR_METRICS, { id: 'types', label: '类型' }]
 const heatMetric = ref('alarms')
 
-const METRIC_COLOR = { alarms: 'var(--accent)', push: 'var(--ok)', hits: 'var(--type-face)' }
+const METRIC_COLOR = {
+  alarms: 'var(--accent)',
+  push: 'var(--ok)',
+  hits: 'var(--type-face)',
+  // 「识别」和「命中」是同一个人脸主题下的两个口径，同色；
+  // 靠按钮文字区分，不靠颜色（两个都换色只会让人以为量纲不同）
+  known: 'var(--type-face)'
+}
 const heatColor = computed(() => METRIC_COLOR[heatMetric.value] || 'var(--accent)')
 
 const heatMetricLabel = computed(() => {
@@ -322,6 +377,7 @@ const heatTotal = computed(() =>
 const heatSummaryTotal = computed(() => {
   if (heatMetric.value === 'push') return pushTotal.value.ok + pushTotal.value.fail
   if (heatMetric.value === 'hits') return total.value.personHits
+  if (heatMetric.value === 'known') return total.value.faceHits
   if (heatMetric.value === 'alarms') return total.value.alarms
   return 0 // 「类型」维度行是类型不是天，同比没有意义
 })
@@ -335,6 +391,60 @@ const heatGap = computed(() => Math.max(0, heatSummaryTotal.value - heatTotal.va
 const heatMetricName = computed(
   () => (STAT_HOUR_METRICS.find((x) => x.id === heatMetric.value) || {}).label || ''
 )
+
+/* ==================== 人脸命中 ==================== */
+
+/**
+ * 人员榜：谁来过、各来过几次、最近一次什么时候。
+ * 颜色统一用 `--type-face`：这一整块讲的是"人脸"这件事，与报警类型占比里的
+ * 「人脸」那一格是同一个语义，必须同色（否则看起来像两个不同的东西）。
+ */
+const hitPeople = computed(() =>
+  hitPeopleOf(total.value).map((r) => ({ ...r, color: 'var(--type-face)' }))
+)
+
+/** 最近命中记录（aggregate 已按时间倒序，这里只挑页面上要展示的条数） */
+const RECENT_SHOW = 12
+const recentHits = computed(() => (total.value.recentHits || []).slice(0, RECENT_SHOW))
+
+/**
+ * 「有名字但没计数」的那一档 = 升级前的老记录。
+ *
+ * 升级前的统计只记了"谁出现过"（people 数组），没有逐人计数（hitsByName）；
+ * 于是这几天会出现"上面写着识别到张三，下面的人员榜里却没有他"。
+ * 不解释的话看起来就是算错了，所以这里把名字亮出来并说明原因 ——
+ * 与热力图那个"差额"提示是同一个套路，等 7 天窗口滚过去自己就消失了。
+ */
+const stalePeople = computed(() => {
+  const counted = new Set(hitPeople.value.map((r) => r.id))
+  return total.value.people.filter((n) => !counted.has(n))
+})
+
+/**
+ * 命中明细里的时刻。
+ * 一律带「月-日」：这个列表是**跨天**的（近 7 天周期里今天和前天混在一起），
+ * 只显示时分秒会分不清是哪天来的 —— 而"几点几分"恰恰是这个列表最重要的信息，
+ * 不能为了省几个字符把它变得不可信。
+ */
+function fmtHitTime(ts) {
+  const n = Number(ts) || 0
+  const d = new Date(n)
+  if (!n || Number.isNaN(d.getTime())) return '—'
+  const p = (x) => String(x).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/**
+ * CSV 里的「人员 × 次数」摘要：`张三×3 李四×1`。
+ * 复用 hitPeopleOf（它只要求传进来的对象有 hitsByName），于是导出的排序
+ * 与页面上那张榜单**必然是同一个口径** —— 不然会出现"页面写张三第一、
+ * CSV 里李四第一"这种没人能解释的差异。
+ */
+function hitRankText(d) {
+  return hitPeopleOf(d)
+    .map((r) => `${r.label}×${r.n}`)
+    .join(' ')
+}
 
 /* ==================== 操作 ==================== */
 function onReset() {
@@ -365,6 +475,14 @@ function exportStats() {
       计数: d.byType.count || 0,
       识别人次: d.personHits || 0,
       唯一人数: (d.people || []).length,
+      人脸命中: d.faceHits || 0,
+      命中人数: Object.keys(d.hitsByName || {}).length,
+      // 「张三×3 李四×1」这样的摘要：CSV 是拿去做分析的，逐人一行反而不好透视
+      命中人员: hitRankText(d),
+      最近命中: (d.recentHits || [])
+        .slice(0, 5)
+        .map((h) => `${fmtHitTime(h.t)} ${h.n}`)
+        .join(' | '),
       断线: d.offline || 0,
       恢复: d.online || 0,
       高峰时段: peak >= 0 ? `${String(peak).padStart(2, '0')}:00` : '',
@@ -388,7 +506,6 @@ function toCsv(rows) {
   const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`
   return [head.map(esc).join(','), ...rows.map((r) => head.map((h) => esc(r[h])).join(','))].join('\n')
 }
-
 // 变更即刷新（事件产生 / 推送落定都会改 dailyStats）
 void dailyStats
 </script>
@@ -586,5 +703,85 @@ void dailyStats
   color: var(--ok-text, #bfe9d1);
   background: color-mix(in srgb, var(--ok) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+}
+
+/* ---------- 人脸命中：小标题 + 最近命中记录 ---------- */
+.sub {
+  margin: 13px 0 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.sub em {
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-dim-2);
+}
+
+/*
+ * 命中明细逐条一行：时刻 / 谁 / 在哪一路。
+ * 三列网格而不是 flex：**时刻列必须是"对齐的"** —— 这个列表的作用就是"看几点来的"，
+ * 数字宽度不一致的话扫一列根本读不出来（tabular-nums 只解决等宽，不解决对齐）。
+ */
+.hit-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  /* 明细多了不把卡片撑长：滚动看，页面整体节奏不变 */
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.hit-log li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--type-face) 7%, transparent);
+}
+
+.hl-time {
+  font-style: normal;
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hl-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hl-where {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /*
+   * ⚠️ 这里**必须用 px**，不能写 `max-width: 40%`。
+   * 百分比 max-width 在网格项上是**相对自己的网格区域**解析的，而那个区域又由
+   * 「项自己的 max-content 被 max-width 削过之后」决定 —— 于是 40% 乘的是自己的宽度，
+   * 形成一个自我收紧：实测 559px 宽的一行里，这一列只剩 **21px**，
+   * 通道名被省略成「门…」，相似度整个看不见（.hl-time/.hl-name 加起来 476px）。
+   * 用固定 px 上界只削「特别长的通道名」，短名字按内容自然宽度排。
+   */
+  max-width: 160px;
 }
 </style>

@@ -31,6 +31,7 @@
  *    都会被刷新，拿它当"本机版本"会让落后判定永远成立（自己推完就变落后）。
  */
 import { ref, computed } from 'vue'
+import { netErrorText, timeoutReason } from './useNet.js'
 
 export const syncState = ref('idle') // idle | syncing | ok | error
 export const syncError = ref('')
@@ -109,7 +110,7 @@ export function backendBase(url) {
 /** 带超时的取 JSON（拉取与状态查询共用，省得每处各写一遍 AbortController） */
 async function fetchJson(url, timeoutMs) {
   const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  const t = setTimeout(() => ctrl.abort(timeoutReason('配置接口', timeoutMs)), timeoutMs)
   try {
     const res = await fetch(url, { signal: ctrl.signal })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -154,7 +155,7 @@ export async function pullConfig(url) {
     return { ok: true, data }
   } catch (e) {
     pullState.value = 'error'
-    pullError.value = (e && e.message) || '拉取失败'
+    pullError.value = netErrorText(e, '配置拉取')
     return { ok: false, error: pullError.value }
   }
 }
@@ -193,7 +194,7 @@ export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
 
     if (!silent) syncState.value = 'syncing'
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 20000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('配置推送', 20000)), 20000)
     let res
     try {
       res = await fetch(`${base}/api/config`, {
@@ -238,7 +239,7 @@ export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
     return { ok: true, data }
   } catch (e) {
     syncState.value = 'error'
-    syncError.value = (e && e.message) || '同步失败'
+    syncError.value = netErrorText(e, '配置推送')
     return { ok: false, error: syncError.value }
   } finally {
     inflight = false

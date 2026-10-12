@@ -11,6 +11,7 @@
 import { ref } from 'vue'
 import { openDB, FACE_STORE_NAME } from './useEventStore.js'
 import { cosine } from './useAiDetector.js'
+import { netErrorText, timeoutReason } from './useNet.js'
 
 /** 默认比对阈值：余弦相似度高于它才认为是同一个人 */
 export const DEFAULT_FACE_THRESHOLD = 0.38
@@ -349,6 +350,19 @@ export function clearPendingFaces() {
  * 由设置页在录入 / 忽略后回后端删掉对应那条。
  */
 export const backendPendingFaces = ref([])
+/**
+ * 最近一次拉取后端队列的结论。
+ *
+ * ⚠️ 为什么必须把「拉取失败」单独立一个状态，而不是让它和「暂无待录入」共用空数组：
+ *    设置页要能区分这两件事，否则拉挂掉时界面显示「暂无待录入人脸」，
+ *    用户会以为"没人来过"（实际上是没连上）；反过来，后端真的没人时
+ *    又会被当成"加载不出来"，于是反复点刷新。
+ *
+ * loadedAt 用来看"这份数据是什么时候的"：失败时列表**保留上一次**的内容，
+ * 界面上得说清它有多旧。
+ */
+export const backendPendingError = ref('')
+export const backendPendingLoadedAt = ref(0)
 
 function normBackendPending(base, list) {
   return (Array.isArray(list) ? list : [])
@@ -371,11 +385,13 @@ export async function loadBackendPendingFaces(url) {
   const base = String(url || '').replace(/\/+$/, '')
   if (!base) {
     backendPendingFaces.value = []
+    backendPendingError.value = ''
+    backendPendingLoadedAt.value = 0
     return []
   }
   try {
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('待录入队列', 8000)), 8000)
     let res
     try {
       res = await fetch(`${base}/api/pending-faces?limit=50`, { signal: ctrl.signal })
@@ -385,10 +401,18 @@ export async function loadBackendPendingFaces(url) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
     backendPendingFaces.value = normBackendPending(base, data && data.faces)
+    backendPendingError.value = ''
+    backendPendingLoadedAt.value = Date.now()
     return backendPendingFaces.value
   } catch (e) {
-    backendPendingFaces.value = []
-    return []
+    /*
+     * ⚠️ 失败时**绝不清空**已拿到的那份列表（「空白」不许覆盖「非空」）。
+     *   清掉的话，一次网络抖动就会让界面上「本来抓到的人脸」凭空消失，
+     *   用户只会以为人脸白抓了 —— 而真正该告诉他的是"这次没拉上"。
+     *   只有第一次（手上本来就没有数据）才落到空列表。
+     */
+    backendPendingError.value = netErrorText(e, '待录入队列')
+    return backendPendingFaces.value
   }
 }
 

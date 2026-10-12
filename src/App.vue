@@ -230,6 +230,7 @@ import {
   STORAGE_KEY,
   cloneDefaultCameras,
   cloneDefaultOptions,
+  isFaceHit,
   migrateSecretFields,
   normalizeCameraChannels,
   normalizeCameraSilent,
@@ -239,8 +240,9 @@ import { SECRET_SCOPE } from './config/auth'
 import { secretMatches } from './composables/sha256'
 import { useAlertPush } from './composables/useAlertPush'
 import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
+import { timeoutReason } from './composables/useNet.js'
 import NotifyStack from './components/NotifyStack.vue'
-import { dayKey, dailyStats, statAlarm, statChannelState, statPersonHit, statPush } from './composables/useDailyStats'
+import { dayKey, dailyStats, statAlarm, statChannelState, statFaceHit, statPersonHit, statPush } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
   buildStatusAlertMessage,
@@ -1432,7 +1434,8 @@ async function resolveBackendUrl(url) {
     if (!u) return false
     try {
       const ctrl = new AbortController()
-      const t = setTimeout(() => ctrl.abort(), 4000)
+      // 带理由地掐断（见 useNet.timeoutReason）：否则漏到界面上就是一句引擎英文
+      const t = setTimeout(() => ctrl.abort(timeoutReason('后端探测', 4000)), 4000)
       try {
         const res = await fetch(`${backendBase(u)}/api/auth/info`, { signal: ctrl.signal })
         if (!res.ok) return false
@@ -2101,6 +2104,18 @@ function onAlarm(payload) {
   else {
     statAlarm(record.type, record.time)
     if (record.type === 'face' || record.faceName) statPersonHit(record.faceName, record.time)
+    /*
+     * 人脸命中（命中人脸库里已录入的人）单独记一份。
+     *
+     * 与上面那个 statPersonHit 是**两个概念**，都要记、不能合并：
+     *   · personHits —— 识别人次，含陌生人（回答"看见过多少人"）；
+     *   · faceHits   —— 命中次数，只算库内的人（回答"自己人来了几次"）。
+     * 判据用的是 defaults.isFaceHit —— 与推送收窄、TG 关键事件直推、
+     * 后端 /hits 指令**同一份**，四处不会各算一套。
+     */
+    if (isFaceHit(record)) {
+      statFaceHit(record.faceName, { camName: record.name, camId: record.id, score: record.faceScore }, record.time)
+    }
   }
 
   // 报警自动放大该画面（无人值守时很有用）

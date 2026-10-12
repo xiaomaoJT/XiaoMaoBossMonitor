@@ -52,6 +52,7 @@ import {
 } from '../config/auth.js'
 import { credentialDigest, digestEquals, loginProof } from './sha256.js'
 import { backendOn } from './useBackendEvents.js'
+import { timeoutReason } from './useNet.js'
 
 /** 登录会话状态（全局单例，登录页 / 关于系统页 / 门禁都读这一份） */
 export const authState = reactive({
@@ -266,7 +267,7 @@ function backendCandidates() {
 async function fetchJson(url, { method = 'GET', body = null, timeout = AUTH_FETCH_TIMEOUT_MS } = {}) {
   const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null
   const timer = setTimeout(() => {
-    if (ctl) ctl.abort()
+    if (ctl) ctl.abort(timeoutReason('认证接口', Math.max(300, timeout)))
   }, Math.max(300, timeout))
   try {
     const res = await fetch(url, {

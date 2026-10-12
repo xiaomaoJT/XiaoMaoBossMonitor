@@ -11,6 +11,7 @@
  * 状态机：idle（关）→ polling（开）→ error（连不上，自动重试 + 退避提示）
  */
 import { ref, computed } from 'vue'
+import { netErrorText, timeoutReason } from './useNet.js'
 
 export const backendState = ref('idle') // idle | polling | error
 export const backendError = ref('')
@@ -83,7 +84,7 @@ export async function markReadOnBackend(options, keys) {
   if (!list.length) return false
   try {
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 5000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('标记已读', 5000)), 5000)
     try {
       await fetch(`${normalizeUrl(options.backend.url)}/api/read`, {
         method: 'POST',
@@ -102,7 +103,7 @@ export async function markReadOnBackend(options, keys) {
 
 async function fetchJson(url, timeoutMs = 8000) {
   const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  const t = setTimeout(() => ctrl.abort(timeoutReason('后端接口', timeoutMs)), timeoutMs)
   try {
     const res = await fetch(url, { signal: ctrl.signal })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -128,7 +129,8 @@ export async function refreshBackendStatus(options) {
     backendError.value = ''
     return st
   } catch (e) {
-    backendError.value = (e && e.message) || '连接失败'
+    // netErrorText：超时要翻成「后端状态超时…」，别把引擎那句 signal is aborted… 透出去
+    backendError.value = netErrorText(e, '后端状态')
     return null
   }
 }
@@ -174,7 +176,7 @@ export function startBackendPolling(options, onEvent) {
       }
     } catch (e) {
       errStreak += 1
-      backendError.value = (e && e.message) || '连接失败'
+      backendError.value = netErrorText(e, '后端事件轮询')
       // 连续失败才降级为 error 状态（偶发一次网络抖动不打脸）
       if (errStreak >= 2) backendState.value = 'error'
     }
@@ -204,7 +206,7 @@ export async function runBackendPatrol(url) {
   if (!base) return false
   try {
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 20000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('手动巡检', 20000)), 20000)
     try {
       const res = await fetch(`${base}/api/patrol`, {
         method: 'POST',
@@ -240,7 +242,7 @@ export async function sendBackendSilentNotice(url, kind, channels) {
   if (!base) return { ok: false, reason: '后端地址无效' }
   try {
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 30000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('静默提醒', 30000)), 30000)
     try {
       const res = await fetch(`${base}/api/silent-notice`, {
         method: 'POST',
@@ -267,7 +269,7 @@ export async function testBackendTgRemote(url) {
   if (!base) return { ok: false, reason: '后端地址无效' }
   try {
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 20000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('远程控制自检', 20000)), 20000)
     try {
       const res = await fetch(`${base}/api/tg-remote/test`, { method: 'POST', signal: ctrl.signal })
       return await res.json().catch(() => ({ ok: false, reason: '返回内容无法解析' }))
@@ -288,7 +290,7 @@ export async function deleteBackendTgWebhook(url) {
   if (!base) return { ok: false, reason: '后端地址无效' }
   try {
     const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 20000)
+    const t = setTimeout(() => ctrl.abort(timeoutReason('删除 Webhook', 20000)), 20000)
     try {
       const res = await fetch(`${base}/api/tg-remote/webhook`, {
         method: 'POST',

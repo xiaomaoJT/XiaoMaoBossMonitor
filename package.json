@@ -1,7 +1,7 @@
 {
   "name": "monitor-wall",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "视频监控多路实时预览大屏（Vue 3 + Vite + Jessibuca，支持 H.265 ws-flv；可打包为 macOS 桌面端 / iOS App / 微信小程序）",
   "author": "Mao",

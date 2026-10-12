@@ -1492,13 +1492,19 @@
               </div>
             </div>
 
-            <!-- 待录入（前端 / 后端检测到的都会列进来） -->
-            <div class="opt col" v-if="allPendingFaces.length">
+            <!-- 待录入（前端 / 后端检测到的都会列进来）
+                 ⚠️ 这一块**刻意不挂 v-if**。
+                 以前是 v-if="allPendingFaces.length"，空的时候整块直接消失 ——
+                 于是「后端没连上」「没开收集陌生人脸」「确实没人来过」三种情况
+                 在界面上长得一模一样：都是一片空白。用户只能反复点刷新，
+                 或者以为「抓到的脸没进库」。空态必须自己开口说话。 -->
+            <div class="opt col">
               <span>
                 <strong>待录入人脸（{{ allPendingFaces.length }}）</strong>
                 <em>点「录入」建档并自动编号，之后可以在人脸库里改名</em>
               </span>
-              <div class="face-grid" ref="pendingGridEl">
+
+              <div class="face-grid" ref="pendingGridEl" v-if="allPendingFaces.length">
                 <div class="face-card pending" v-for="pf in pagedPending" :key="pf.id">
                   <img :src="pf.thumb" alt="待录入人脸" />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
@@ -1508,13 +1514,23 @@
                   </div>
                 </div>
               </div>
+
+              <!-- 空态占位：把「为什么是空的」说清楚，并给一条能立刻做的动作 -->
+              <div class="pending-empty" v-else>
+                <span class="pe-icon" aria-hidden="true">{{ pendingEmpty.icon }}</span>
+                <div class="pe-body">
+                  <strong class="pe-title">{{ pendingEmpty.title }}</strong>
+                  <em class="pe-hint">{{ pendingEmpty.hint }}</em>
+                </div>
+              </div>
+
               <div class="face-pager" v-if="pendingPageCount > 1">
                 <button class="mini-btn ghost" :disabled="pendingPage <= 1" @click="pendingPage -= 1">上一页</button>
                 <span class="face-page-text">{{ pendingPage }} / {{ pendingPageCount }}</span>
                 <button class="mini-btn ghost" :disabled="pendingPage >= pendingPageCount" @click="pendingPage += 1">下一页</button>
               </div>
               <div class="face-acts">
-                <button class="mini-btn danger" @click="doIgnoreAllPending">全部忽略</button>
+                <button class="mini-btn danger" v-if="allPendingFaces.length" @click="doIgnoreAllPending">全部忽略</button>
                 <button class="mini-btn ghost" v-if="faceBackendOn" @click="refreshBackendPending">刷新待录入</button>
                 <span class="muted" v-if="faceBackendOn">来自后端检测服务</span>
               </div>
@@ -3155,7 +3171,9 @@ import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
 import { camExtOn, camHitOn } from '../composables/useAiExtras'
 import {
   addFace,
+  backendPendingError,
   backendPendingFaces,
+  backendPendingLoadedAt,
   clearFaces,
   clearPendingFaces,
   deleteFace,
@@ -4148,6 +4166,48 @@ async function refreshBackendPending() {
   if (!faceBackendOn.value) return
   await loadBackendPendingFaces(opts.backend.url)
 }
+
+/**
+ * 「待录入」为空时的占位文案。
+ *
+ * 四种"空"的原因完全不同，给的下一步动作也完全不同，所以必须分开说 ——
+ * 合成一句「暂无数据」等于什么都没解释：
+ *   ① 后端开着但这次没拉上 → 说清是网络/超时问题，并提示列表**没被清空**；
+ *   ② 没开「收集陌生人脸」      → 这是最常见的一类，直接指到那个开关；
+ *   ③ 后端开着、确实没人未录入  → 告诉他抓取在后端，稍等或点刷新；
+ *   ④ 纯前端链路、确实没人      → 说明暂存规则（只留最近若干张、不落盘）。
+ */
+const pendingEmpty = computed(() => {
+  if (faceBackendOn.value && backendPendingError.value) {
+    const stale = backendPendingLoadedAt.value
+      ? `（下面这份是 ${new Date(backendPendingLoadedAt.value).toLocaleTimeString('zh-CN')} 拿到的）`
+      : ''
+    return {
+      icon: '⚠️',
+      title: '待录入队列没能拉回来',
+      hint: `${backendPendingError.value}${stale}。拉取失败不会清空已有列表，点下方「刷新待录入」重试即可。`
+    }
+  }
+  if (!opts.face.collectUnknown) {
+    return {
+      icon: '⚪',
+      title: '「收集陌生人脸」是关着的',
+      hint: '打开它，检测到没录入的人就会先暂存在这里，方便事后一键建档。'
+    }
+  }
+  if (faceBackendOn.value) {
+    return {
+      icon: '📭',
+      title: '后端暂未抓到未录入的人脸',
+      hint: '跑检测的是后端服务（人脸是在服务端抓的），抓到就会出现在这里；刚重启或刚改过配置时，稍等一会儿点「刷新待录入」。'
+    }
+  }
+  return {
+    icon: '📭',
+    title: '还没有暂存任何陌生人脸',
+    hint: '等摄像头拍到没录入的人，脸会先暂存在这里 —— 只留最近 24 张，且不落盘，重启后就没有了。'
+  }
+})
 
 /**
  * 抽屉一打开（或后端刚连上）就把状态哨兵快照拉回来。
@@ -5241,6 +5301,11 @@ const TG_COMMANDS = [
     desc: '时段内事件汇总：T=今日、Y=昨日（省略为今日），起止按小时如 9-18（省略为全天）；加 img 连截图一起推'
   },
   {
+    cmd: 'hits',
+    usage: '/hits [T|Y]',
+    desc: '人脸命中记录：今天或昨天「命中已录入人脸」的事件清单（时间 / 通道 / 是谁）。T=今日、Y=昨日，省略为今日'
+  },
+  {
     cmd: 'csilent',
     usage: '/csilent <通道> <小时数|HH:MM|off> [渠道]',
     desc: '通道静默：只让某一路监控在指定时段不推送。如 /csilent 门口 2（2 小时）、/csilent 门口 08:00（到 08:00）、/csilent off 门口（恢复）'
@@ -6072,6 +6137,49 @@ function loadHidden() {
 /* 空态提示要跨整行，否则在 grid 里会被塞进一个 88px 的格子 */
 .face-grid > .hint {
   grid-column: 1 / -1;
+}
+
+/*
+ * 「待录入」为空时的占位。
+ * 用虚线框 + 弱化配色，一眼能看出"这里是个空位"，而不是"这里什么都没有"
+ * （后者正是以前整块 v-if 掉之后给人的感觉）。
+ */
+.pending-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+
+.pending-empty .pe-icon {
+  font-size: 18px;
+  line-height: 1.2;
+  flex: 0 0 auto;
+}
+
+.pending-empty .pe-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.pending-empty .pe-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pending-empty .pe-hint {
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.55;
+  color: var(--text-dim-2);
 }
 
 /* 分页条：超过 4 行时才出现 */

@@ -1152,7 +1152,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.1.0'
+  version: '1.2.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
@@ -1239,6 +1239,28 @@ export function channelCredReady(options, id) {
  */
 export function channelUsable(options, id) {
   return channelGlobalOn(options, id) && channelCredReady(options, id)
+}
+
+/**
+ * 这条事件算不算「人脸命中」。
+ * ----------------------------------------------------------------------------
+ * 定义只有一句：**命中了人脸库里已录入的人**，也就是记录上带着姓名（faceName）。
+ *
+ * 判据为什么只看 faceName、不看事件类型：
+ *   后端分析器只在真的比中底库那一次才写 faceName（analyzer.mjs 里
+ *   `faceName: hit.face.name`，没比中就是空串），所以「有名字」本身就是
+ *   命中的充分必要条件。反过来拿 `type === 'face'` 当判据会漏 ——
+ *   人形事件上也可能带上命中的姓名。
+ *
+ * ⚠️ 这个判定有三处消费方（推送调度、TG 关键事件直推、远程指令 /hits 查询），
+ *    以前各自写了一遍 `type === 'face' && faceName` 之类的表达式。
+ *    必须共用这一份：否则"什么人算命中"会随地方漂，出现
+ *    「面板说 3 次、TG 只推了 2 条」这种对不上的账。
+ *
+ * @param {object} rec 事件记录（前端 record / 后端事件行都适用，只要有 faceName）
+ */
+export function isFaceHit(rec) {
+  return !!(rec && rec.faceName)
 }
 
 /**
