@@ -4,6 +4,18 @@ release
 # 服务运行期数据（事件库 / 快照 / 人脸库）
 server/data
 
+# SQLite 运行期边车文件（WAL 模式）—— 必须和主库一起忽略、也必须一起备份。
+# ⚠️ 只拷 monitor.db 不拷 -wal/-shm，等于丢掉还没 checkpoint 的事务；
+#    反过来在别的机器上只更新主库却留着旧的 -wal，SQLite 会把陈旧 WAL 重放到新库上 → 静默错数据。
+# ⚠️ .gitignore 对「已经被跟踪的文件」无效 —— 若历史里还有被跟踪的 *.db，用
+#    `git rm --cached <文件>`（不是 `git rm`）把它请出索引，磁盘文件不会动。
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
 # 自动下载的 ffmpeg 二进制（按平台各一份、几十 MB，不进版本库）
 # 新机器首次启动会自动重新下载；也可在打包机上先跑 npm run ffmpeg:fetch 预取
 server/.cache
