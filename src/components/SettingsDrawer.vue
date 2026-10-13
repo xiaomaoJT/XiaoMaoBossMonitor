@@ -1609,6 +1609,7 @@
                 <div class="face-card pending" v-for="pf in pagedPending" :key="pf.id">
                   <img :src="pf.thumb" alt="待录入人脸" />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
+                  <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
                   <div class="face-acts">
                     <button class="mini-btn" @click="doAddPending(pf)">录入</button>
                     <button class="mini-btn ghost" @click="doIgnorePending(pf)">忽略</button>
@@ -1637,6 +1638,7 @@
                 <button class="mini-btn ghost" :disabled="pendingPage >= pendingPageCount" @click="pendingPage += 1">下一页</button>
               </div>
               <div class="face-acts" v-if="pendingLibOpen">
+                <button class="mini-btn ghost" v-if="allPendingFaces.length && pendingPageCount > 1" @click="doIgnorePagePending">本页忽略</button>
                 <button class="mini-btn danger" v-if="allPendingFaces.length" @click="doIgnoreAllPending">全部忽略</button>
                 <button
                   class="mini-btn ghost"
@@ -4168,6 +4170,25 @@ function fmtRestartTime(ts) {
   }
 }
 
+/**
+ * 待录入人脸卡片底部展示的「捕获时间」。
+ * 卡片只有 88px 宽，不能塞整条 toLocaleString，这里压成紧凑格式：
+ *   - 今天 → 只显示 `HH:mm:ss`（最关心的是"刚抓到还是几小时前"）；
+ *   - 跨天 → 补上 `M-D`，变成 `M-D HH:mm:ss`，仍能一眼分清是哪天的。
+ * 入参是 ms 时间戳（前端 pushPendingFace 与后端 store.listPendingFaces 都给的是这个）。
+ */
+function fmtPendingAt(ts) {
+  const d = new Date(Number(ts))
+  if (isNaN(d.getTime())) return ''
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  const hms = d.toLocaleTimeString('zh-CN', { hour12: false })
+  return sameDay ? hms : `${d.getMonth() + 1}-${d.getDate()} ${hms}`
+}
+
 async function refreshRestartInfo() {
   const base = backendBase()
   if (!base) {
@@ -4641,6 +4662,27 @@ async function doIgnoreAllPending() {
   for (const pf of list) {
     dropBackendPendingFace(opts.backend.url, pf.backendId)
   }
+}
+
+/**
+ * 忽略「当前这一页」的待录入人脸（不是全部）。
+ * 复用 doIgnorePending 的单一判定（前端内存队列 vs 后端 SQLite 队列分开处理），
+ * 这里只是把"当前页可见的那几张"批量走一遍同样的忽略逻辑。
+ * 删完列表会变短，pendingPageCount 的 watcher 会自动把越界的页码拉回最后一页。
+ */
+async function doIgnorePagePending() {
+  const list = pagedPending.value
+  if (!list.length) return
+  const scope = faceBackendOn.value ? '（含来自后端的）' : ''
+  if (
+    !(await confirmDialog({
+      title: '忽略本页待录入',
+      message: `确定忽略本页 ${list.length} 张待录入人脸？${scope}此操作不可撤销。`,
+      variant: 'danger'
+    }))
+  )
+    return
+  for (const pf of list) doIgnorePending(pf)
 }
 
 async function doDeleteFace(f) {
@@ -6554,6 +6596,15 @@ function loadHidden() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 待录入卡片底部第二行：捕获时间（比通道名更弱、更小，可换行不截断） */
+.face-time {
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-dim-2);
+  text-align: center;
+  word-break: break-all;
 }
 
 /* 改名输入框：原本复用 .face-meta 会继承 overflow:hidden，而 .field.mini 宽 118px

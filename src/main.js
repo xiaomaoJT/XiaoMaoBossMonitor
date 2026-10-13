@@ -25,7 +25,18 @@ if (typeof window !== 'undefined') {
   window.addEventListener('error', (e) => {
     // 资源（img / script / link）加载失败只带 target、没有 error 对象，这类噪音跳过
     if (!e.error && e.target && e.target !== window) return
-    reportError(e.error || e.message || '未知脚本错误', '脚本')
+    /*
+     * 把出错的脚本来源（文件名:行:列）记进 extra。
+     * 用处：本项目自身的报错文件名是 index-*.js（或 dist 产物），
+     * 而浏览器扩展注入到页面主世界的脚本，其文件名是
+     * chrome-extension://... / moz-extension://... —— 一眼就能区分
+     * 「是咱们的 bug」还是「用户装了某个扩展在页面里自己炸了」。
+     * 后者（如快捷键 / 自动填表 / 标签页类扩展）常会读 .shortcut 之类
+     * 的字段，与本应用无关，不该被当成系统故障。
+     */
+    let extra = ''
+    if (e.filename) extra = `${e.filename}:${e.lineno || 0}:${e.colno || 0}`
+    reportError(e.error || e.message || '未知脚本错误', '脚本', extra)
   })
 
   // 没有这一步就抓不到 Promise 里的错误 —— 上次那个组件递归异常正是从这冒出来的
