@@ -1276,6 +1276,57 @@ return tpl.split(' ').filter((s) => s && s !== 'none').length
 
 ---
 
+### 5.35 运行期数据不进版本库：多设备同步的唯一正确姿势
+
+**曾经的坑**：`server/data/monitor.db` 从 `init` 提交起就被 git 跟踪。`.gitignore` 里的
+`server/data` 是后来才加的 —— 而 **`.gitignore` 对「已经被跟踪的文件」完全无效**，
+所以这个库一直跟着提交走，两台设备迟早撞上。
+
+**为什么会丢数据**（三层叠加）：
+
+1. SQLite 是**二进制**，git 没法合并。两台设备都跑过 → 各写出一份不同的 db →
+   `git pull` 报 `CONFLICT (content): server/data/monitor.db`，只能 ours/theirs 二选一，
+   **另一台的事件 / 人脸库 / 待录入当场没了**。
+2. 库是 **WAL 模式**（`store.mjs` 里 `db.pragma('journal_mode = WAL')`），带
+   `monitor.db-wal` / `monitor.db-shm` 两个边车。只同步主库不同步边车 = 丢掉还没
+   checkpoint 的事务；反过来只更新主库却留着**旧的** `-wal`，SQLite 会把陈旧 WAL
+   重放到新库上 → **静默的错数据**（比丢数据更难发现）。
+3. 服务**每跑一次就写库**，所以这个文件几乎每次 `git pull` 都在冲突。
+
+**修法（已落地）**：
+
+- `git rm --cached server/data/monitor.db` —— 只把它请出索引，**磁盘文件一个字节都不动**。
+- `.gitignore` 补 `*.db` / `*.db-wal` / `*.db-shm` / `*.sqlite*` 显式兜底
+  （原来只有 `server/data` 一条目录规则，将来谁把它改窄了就又漏了）。
+
+**多设备怎么弄**：git 只同步**代码**，数据**每台独一份**。
+
+- 新机器 clone 下来，`server/data/` 会在首次启动时自动建库（`CREATE TABLE IF NOT EXISTS`），空库起步。
+- 想把某台的数据搬过去：**整目录拷**（`monitor.db` + `-wal` + `-shm` + `shots/` 一起），
+  且**两台不能同时写** —— SQLite 不是多主数据库。
+- 真要「一个库多处看」：让一台常驻当服务端，其他设备走 HTTP API（见 §9），别共享文件。
+- `MONITOR_DATA_DIR`（见 §10）可以把数据指到别的盘 / 别的目录，与代码彻底分开。
+
+> **⚠️ 另一台设备拉取前，先备份它自己的 `server/data/monitor.db`。**
+> 这次改动是一次「删除已跟踪文件」的提交：如果那台机器的库是**干净的**（无本地改动），
+> `git pull` 会把磁盘上的 `monitor.db` **一并删掉**；如果有本地改动，git 会因冲突拒绝合并。
+> 所以在那台机器上先 `cp server/data/monitor.db* ~/monitor-backup-$(date +%F)/`，再 pull，需要时再拷回。
+> **拉完之后 `git status` 不再把 monitor.db 列为 modified，就说明生效了。**
+
+**备份就是拷文件**（`scripts/make-win-deploy.mjs` 里也是这么写的）：
+
+- **冷备**（服务停止时）：`monitor.db` + `-wal` + `-shm` 三个一起拷，缺一个就可能丢事务。
+- **热备**（服务在跑）：`sqlite3 server/data/monitor.db ".backup ~/monitor-backup.db"`
+  或 `VACUUM INTO '~/monitor-backup.db'` —— 这两条是 SQLite 官方的在线备份入口，不会写坏原库。
+
+> 验证：`/tmp/dbignore-probe/test-db-ignore.mjs` **16/16**（索引/HEAD 无 db + `.gitignore` 显式边车兜底 +
+> `check-ignore` 命中主库与两个边车 + **磁盘上的库还在且能打开**——最后一条专门防「用删数据的方式把探针刷绿」）。
+> 回退验证 2 处：`git add -f` 把库强行加回索引 → 红 3 条（其中 `check-ignore` 那条红得很有价值：
+> 它证明 **`git check-ignore` 对已跟踪文件不报告**，这正是原 bug 一直没被发现的原因）；
+> 从 `.gitignore` 删掉 `*.db-wal` → 红 1 条。
+
+---
+
 ## 六、各端运行方式
 
 ### 0. 通用准备
@@ -1611,7 +1662,7 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 
 | 变量 | 作用 |
 |---|---|
-| `MONITOR_DATA_DIR` | 覆盖数据目录（默认 `server/data/`）。测试隔离靠它，避免误写生产库 |
+| `MONITOR_DATA_DIR` | 覆盖数据目录（默认 `server/data/`）。测试隔离靠它，避免误写生产库；多设备「各存各的数据」也靠它（见 5.35） |
 | `MONITOR_CONFIG` | 覆盖配置文件路径（默认 `server/config.json`）。跑真实服务但用临时配置时用 |
 | `BOSSMONITOR_FFMPEG` | 指定 ffmpeg 可执行文件的绝对路径 |
 | `BOSSMONITOR_FFMPEG_OFFLINE` | 设为 `1` 表示完全离线：只查缓存与显式指定，不发起下载 |
