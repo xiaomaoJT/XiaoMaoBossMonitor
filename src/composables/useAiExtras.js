@@ -13,15 +13,17 @@
  *     否则 0.6 次/秒的检测频率下，同一个人站着不动会白白烧掉大量算力。
  */
 import { ref } from 'vue'
-import { Tracker, attachFacesToTracks } from './useTracker.js'
+import { Tracker, attachFacesToTracks, pickFaceFor, tracksDueForFace, faceReuseFresh, faceRetryDue, faceTuning } from './useTracker.js'
 import {
   alignFace,
   cropBox,
   detectFaces,
+  detectFacesInHead,
   detectPose,
   faceEmbedding,
   faceThumb,
   loadModel,
+  mapCropBack,
   isSlotReady
 } from './useAiDetector.js'
 import {
@@ -100,10 +102,11 @@ export function useAiExtras(options) {
       threshold: Number(c.matchThreshold) || DEFAULT_FACE_THRESHOLD,
       libMax: Number(c.libMax) || DEFAULT_FACE_MAX,
       cooldownSec: Math.max(3, Number(c.cooldownSec) || 20),
-      dedupeSec: Math.max(2, Number(c.dedupeSec) || 6),
       eventOnKnown: c.eventOnKnown !== false,
       eventOnUnknown: !!c.eventOnUnknown,
-      collectUnknown: c.collectUnknown !== false
+      collectUnknown: c.collectUnknown !== false,
+      // 采集调优三旋钮：解析收口在 useTracker.faceTuning（前后端同一份判定）
+      ...faceTuning(c)
     }
   }
 
@@ -196,9 +199,9 @@ export function useAiExtras(options) {
     const fc = faceConf()
     if (fc.enabled && camExtOn(cam, 'face')) {
       try {
-        await loadModel('face', undefined, 640).catch(() => {})
+        await loadModel('face', undefined, fc.detSize).catch(() => {})
         if (isSlotReady('face')) {
-          const dets = await detectFaces(frame.canvas, fc.score)
+          const dets = await detectFaces(frame.canvas, fc.score, fc.detSize)
           faces.value = dets.map((d) => ({ ...d, name: '', known: false }))
           await runFaces(frame, dets, live, now, fc, cam, emit)
           status.value = { ...status.value, face: isSlotReady('faceemb') ? 'ready' : 'detect-only' }
@@ -232,14 +235,38 @@ export function useAiExtras(options) {
 
   /* ==================== 人脸 ==================== */
   async function runFaces(frame, dets, live, now, fc, cam, emit) {
-    if (!dets.length) return
+    if (!dets.length && !live.length) return
     await loadModel('faceemb', undefined, 112).catch(() => {})
     const canEmbed = isSlotReady('faceemb')
     const pairs = attachFacesToTracks(live, dets)
 
+    /* ---------- 头部区域裁剪放大补检 ----------
+     * 整帧检测在 640 输入里看远处的人，脸只剩十几个像素，SCRFD 直接漏检
+     * （采集率只有约 1/10 的第二个原因，第一个是附着判定）。
+     * 对「去重窗口已到期、整帧又没检出脸」的轨迹，把头部区域裁出来放大再检。
+     * 只补到期的是为了省算力：窗口没到期的轨迹本来就要复用旧结果，
+     * 检出来了也用不上。 */
+    const covered = new Set(pairs.map((p) => p.track.id))
+    const due = tracksDueForFace(live, covered, now, fc.dedupeSec * 1000)
+    if (due.length && isSlotReady('face')) {
+      for (const tr of due) {
+        const extra = await detectFacesInHead(
+          frame.canvas,
+          tr.box,
+          (cv) => detectFaces(cv, fc.score, fc.detSize),
+          { headRatio: fc.headRatio, size: fc.detSize }
+        )
+        // 裁大之后邻框的脸也可能被检出来，只收确实属于这个人的
+        const back = pickFaceFor(extra, tr.box)
+        if (!back) continue
+        faces.value.push({ ...back, name: '', known: false })
+        pairs.push({ face: back, track: tr })
+      }
+    }
+
     for (const { face, track } of pairs) {
-      // 同一个人的脸不需要每个周期都重算一遍特征
-      if (track.faceAt && now - track.faceAt < fc.dedupeSec * 1000) {
+      // 同一个人近期「成功」提过特征 → 直接继承既有结果，别重提（复用只看成功的时刻）
+      if (faceReuseFresh(track, now, fc.dedupeSec * 1000)) {
         const known = track.face
         const slot = faces.value.find(
           (f) => Math.abs((f.x + f.w / 2) - (face.x + face.w / 2)) < 0.02 &&
@@ -251,14 +278,20 @@ export function useAiExtras(options) {
         }
         continue
       }
-      track.faceAt = now
+      // 模型还没就绪：不预约下一次，下帧就接着试（避免被去重窗关在外面）
       if (!canEmbed) continue
+      // 上一次「尝试」还在重试节流窗内（多半刚失败）→ 先歇一会儿
+      if (faceRetryDue(track, now, fc.retryMs)) continue
+      // 真正去尝试提特征了，先记一个「尝试时刻」（成败都记）
+      track.faceAt = now
 
       const aligned = alignFace(frame.canvas, face.kps)
       if (!aligned) continue
       const vec = await faceEmbedding(aligned)
       if (!vec || !vec.length) continue
 
+      // 特征到手 → 记「成功时刻」，之后整窗复用（这一刻才把人从「待重试」里放出来）
+      track.faceOkAt = now
       const thumb = faceThumb(frame.canvas, face, FACE_SHOT_SIZE)
       const hit = await matchFace(vec, fc.threshold)
       const slot = faces.value.find(
@@ -363,33 +396,6 @@ export function useAiExtras(options) {
     poses.value = out
   }
 
-  /** 把裁剪图里的姿态结果映射回原帧归一化坐标 */
-  function mapCropBack(item, cropped) {
-    const { box, inner, outSize, srcW, srcH } = cropped
-    const toFrame = (u, v) => {
-      // 裁剪图归一化 → 裁剪图像素 → 去掉填边 → 原帧像素
-      const px = u * outSize
-      const py = v * outSize
-      const fx = (box.x * srcW * 1) + ((px - inner.dx) * box.w * srcW) / inner.nw
-      const fy = (box.y * srcH * 1) + ((py - inner.dy) * box.h * srcH) / inner.nh
-      return { x: fx / srcW, y: fy / srcH }
-    }
-    const x1 = toFrame(item.x, item.y)
-    const x2 = toFrame(item.x + item.w, item.y + item.h)
-    const kps = (item.kps || []).map((k) => {
-      const p = toFrame(k.x, k.y)
-      return { x: p.x, y: p.y, s: k.s }
-    })
-    return {
-      x: x1.x,
-      y: x1.y,
-      w: x2.x - x1.x,
-      h: x2.y - x1.y,
-      score: item.score,
-      kps
-    }
-  }
-
   /* ==================== 计数 ==================== */
   function maybeCountPush(now, emit, cam) {
     const zc = zoneConf()
@@ -440,9 +446,9 @@ export function useAiExtras(options) {
     const fc = faceConf()
     if (fc.enabled && camExtOn(cam, 'face')) {
       try {
-        await loadModel('face', undefined, 640).catch(() => {})
+        await loadModel('face', undefined, fc.detSize).catch(() => {})
         if (isSlotReady('face')) {
-          const dets = await detectFaces(canvas, fc.score)
+          const dets = await detectFaces(canvas, fc.score, fc.detSize)
           const face = pickFaceFor(dets, box)
           if (face) {
             out.faceChecked = true
@@ -502,22 +508,6 @@ export function useAiExtras(options) {
   }
 
   return { step, reset, probe, tracks, faces, poses, counts, status, tracker }
-}
-
-/** 在若干张人脸里，挑出最可能属于这个人形框的那一张 */
-function pickFaceFor(faces, box) {
-  if (!faces || !faces.length || !box) return null
-  let best = null
-  for (const f of faces) {
-    const cx = f.x + f.w / 2
-    const cy = f.y + f.h / 2
-    const inside = cx >= box.x && cx <= box.x + box.w && cy >= box.y && cy <= box.y + box.h
-    const area = (f.w * f.h) / Math.max(1e-6, box.w * box.h)
-    if (!inside && area < 0.02) continue
-    const score = (inside ? 1 : 0) + Math.min(0.5, area) + (Number(f.score) || 0) * 0.2
-    if (!best || score > best.score) best = { score, face: f }
-  }
-  return best ? best.face : null
 }
 
 /** 区域事件文案 */

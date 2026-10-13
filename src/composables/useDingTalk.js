@@ -418,6 +418,15 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
    */
   const isRange = ctx.variant === 'range'
   const isCam = ctx.variant === 'cam'
+  /*
+   * 展示层两个开关（只影响"怎么摆"，不影响任何统计口径 —— 数字与分区始终共用）：
+   *   faceHitDetail   —— 人脸命中**逐条**列（时间·通道·是谁），默认按人聚合。
+   *                       /collect 要"每次命中记录明细"时开；
+   *   hideEventDetail —— 省掉「事件明细（前 N 条）」。/collect 有逐条命中 + 分通道/分类型
+   *                       统计就够了，通用前 20 条是冗余（用户明确要求可不展示）。
+   */
+  const faceHitDetail = ctx.faceHitDetail === true
+  const hideEventDetail = ctx.hideEventDetail === true
   const scopeName = String(ctx.scopeName || '').trim()
   const scopeSuffix = scopeName ? ` · ${scopeName}` : ''
   const titleName = isRange
@@ -440,6 +449,11 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   const fmtClock = (ms) => {
     const d = new Date(ms)
     return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  }
+  /** 逐条命中用秒级：同一分钟内多人/多次命中时能排出先后 */
+  const fmtClockSec = (ms) => {
+    const d = new Date(ms)
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
   }
   const fmtDateTime = (ms) => {
     const d = new Date(ms)
@@ -562,6 +576,23 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
         .join('\n')
     : '- 无'
 
+  /*
+   * 人脸命中「逐条」明细（faceHitDetail 时使用）。
+   * 与上面按人聚合的 hitLines 互补：聚合回答"谁来了几次"，逐条回答"每次几点、哪路、是谁"。
+   * 判据与命中聚合完全一致（有 faceName 才算命中），只是不折叠成一行。
+   * 按时间正序列出（迟到补图/乱序事件也能排好），不截断。
+   */
+  const perHitLines = faceHitDetail
+    ? list
+        .filter((r) => (r.type === 'face' || r.faceName) && String(r.faceName || '').trim())
+        .sort((a, b) => (a.time || 0) - (b.time || 0))
+        .map((r) => {
+          const sc = Number(r.faceScore) > 0 ? `（相似度 ${Math.round(Number(r.faceScore) * 100)}%）` : ''
+          return `- ${fmtClockSec(r.time || Date.now())} · ${r.name || '未知通道'} · ${String(r.faceName).trim()}${sc}`
+        })
+        .join('\n')
+    : ''
+
   const detailLines = (() => {
     const top = [...list].sort((a, b) => (a.time || 0) - (b.time || 0)).slice(0, 20)
     return top
@@ -595,9 +626,12 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     // 埋在下面的事件明细里等于没有。没有命中就整块不出现。
     ...(faceHits.length || strangerFaces
       ? [
-          '**🚨 人脸命中（在库）**',
+          faceHitDetail ? '**🚨 人脸命中（在库）· 逐条**' : '**🚨 人脸命中（在库）**',
           ...(faceHits.length
-            ? [`- 共 **${hitTotal}** 次命中 · ${faceHits.length} 人`, hitLines]
+            ? [
+                `- 共 **${hitTotal}** 次命中 · ${faceHits.length} 人`,
+                faceHitDetail ? perHitLines : hitLines
+              ]
             : ['- 本时段无在库人员命中']),
           ...(strangerFaces ? [`- 另有 ${strangerFaces} 次未识别的人脸（陌生人，不计入命中）`] : []),
           ''
@@ -609,10 +643,15 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     '**📋 按类型**',
     typeLines,
     '',
-    `**📝 事件明细（前 ${Math.min(20, total)} 条）**`,
-    detailLines,
-    detailNote,
-    '',
+    // hideEventDetail（/collect）：人脸命中已逐条 + 分通道/分类型统计够了，通用前 20 条省掉
+    ...(hideEventDetail
+      ? []
+      : [
+          `**📝 事件明细（前 ${Math.min(20, total)} 条）**`,
+          detailLines,
+          detailNote,
+          ''
+        ]),
     `> 由 ${BRAND.fullName} 实时分析生成 · ${formatTime(endMs, false)}`
   ]
 

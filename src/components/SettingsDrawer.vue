@@ -1166,7 +1166,7 @@
           <div class="opt">
             <span>
               <strong>分析频率</strong>
-              <em>每秒取样分析的帧数，越高越灵敏但更耗 CPU</em>
+              <em>{{ sampleFpsHint }}</em>
             </span>
             <SelectField cls="mini" v-model.number="opts.sampleFps" :options="OPT_SAMPLE_FPS" />
           </div>
@@ -1492,6 +1492,77 @@
               </div>
             </div>
 
+            <!-- 采集调优（高级）：三个原本写死在代码里的旋钮。
+                 缺省值 = 原常量，所以不动它就与升级前完全一致。 -->
+            <div class="opt">
+              <span>
+                <strong>采集调优（高级）</strong>
+                <em>抓不到人脸时再动这里；改动会影响识别开销</em>
+              </span>
+              <div class="test-row">
+                <button class="mini-btn ghost" @click="faceTuneOpen = !faceTuneOpen">
+                  {{ faceTuneOpen ? '收起' : '展开' }}
+                </button>
+              </div>
+            </div>
+
+            <template v-if="faceTuneOpen">
+              <div class="opt">
+                <span>
+                  <strong>失败重试间隔</strong>
+                  <em>提特征失败后多久允许再试；越小越能抓住「人站着但那一帧没提成功」</em>
+                </span>
+                <div class="test-row">
+                  <input class="field mini" type="number" min="100" max="5000" step="50" v-model.number="opts.face.retryMs" />
+                  <span class="unit">毫秒</span>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
+                  <strong>同一人重提间隔</strong>
+                  <em>同一个人的脸多少秒内不重复提特征（省算力）</em>
+                </span>
+                <div class="test-row">
+                  <input class="field mini" type="number" min="2" max="60" v-model.number="opts.face.dedupeSec" />
+                  <span class="unit">秒</span>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
+                  <strong>头部补检范围</strong>
+                  <em>按人形框顶部多大比例裁剪放大再检（救远处漏检的脸）；越大越费算力</em>
+                </span>
+                <div class="range-row">
+                  <input type="range" min="0.2" max="0.9" step="0.05" v-model.number="opts.face.headRatio" />
+                  <b>{{ Number(opts.face.headRatio).toFixed(2) }}</b>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
+                  <strong>检测输入边长</strong>
+                  <em>调大能救更远的脸，代价是每帧推理更慢。非 640 时后端日志会打 ONNX 形状告警（无害，模型是动态导出的）</em>
+                </span>
+                <div class="test-row">
+                  <select class="field mini" v-model.number="opts.face.detSize">
+                    <option v-for="s in FACE_DET_SIZES" :key="s" :value="s">{{ s }}</option>
+                  </select>
+                  <span class="unit">像素</span>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
+                  <em>这几个值会随配置同步到后端检测服务；改完记得点右下角「保存并应用」</em>
+                </span>
+                <div class="test-row">
+                  <button class="mini-btn ghost" @click="resetFaceTune">恢复默认</button>
+                </div>
+              </div>
+            </template>
+
             <!-- 待录入（前端 / 后端检测到的都会列进来）
                  ⚠️ 这一块**刻意不挂 v-if**。
                  以前是 v-if="allPendingFaces.length"，空的时候整块直接消失 ——
@@ -1555,9 +1626,23 @@
                   <button class="mini-btn ghost" @click="faceLibOpen = !faceLibOpen">
                     {{ faceLibOpen ? '收起' : '管理' }}
                   </button>
+                  <button class="mini-btn" @click="triggerEnrollFile" :disabled="enrollState === 'loading'">
+                    {{ enrollState === 'loading' ? '录入中…' : '上传照片录入' }}
+                  </button>
                 </strong>
                 <em>报警推送里显示的就是这里的名字</em>
               </span>
+              <input
+                ref="enrollFileEl"
+                type="file"
+                accept="image/*"
+                class="hidden-file"
+                @change="onEnrollFile"
+              />
+              <!-- 上传录入的反馈：明确告诉用户「在干嘛 / 成没成」，不靠静默或 alert -->
+              <p class="enroll-status" v-if="enrollState !== 'idle'" :class="enrollState === 'error' ? 'err' : (enrollState === 'done' ? 'ok' : 'busy')">
+                {{ enrollMsg }}
+              </p>
               <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
                 <div class="face-card" v-for="f in pagedFaceLib" :key="f.id">
                   <img v-if="f.thumb" :src="f.thumb" alt="人脸" />
@@ -3142,6 +3227,7 @@ import { resetPushStats } from '../composables/usePushStats'
 import {
   backendState,
   backendStateText,
+  backendOn,
   backendStatus,
   backendWatchdog,
   deleteBackendTgWebhook,
@@ -3189,6 +3275,7 @@ import {
   clearPendingFaces,
   deleteFace,
   dropBackendPendingFace,
+  enrollFromImage,
   faceLibOpen,
   faces as faceLib,
   loadBackendPendingFaces,
@@ -4403,6 +4490,72 @@ async function doAddPending(pf) {
   else removePendingFace(pf.id)
 }
 
+/* ==================== 手动上传照片录入 ====================
+ * 编排全在 useFaceLib.enrollFromImage 里；这里只负责「触发选择 → 拿文件 → 调它 → 把结果翻译成反馈」。
+ * 三个明确诉求：① 一张一录 ② 上传要有提示 ③ 上传后反馈成功/失败。
+ * 反馈用内联状态条（不是 alert）：进行中显「录入中…」，结束显成功/失败文案。 */
+const enrollFileEl = ref(null)
+const enrollState = ref('idle') // idle | loading | done | error
+const enrollMsg = ref('')
+const enrollOk = ref(false)
+
+/* ---- 采集调优（高级）----
+ * 检测输入边长的候选值：**32 的倍数**（解码按 stride 8/16/32 铺 anchor，
+ * 非 32 的倍数会把 anchor 网格铺错）。默认 640 即历史值。 */
+const FACE_DET_SIZES = [320, 480, 640, 800, 960, 1280]
+const faceTuneOpen = ref(false)
+
+/**
+ * 恢复采集调优的四个旋钮。
+ * 默认值从 **同一份** `cloneDefaultOptions()`（= defaults.js，其 face 默认值又取自
+ * useTracker.FACE_TUNING）读，不在这里另写字面量 —— 免得「恢复默认」恢复出另一个数。
+ */
+function resetFaceTune() {
+  const d = _DEFAULTS.face || {}
+  opts.face.retryMs = d.retryMs
+  opts.face.headRatio = d.headRatio
+  opts.face.detSize = d.detSize
+  opts.face.dedupeSec = d.dedupeSec
+}
+
+function triggerEnrollFile() {
+  // 先清掉上一条反馈，避免和上次的结论混在一起
+  enrollState.value = 'idle'
+  enrollMsg.value = ''
+  if (enrollFileEl.value) enrollFileEl.value.click()
+}
+
+async function onEnrollFile(e) {
+  const input = e && e.target
+  const file = input && input.files && input.files[0]
+  // 允许同一张照片重复选（change 不触发时，手动清 value）
+  if (input) input.value = ''
+  if (!file) return
+  // 展开人脸库，让录入结果（新出现的一张）立即可见
+  faceLibOpen.value = true
+  enrollState.value = 'loading'
+  enrollMsg.value = '正在加载人脸识别模型…'
+  try {
+    const r = await enrollFromImage(file, { score: 0.4, max: Number(opts.face.libMax) || 50 })
+    if (r.ok) {
+      enrollOk.value = true
+      enrollState.value = 'done'
+      enrollMsg.value =
+        r.detected > 1
+          ? `录入成功：${r.name}（照片里检测到 ${r.detected} 张人脸，已录入最清晰的一张；其余请分别上传）`
+          : `录入成功：${r.name}（已自动同步到后端）`
+    } else {
+      enrollOk.value = false
+      enrollState.value = 'error'
+      enrollMsg.value = r.reason || '录入失败'
+    }
+  } catch (err) {
+    enrollOk.value = false
+    enrollState.value = 'error'
+    enrollMsg.value = '录入过程出错：' + ((err && err.message) || err)
+  }
+}
+
 function doIgnorePending(pf) {
   if (pf.fromBackend) dropBackendPendingFace(opts.backend.url, pf.backendId)
   else removePendingFace(pf.id)
@@ -4791,10 +4944,32 @@ const motionLevelHint = computed(() => {
   return `画面变动面积达到 ${v}% 才算异常（低于它的抖动被忽略，不通知也不推送）；与灵敏度取较大者生效`
 })
 
+/**
+ * 是否跑在后端检测模式（服务端推理、浏览器不加载模型）。
+ * 与 App.vue 的 backendActive 同一个判据（backendOn 纯函数，单一来源）。
+ */
+const backendModeOn = computed(() => backendOn(opts))
+
 const modelDesc = computed(() => {
   const m = AI_MODELS.find((x) => x.key === opts.aiModel) || AI_MODELS[1]
-  return `${m.desc} · 模型文件 ${m.size} MB`
+  const base = `${m.desc} · 模型文件 ${m.size} MB`
+  // 后端模式下人形识别跑在服务端，模型也由服务端加载 —— 不说清楚的话，
+  // 用户在页面上换了模型只会看到"没有变化"（浏览器压根没在推理）
+  return backendModeOn.value ? `${base} · 后端模式：由服务端加载并热切换` : base
 })
+
+/**
+ * 「分析频率」到底在调哪一端，取决于检测跑在哪。
+ * 后端模式下浏览器不推理（aiEnabled 被临时置 false），这个值通过配置同步
+ * 变成服务端的抽帧帧率；前端模式下它管浏览器自己的抽样节奏。
+ * 两处是同一个概念，所以共用这一个控件，但必须说明白，否则用户改完
+ * 发现"没用"——其实是作用在另一头。
+ */
+const sampleFpsHint = computed(() =>
+  backendModeOn.value
+    ? '服务端每秒抽帧分析的帧数，越高越灵敏但更费 CPU（改后自动重连拉流）'
+    : '每秒取样分析的帧数，越高越灵敏但更耗 CPU'
+)
 
 const backendText = computed(() => {
   if (aiState.value === 'error') return '失败'
@@ -5269,11 +5444,12 @@ async function testTelegram() {
 
 /* ---------------- 关键事件单独提醒（私聊推送） ---------------- */
 
-/** 三类关键事件。key 与 useTelegram.directPushEventOn 的 kind 一一对应 */
+/** 四类关键事件。key 与 useTelegram.directPushEventOn 的 kind 一一对应 */
 const DIRECT_EVENT_OPTS = [
   { id: 'silence', label: '静默提醒', desc: '免打扰开始 / 结束的提醒' },
   { id: 'summary', label: '静默汇总', desc: '静默结束时的那条汇总（含人脸命中明细）' },
-  { id: 'face', label: '人脸命中', desc: '识别到人脸库里的人时，带图单独提醒' }
+  { id: 'face', label: '人脸命中', desc: '识别到人脸库里的人时，带图单独提醒' },
+  { id: 'pending', label: '待录入满库', desc: '未建档人脸攒满收集上限时，提醒及时处理（每个填满周期只提醒一次）' }
 ]
 
 const newDirectId = ref('')
@@ -5371,12 +5547,12 @@ const TG_COMMANDS = [
   {
     cmd: 'collect',
     usage: '/collect [T|Y] [起-止] [img]',
-    desc: '时段内事件汇总：T=今日、Y=昨日（省略为今日），起止按小时如 9-18（省略为全天）；加 img 连截图一起推'
+    desc: '时段内事件汇总（整天完整、不再按 1000 条截断）：T=今日、Y=昨日（省略为今日），起止按小时如 9-18（省略为全天）。人脸命中逐个列出每次记录；汇总过长分多条发送；加 img 连截图一起推'
   },
   {
     cmd: 'hits',
     usage: '/hits [T|Y]',
-    desc: '人脸命中记录：今天或昨天「命中已录入人脸」的事件清单（时间 / 通道 / 是谁）。T=今日、Y=昨日，省略为今日'
+    desc: '人脸库概览：待录入数量 + 已录入名单 + 今日/昨日的命中记录（时间 / 通道 / 是谁）。T=今日、Y=昨日，省略为今日'
   },
   {
     cmd: 'csilent',
@@ -6301,6 +6477,38 @@ function loadHidden() {
 
 .face-acts .mini-btn {
   flex: 1;
+}
+
+/* 上传照片录入：隐藏的原生 file input + 反馈状态条 */
+.hidden-file {
+  display: none;
+}
+
+.enroll-status {
+  margin: 6px 0 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid transparent;
+}
+
+.enroll-status.busy {
+  color: var(--text-dim, #9fb3c8);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.enroll-status.ok {
+  color: #b6f0c8;
+  background: color-mix(in srgb, #2e9e5b 18%, transparent);
+  border-color: color-mix(in srgb, #2e9e5b 45%, transparent);
+}
+
+.enroll-status.err {
+  color: #ffc9c9;
+  background: color-mix(in srgb, #d23b3b 16%, transparent);
+  border-color: color-mix(in srgb, #d23b3b 42%, transparent);
 }
 
 /* ---------- 小组件按钮 ---------- */

@@ -10,8 +10,17 @@
  */
 import { ref } from 'vue'
 import { openDB, FACE_STORE_NAME } from './useEventStore.js'
-import { cosine } from './useAiDetector.js'
+import {
+  cosine,
+  loadModel,
+  isSlotReady,
+  detectFaces,
+  alignFace,
+  faceEmbedding,
+  faceThumb
+} from './useAiDetector.js'
 import { netErrorText, timeoutReason } from './useNet.js'
+import { looksSame } from './vecMatch.js'
 
 /** 默认比对阈值：余弦相似度高于它才认为是同一个人 */
 export const DEFAULT_FACE_THRESHOLD = 0.38
@@ -294,21 +303,15 @@ export async function matchFace(vector, threshold = DEFAULT_FACE_THRESHOLD) {
  * 存进库反而占空间。
  */
 export const pendingFaces = ref([])
-const PENDING_MAX = 24
+/**
+ * 前端自己的待录入暂存上限。
+ * ⚠️ 只在**纯前端模式**（没接后端）下有意义：后端模式下队列在后端 SQLite
+ * （上限 `PENDING_KEEP`，见 server/analyzer.mjs），这里是空的。
+ * 满库提醒的阈值要与它对齐 —— 见 App.vue 的 pendingFullWatcher。
+ */
+export const PENDING_MAX = 24
 
-/** 粗略判断是不是同一张脸（避免同一个人每隔 5 秒就塞一张进来） */
-function looksSame(a, b) {
-  if (!a.thumb || !b.thumb) return false
-  if (!a.vector || !b.vector) return false
-  return cosineOrRaw(a.vector, b.vector) > 0.5
-}
-
-function cosineOrRaw(a, b) {
-  if (!a || !b || a.length !== b.length) return -1
-  let s = 0
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i]
-  return s
-}
+/** looksSame / cosineOrRaw 已抽到 vecMatch.js（前后端共用单一来源），这里不再重复定义 */
 
 /**
  * 暂存一张未录入的人脸。
@@ -404,7 +407,7 @@ export async function loadBackendPendingFaces(url) {
     const t = setTimeout(() => ctrl.abort(timeoutReason('待录入队列', 8000)), 8000)
     let res
     try {
-      res = await fetch(`${base}/api/pending-faces?limit=50`, { signal: ctrl.signal })
+      res = await fetch(`${base}/api/pending-faces?limit=100`, { signal: ctrl.signal })
     } finally {
       clearTimeout(t)
     }
@@ -435,5 +438,91 @@ export async function dropBackendPendingFace(url, backendId) {
     await fetch(`${base}/api/pending-face?id=${encodeURIComponent(backendId)}`)
   } catch (e) {
     /* 删不掉也只是下次又出现，不影响已录入的人脸 */
+  }
+}
+
+/* ==================== 手动上传照片录入 ====================
+ *
+ * 用户诉求：能不能支持「上传一张照片、手动录入一个人脸」，而不是等摄像头慢慢拍到。
+ * 「提特征」的全套零件本来就是现成的（detectFaces / alignFace / faceEmbedding /
+ * faceThumb / addFace），这里只做**编排**，不新写任何识别算法。
+ *
+ * 设计取舍（README §5.31）：
+ *   1. **一张一录**：一次上传只录一个人。照片里有 N 张脸时，自动挑「分数最高、其次面积最大」
+ *      的一张录入，并在结果里带回 detected 张数，UI 提示「其余请分别上传」。
+ *   2. **后端模式前端平时不加载人脸模型** —— 这里**按需 loadModel('face'/'faceemb')**，
+ *      首次约 1~3 秒，调用方（设置页）必须给出 loading 态，否则用户以为卡死了。
+ *   3. **失败全有文案**：不是图片 / 找不到正脸 / 对齐失败 / 提特征失败 / 模型加载失败 /
+ *      人脸库已满，各说各的，不抛裸异常（「待录入空态」那条教训：用户至少要听懂"为什么没录上"）。
+ *   4. 入库后**不需要手动推后端** —— addFace → refreshFaces → App.vue 盯着 faceList 变化
+ *      会自动补发一份配置（含人脸库），后端底库随之更新。
+ *
+ * @param {File} file 用户选的图片
+ * @param {{score?:number, max?:number, longSide?:number}} [opts]
+ * @returns {Promise<{ok:boolean, id?:number, name?:string, detected?:number, reason?:string}>}
+ */
+export async function enrollFromImage(file, { score = 0.4, max = DEFAULT_FACE_MAX, longSide = 1280 } = {}) {
+  if (!file) return { ok: false, reason: '没有选择图片' }
+  if (!/^image\//.test(file.type || '')) return { ok: false, reason: '请选择图片文件（jpg / png 等）' }
+
+  // 1. 解码：优先按 EXIF 朝向摆正（手机竖拍照片很常见，否则脸会横过来）
+  let bmp
+  try {
+    bmp = await createImageBitmap(file, { imageOrientation: 'from-image' })
+  } catch (e) {
+    try {
+      bmp = await createImageBitmap(file)
+    } catch (e2) {
+      return { ok: false, reason: '图片打不开，换一张试试' }
+    }
+  }
+  // 2. 画到画布，超长边等比缩到 longSide（检测只在 640 内做，原图再大也没用，还费内存）
+  const scale = Math.min(1, longSide / Math.max(bmp.width || 1, bmp.height || 1))
+  const cw = Math.max(1, Math.round((bmp.width || 1) * scale))
+  const ch = Math.max(1, Math.round((bmp.height || 1) * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = cw
+  canvas.height = ch
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    if (bmp.close) bmp.close()
+    return { ok: false, reason: '浏览器画布不可用' }
+  }
+  ctx.drawImage(bmp, 0, 0, cw, ch)
+  if (bmp.close) bmp.close()
+
+  try {
+    // 3. 按需加载人脸模型（后端模式前端平时不加载，这里现拉）
+    await loadModel('face').catch(() => {})
+    await loadModel('faceemb').catch(() => {})
+    if (!isSlotReady('face') || !isSlotReady('faceemb')) {
+      return { ok: false, reason: '人脸识别模型加载失败，请稍后重试（确认 /ai/models 可访问）' }
+    }
+
+    // 4. 检测
+    const dets = await detectFaces(canvas, score)
+    if (!dets || !dets.length) {
+      return { ok: false, reason: '没检测到清晰的正脸，请上传一张光线充足、正对镜头的单人照片' }
+    }
+    // 5. 多脸：挑「分数最高、其次面积最大」的一张
+    const best = dets
+      .slice()
+      .sort((a, b) => b.score - a.score || b.w * b.h - a.w * a.h)[0]
+
+    // 6. 对齐 + 提特征
+    const aligned = alignFace(canvas, best.kps)
+    if (!aligned) return { ok: false, reason: '人脸对齐失败，换一张更清晰的照片' }
+    const vector = await faceEmbedding(aligned)
+    if (!vector || !vector.length) return { ok: false, reason: '特征提取失败，换一张更清晰的照片' }
+
+    // 7. 缩略图：优先用原框裁切（和待录入 / 其他人脸库缩略图风格一致），对齐图兜底
+    const thumb = faceThumb(canvas, best) || aligned.toDataURL('image/jpeg', 0.72) || ''
+
+    // 8. 入库（自动编号 + 自动回推后端，见 App.vue 的 faceList 监听）
+    const r = await addFace(vector, thumb, '', max)
+    if (!r.ok) return { ok: false, reason: r.reason || '录入失败' }
+    return { ok: true, id: r.id, name: r.name, detected: dets.length }
+  } catch (e) {
+    return { ok: false, reason: '录入过程出错：' + ((e && e.message) || e) }
   }
 }

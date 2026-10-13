@@ -15,6 +15,11 @@
 
 import { SECRET_SCOPE } from './auth.js'
 import { secretDigest } from '../composables/sha256.js'
+/*
+ * 采集调优的缺省值从「唯一判定」处取（useTracker 零依赖，Node 侧也安全）。
+ * 不在这里另写一份字面量，免得设置页显示的值与执行层真正用的值悄悄漂开。
+ */
+import { FACE_TUNING } from '../composables/useTracker.js'
 
 const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
 const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
@@ -306,7 +311,7 @@ export const HIDDEN_OPTIONS = {
   /** 人形识别用的采样帧宽度（越大越准，也越吃性能，640 与模型输入匹配） */
   aiInputSize: 640,
   /** 人形置信度阈值 */
-  aiScore: 0.5,
+  aiScore: 0.4,
   /** 人形识别间隔（毫秒） */
   aiIntervalMs: 5000,
   /**
@@ -336,7 +341,7 @@ export const HIDDEN_OPTIONS = {
   face: {
     enabled: true,
     /** 人脸检测置信度阈值 */
-    score: 0.5,
+    score: 0.4,
     /** 判定为同一个人的余弦相似度阈值（越高越严格） */
     matchThreshold: 0.38,
     /** 人脸库容量上限 */
@@ -344,7 +349,7 @@ export const HIDDEN_OPTIONS = {
     /** 同一个人的两次人脸事件最小间隔（秒） */
     cooldownSec: 30,
     /** 同一个人的脸多少秒内不重复提特征（省算力） */
-    dedupeSec: 10,
+    dedupeSec: FACE_TUNING.dedupeSec.def,
     /** 识别到已录入的人 → 记事件并推送 */
     eventOnKnown: true,
     /** 检测到未录入的人脸 → 也记事件（默认关，避免刷屏） */
@@ -352,7 +357,18 @@ export const HIDDEN_OPTIONS = {
     /** 把没录入的人脸暂存起来，方便在设置里一键录入 */
     collectUnknown: true,
     /** 画面上画人脸框 */
-    drawBox: true
+    drawBox: true,
+    /*
+     * ---------------- 采集调优（设置页「采集调优」折叠组） ----------------
+     * 三个旋钮原本是散落的代码常量，调一次要改代码重构建。缺省值 = 原常量值，
+     * 所以不配置时行为与历史完全一致。上下限与解析收口在 useTracker.FACE_TUNING。
+     */
+    /** 提特征失败后多久允许再试（毫秒）——越小越能抓住「人站着但那一帧没提成功」 */
+    retryMs: FACE_TUNING.retryMs.def,
+    /** 头部补检裁剪占人形框高度的比例（只影响整帧漏检的远处人脸） */
+    headRatio: FACE_TUNING.headRatio.def,
+    /** SCRFD 检测输入边长（必须是 32 的倍数；调大救更远的脸，代价是更慢） */
+    detSize: FACE_TUNING.detSize.def
   },
   /**
    * 人形姿态（YOLOv8n-pose，17 关键点）。
@@ -1152,7 +1168,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.2.0'
+  version: '1.4.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'

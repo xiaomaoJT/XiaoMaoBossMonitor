@@ -179,7 +179,10 @@ export class Tracker {
       history: [{ t, x: foot.x, y: foot.y }],
       /** 人脸识别结果（由外部回填，用于去重） */
       face: null,
-      faceAt: 0
+      /** 上一次「尝试」提特征的时刻（成功或失败都记）—— 失败重试的节流闸门 */
+      faceAt: 0,
+      /** 上一次「成功」提特征的时刻——复用闸门只看这个，避免一次失败就把人锁死一个去重窗 */
+      faceOkAt: 0
     }
   }
 
@@ -335,24 +338,199 @@ export class Tracker {
 }
 
 /**
- * 把检测框分配给人脸识别结果：为每张脸找「脚点在脸框内 / 与脸框重叠最大」的人形轨迹。
- * 用于把「这张脸是谁」写到对应的轨迹上。
+ * 「这张脸属于这个人形框吗」——**唯一的几何判定**，前端 / 后端共用。
+ * 规则与 attachFacesToTracks 相同（包含 + 头区 + 面积下限），详见其注释。
+ * @returns {number} 0 = 不属于；>0 = 属于，数值为归属强度（人脸占框面积，封顶 1）
  */
-export function attachFacesToTracks(tracks, faces, iouThreshold = 0.1) {
+export function faceBoxAffinity(face, box, opts = {}) {
+  if (!face || !box || !box.w || !box.h) return 0
+  const tolerance = Number.isFinite(opts.tolerance) ? opts.tolerance : 0.01
+  const headZone = Number.isFinite(opts.headZone) ? opts.headZone : 0.6
+  const minAreaRatio = Number.isFinite(opts.minAreaRatio) ? opts.minAreaRatio : 0.01
+  const fx = face.x + face.w / 2
+  const fy = face.y + face.h / 2
+  // 1. 中心点在人形框内（含容差）
+  if (fx < box.x - tolerance || fx > box.x + box.w + tolerance) return 0
+  if (fy < box.y - tolerance || fy > box.y + box.h + tolerance) return 0
+  // 2. 中心点在上部（头区）
+  if (fy > box.y + box.h * headZone + tolerance) return 0
+  // 3. 面积下限
+  const areaRatio = (face.w * face.h) / Math.max(EPS, box.w * box.h)
+  if (areaRatio < minAreaRatio) return 0
+  return Math.min(1, areaRatio)
+}
+
+/**
+ * 把检测框分配给人脸识别结果：为每张脸找「它属于哪个人」。
+ *
+ * 为什么不用 IoU：人脸长在人形框**内部**，两者 IoU ≈ 人脸面积 / 人形框面积。
+ * 旧版门槛 IoU ≥ 0.1 等于要求「脸占到人形框的 10%」——只有贴脸近拍
+ * （人形框被裁到胸以上）才过得了；门口 1.2m 的全身框只剩 6.7%，
+ * 大厅 4m / 走廊 6m 只有 3.6%，这就是人脸采集率只有约 1/10 的直接原因。
+ * 实测（/tmp/face-probe/gates.mjs）：近距胸以上 32.0% / 门口半身 11.1%
+ * 通过，门口全身 6.7% / 大厅 3.7% / 走廊 3.6% 被丢。
+ *
+ * 新规则（纯几何，与人形框绝对大小无关，远近一视同仁）：
+ *   1. 人脸中心点落在人形框内（容差 tolerance 容忍边缘抖动）
+ *   2. 人脸中心位于人形框**上部**（headZone）——头长在身体上方，
+ *      顺带挡掉衣服图案 / 身上反光造成的假脸
+ *   3. 人脸面积 ≥ 人形框面积的 minAreaRatio——挡掉隔壁人的脸
+ *   4. 多个候选都合法时取人形框**最小**的那个：框最紧 = 最可能是本人；
+ *      两人被检测成一体的合并框必然更大，天然排后
+ *
+ * @param {Array} tracks 人形轨迹（带 box）
+ * @param {Array} faces 人脸检测框
+ * @param {object} [opts] 见 faceBoxAffinity
+ * @returns {Array<{face:object, track:object}>}
+ */
+export function attachFacesToTracks(tracks, faces, opts = {}) {
   const result = []
-  if (!tracks || !faces || !faces.length) return result
+  if (!tracks || !tracks.length || !faces || !faces.length) return result
   for (const face of faces) {
     let best = null
     for (const tr of tracks) {
-      const ov = iou(tr.box, face)
-      if (ov < iouThreshold) continue
-      const areaRatio = (face.w * face.h) / Math.max(EPS, tr.box.w * tr.box.h)
-      // 人脸占人形框的比例也要合理（太小说明不是这个人的脸）
-      if (areaRatio < 0.01) continue
-      const score = ov + Math.min(0.4, areaRatio)
-      if (!best || score > best.score) best = { score, track: tr, ov }
+      const aff = faceBoxAffinity(face, tr.box, opts)
+      if (aff <= 0) continue
+      const area = tr.box.w * tr.box.h
+      // 归属强度相同（都封顶 1）时，框最紧的赢
+      if (!best || area < best.area) best = { track: tr, area, affinity: aff }
     }
     if (best) result.push({ face, track: best.track })
   }
   return result
+}
+
+/**
+ * 哪些轨迹值得做一次「新鲜」的人脸检测（去重窗口已到期、整帧检测又没覆盖到）。
+ *
+ * 这是头部裁剪补检的性能闸门，两端共用同一份——写两边必然漂移：
+ *   - 窗口没到期的轨迹本来就要复用旧结果，检出来了也用不上，白跑一次推理；
+ *   - 2fps × 10s 去重窗下，每轨迹最多 0.1 次/秒，相对整帧检测（2 次/秒）可忽略。
+ *
+ * @param {Array} live 本帧活动轨迹
+ * @param {Set<string|number>} covered 整帧检测已经覆盖到的 trackId
+ * @param {number} now 时间戳（毫秒）
+ * @param {number} dedupeMs 去重窗口（毫秒）
+ * @returns {Array} 需要补检的轨迹（保持原顺序）
+ */
+export function tracksDueForFace(live, covered, now, dedupeMs) {
+  if (!live || !live.length) return []
+  return live.filter(
+    (tr) => !covered.has(tr.id) && (!tr.faceAt || now - tr.faceAt >= dedupeMs)
+  )
+}
+
+/**
+ * 提特征「失败后的短重试」节流窗口（毫秒）。
+ *
+ * ⚠️ 这是采集率第二暗坑的修正：以前 `faceAt` 在「尝试提特征之前」就记了，
+ * 一旦对齐/提特征失败（翻正失败、模型瞬间没就绪、WASM 抖动），
+ * 这条轨迹就被去重窗（默认 10s）关在外面——人明明站着，10 秒内再也不会被提特征，
+ * 采集率直接掉一截。
+ * 改成「成功才记 long 窗口、失败只记一个短窗口」：失败的人 0.7s 后就能再试，
+ * 成功的人仍享 10s 复用。0.7s 在 2fps 下≈每帧都试一遍，代价只是几次
+ * 对齐 + 一次 112×112 推理（几十 ms），远小于「漏掉一张脸」的代价。
+ */
+export const FACE_RETRY_MS = 700
+
+/**
+ * 复用闸门：上一次提特征成功且在去重窗内，就直接继承既有结果，别重提。
+ * 只看 `faceOkAt`（成功的时刻），所以一次失败不会把人锁死一个去重窗。
+ */
+export function faceReuseFresh(tr, now, dedupeMs) {
+  return !!(tr && tr.faceOkAt && now - tr.faceOkAt < dedupeMs)
+}
+
+/**
+ * 重试闸门：上一次「尝试」还在节流窗内（不论成败），就先歇一会儿，别每帧都撞。
+ * 配合 FACE_RETRY_MS 用——连续失败时才节流，模型就绪/翻正成功后立刻能提。
+ */
+export function faceRetryDue(tr, now, retryMs = FACE_RETRY_MS) {
+  return !!(tr && tr.faceAt && now - tr.faceAt < retryMs)
+}
+
+/**
+ * 采集调优旋钮的缺省值与上下限 —— **唯一判定**，前端 `useAiExtras` 与
+ * 后端 `analyzer` 都走 `faceTuning()`，显示层与执行层不会各算一遍。
+ *
+ * 这三个旋钮以前是散落的代码常量（`FACE_RETRY_MS` / 硬编码 0.45 / `SLOT_SIZE.face = 640`），
+ * 调一次得改代码重构建。现在收口在这里，设置页「采集调优」直接改。
+ * 缺省值 = 原来的常量值，所以**不配置时行为与历史完全一致**。
+ */
+export const FACE_TUNING = {
+  /** 提特征失败后的短重试节流窗（毫秒），见 FACE_RETRY_MS */
+  retryMs: { def: FACE_RETRY_MS, min: 100, max: 5000 },
+  /**
+   * 同一个人的脸多少秒内不重复提特征（省算力）。
+   * ⚠️ 这个键早就在配置里（默认 10），但两端 `faceConf` 各写了一个 `|| 6` 的兜底，
+   *    与配置默认值并不一致 —— 收口到这里，杜绝「设置页显示 10、执行层实际按 6 算」。
+   */
+  dedupeSec: { def: 10, min: 2, max: 60 },
+  /**
+   * 头部补检的裁剪高度占人形框的比例。
+   * 0.45 是三种构图的兼容上界：全身 12~18% / 半身 25~30% / 胸以上 45~55%。
+   */
+  headRatio: { def: 0.45, min: 0.2, max: 0.9 },
+  /**
+   * SCRFD 检测输入边长。**必须是 32 的倍数**（解码按 stride 8/16/32 铺 anchor）。
+   * 640 是原值；调大能救更远的半张脸，代价是推理更慢。
+   */
+  detSize: { def: 640, min: 320, max: 1280 }
+}
+
+const tuningNum = (v, def) => {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : def
+}
+const tuningClamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n))
+
+/**
+ * 把 `options.face` 解析成一组可直接用的数字。
+ * 缺字段 / 脏值 / 越界都兜得住 —— 老存档里没有这些键时自动回到缺省，绝不产出 NaN。
+ * @param {object} face `options.face`
+ * @returns {{retryMs:number, headRatio:number, detSize:number}}
+ */
+export function faceTuning(face) {
+  const c = face || {}
+  // 输入边长吸附到 32 的倍数：配置写 700 也会落到 704，不会把 anchor 网格铺错
+  const raw = tuningNum(c.detSize, FACE_TUNING.detSize.def)
+  const snapped = Math.round(raw / 32) * 32
+  return {
+    retryMs: Math.round(tuningClamp(tuningNum(c.retryMs, FACE_TUNING.retryMs.def), FACE_TUNING.retryMs.min, FACE_TUNING.retryMs.max)),
+    dedupeSec: tuningClamp(tuningNum(c.dedupeSec, FACE_TUNING.dedupeSec.def), FACE_TUNING.dedupeSec.min, FACE_TUNING.dedupeSec.max),
+    headRatio: tuningClamp(tuningNum(c.headRatio, FACE_TUNING.headRatio.def), FACE_TUNING.headRatio.min, FACE_TUNING.headRatio.max),
+    detSize: tuningClamp(snapped, FACE_TUNING.detSize.min, FACE_TUNING.detSize.max)
+  }
+}
+
+/**
+ * 在若干张人脸里，挑出最可能属于这个人形框的那一张（补拍窗口用）。
+ * 与 attachFacesToTracks 共用 faceBoxAffinity——「哪张脸属于哪个人」
+ * 只允许有一个答案，不许两端各演算一遍。
+ * 排序：归属强度 → 脸更大（像素更多，特征更稳）→ 检测置信度更高。
+ * @returns {object|null} 人脸框，或 null（这个框里没有脸）
+ */
+export function pickFaceFor(faces, box, opts = {}) {
+  if (!faces || !faces.length || !box) return null
+  let best = null
+  let bestAff = 0
+  let bestArea = -1
+  let bestScore = -1
+  for (const f of faces) {
+    const aff = faceBoxAffinity(f, box, opts)
+    if (aff <= 0) continue
+    const area = f.w * f.h
+    const sc = Number(f.score) || 0
+    if (
+      !best ||
+      aff > bestAff ||
+      (aff === bestAff && (area > bestArea || (area === bestArea && sc > bestScore)))
+    ) {
+      best = f
+      bestAff = aff
+      bestArea = area
+      bestScore = sc
+    }
+  }
+  return best
 }

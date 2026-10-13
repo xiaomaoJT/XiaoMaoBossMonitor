@@ -310,16 +310,17 @@ export async function detectPersons(canvas, minScore = 0.5, opts = {}) {
 
 /**
  * 人脸检测（SCRFD-500M）
+ * @param {number} [size] 检测输入边长（缺省 640；SCRFD 是动态导出，可改 —— 见 FACE_TUNING.detSize）
  * @returns {Promise<Array<{x,y,w,h,score,kps:{x,y,s}[]}>>} 归一化坐标，kps 为 5 点
  */
-export async function detectFaces(canvas, minScore = 0.5) {
-  await loadModel('face', SLOT_FILE.face).catch(() => {})
+export async function detectFaces(canvas, minScore = 0.5, size = SLOT_SIZE.face) {
+  const side = Math.max(32, Math.round(Number(size) || SLOT_SIZE.face))
+  await loadModel('face', SLOT_FILE.face, side).catch(() => {})
   if (!isSlotReady('face')) return []
   if (!canvas || !canvas.width || !canvas.height) return []
 
-  const size = SLOT_SIZE.face
-  const { rgba, geom } = prepare(canvas, size)
-  return request('face', size, rgba, {
+  const { rgba, geom } = prepare(canvas, side)
+  return request('face', side, rgba, {
     score: Math.min(0.95, Math.max(0.1, Number(minScore) || 0.5)),
     iou: IOU,
     geom
@@ -552,6 +553,96 @@ export function cropBox(source, box, outSize = 320, padRatio = 0.12) {
     srcW: sw,
     srcH: sh
   }
+}
+
+/* ==================== 人脸：头部区域裁剪放大再检测 ==================== */
+
+/**
+ * 人形框的「头部区域」（归一化，已 clamp 到画面内）。
+ *
+ * 为什么要单独裁一遍：SCRFD 的输入边长固定 640。一个 4 米外的人，
+ * 脸在整帧 640 输入里只剩十几个像素，低于检测器的有效分辨率 →
+ * 整帧检测直接漏检，采集率就是这样掉到十分之一的。
+ * 把头部区域裁出来放大到 640 再检一次，同一张脸在模型眼里从 ~12px 变成 ~100px。
+ *
+ * 取框高 45% 是三种构图的兼容上界：
+ *   全身框（头在顶部 12~18%）/ 半身框（25~30%）/ 胸以上近拍（45~55%）
+ * 上限 0.9 防呆：配置写飞了也不至于把整框当头部。
+ *
+ * @param {object} box 人形框（归一化）
+ * @param {number} [headRatio=0.45] 头部区域占框高的比例
+ * @returns {{x:number,y:number,w:number,h:number}|null}
+ */
+export function headZoneOf(box, headRatio = 0.45) {
+  if (!box || !box.w || !box.h) return null
+  const ratio = Math.min(0.9, Math.max(0.1, Number(headRatio) || 0.45))
+  const y = Math.max(0, Math.min(1, box.y))
+  const h = Math.min(1 - y, box.h * ratio)
+  const x = Math.max(0, Math.min(1, box.x))
+  const w = Math.min(1 - x, box.w)
+  if (h <= 0.002 || w <= 0.002) return null
+  return { x, y, w, h }
+}
+
+/**
+ * 把裁剪图里的检测结果映射回原帧归一化坐标（cropBox 的逆运算）。
+ * 两端共用同一份：后端漏掉这一步，脸就会画到错误的位置上。
+ */
+export function mapCropBack(item, cropped) {
+  const { box, inner, outSize, srcW, srcH } = cropped
+  const toFrame = (u, v) => {
+    // 裁剪图归一化 → 裁剪图像素 → 去掉填边 → 原帧像素
+    const px = u * outSize
+    const py = v * outSize
+    const fx = box.x * srcW + ((px - inner.dx) * box.w * srcW) / inner.nw
+    const fy = box.y * srcH + ((py - inner.dy) * box.h * srcH) / inner.nh
+    return { x: fx / srcW, y: fy / srcH }
+  }
+  const x1 = toFrame(item.x, item.y)
+  const x2 = toFrame(item.x + item.w, item.y + item.h)
+  const kps = (item.kps || []).map((k) => {
+    const p = toFrame(k.x, k.y)
+    return { x: p.x, y: p.y, s: k.s }
+  })
+  return {
+    x: x1.x,
+    y: x1.y,
+    w: x2.x - x1.x,
+    h: x2.y - x1.y,
+    score: item.score,
+    kps
+  }
+}
+
+/**
+ * 按人形头部区域裁剪放大，再跑一次人脸检测，结果映射回原帧坐标。
+ *
+ * 性能约定（调用方遵守）：只对「去重窗口已到期」的轨迹调用 ——
+ * 窗口没到期的轨迹本来就要复用旧结果，检出来了也用不上，白跑一次推理。
+ * 后端没有叠加层要画，2fps × 10s 去重窗下每轨迹最多 0.1 次/秒，
+ * 相对整帧检测（2 次/秒）开销可忽略；窗口内反而比整帧检测更省。
+ *
+ * @param {object} source 画面（前端 canvas / 后端 canvas shim）
+ * @param {object} box 人形框（归一化）
+ * @param {(canvas:object) => Promise<Array>} detect 人脸检测函数（端各自注入）
+ * @param {object} [opts] { headRatio, padRatio, size }
+ *        size = 裁剪放大到的边长，**必须与 detect 端真正吃的输入边长一致**
+ *        （前端 SLOT_SIZE.face / 后端会话的 st.size），否则映射回原帧会错位。
+ * @returns {Promise<Array<{x,y,w,h,score,kps}>>} 映射回原帧的人脸框（可能为空）
+ */
+export async function detectFacesInHead(source, box, detect, opts = {}) {
+  const zone = headZoneOf(box, opts.headRatio)
+  if (!zone) return []
+  const target = Math.max(32, Math.round(Number(opts.size) || SLOT_SIZE.face))
+  const crop = cropBox(source, zone, target, opts.padRatio || 0.18)
+  if (!crop) return []
+  let dets = []
+  try {
+    dets = (await detect(crop.canvas)) || []
+  } catch (e) {
+    return []
+  }
+  return dets.map((d) => mapCropBack(d, crop))
 }
 
 /* ==================== 向量工具 ==================== */

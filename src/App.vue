@@ -296,8 +296,16 @@ import {
   clearPendingFaces,
   faces as faceList,
   getAllFaces,
+  PENDING_MAX,
+  pendingFaces,
   replaceFaces
 } from './composables/useFaceLib'
+/*
+ * 待录入满库提醒的状态机与后端**共用同一份**（server/pending-full.mjs）。
+ * 它是纯函数、零依赖，所以能直接被前端打包进来 —— 前端模式与后端模式
+ * 用同一套"每个填满周期只提醒一次"的判定，不会各写一份然后漂移。
+ */
+import { createPendingFullWatcher } from '../server/pending-full.mjs'
 import {
   clearWatch,
   onWatchCommand,
@@ -392,6 +400,8 @@ migrateDingTalkCredentials(options.dingtalk)
 migrateShotWidthToOriginal(options)
 // 旧版钉钉默认不带截图，这里一次性改成「复用 Telegram 的图片直链」
 migrateDingShotMode(options)
+// 老默认检测阈值偏严，一次性调松到 0.4（多抓远处 / 小脸的人）
+migrateFaceScoreDefaults(options)
 // 计数推送间隔：老默认 60 秒太密，一次性升级为 4 小时
 migrateCountInterval(options)
 
@@ -459,6 +469,18 @@ function migrateShotWidthToOriginal(opts) {
   } catch (e) {
     /* 存储不可用时不影响运行 */
   }
+}
+
+/**
+ * 一次性迁移：老默认的人形 / 人脸检测阈值偏严（0.5），
+ * 实测采集率只有约 1/10 —— 远处 / 小脸的人经常被漏掉。
+ * 调到 0.4 能多抓这类脸（对监控场景，漏检比误报更糟）。
+ * 只在还停在老默认（0.5）时自动降；用户自己拖过滑块改了值则不动。
+ */
+function migrateFaceScoreDefaults(opts) {
+  if (!opts) return
+  if (Number(opts.aiScore) === 0.5) opts.aiScore = 0.4
+  if (opts.face && Number(opts.face.score) === 0.5) opts.face.score = 0.4
 }
 
 /**
@@ -952,7 +974,7 @@ function onBackendEvent(payload) {
  */
 async function backendPayload() {
   const faces = await getAllFaces().catch(() => [])
-  return {
+  const payload = {
     options: { ...options },
     cameras: cameras.value,
     /*
@@ -968,6 +990,23 @@ async function backendPayload() {
       createdAt: f.createdAt || 0
     }))
   }
+  /*
+   * 服务端自己的两个旋钮（顶层字段，不走 options）：
+   *   sampleFps —— ffmpeg 抽帧帧率；
+   *   model     —— 服务端人形检测模型。
+   * 它们与设置页的「分析频率」「识别模型」是**同一个概念**（一个管浏览器抽样、
+   * 一个管服务端抽帧；一个管浏览器加载的模型、一个管服务端加载的模型），
+   * 所以由同一处 UI 驱动。以前前端从不发这两个字段，config.json 里写死的
+   * yolo11n / 2fps 让设置页的选择对后端完全无效 —— 页面选 yolo11s，
+   * 后端照样跑 yolo11n，选了什么模型都看不出来。
+   *
+   * ⚠️ 只在取值合法时才带上：「字段缺失」（只改别的设置）与「显式送来 0」
+   *    是两件事，后者会把服务端钳到 1fps。
+   */
+  const fps = Number(options.sampleFps)
+  if (Number.isFinite(fps) && fps > 0) payload.sampleFps = fps
+  if (options.aiModel) payload.model = String(options.aiModel)
+  return payload
 }
 
 /** 配置里所有会影响后端检测/推送的字段（用于判断要不要重新同步） */
@@ -981,6 +1020,7 @@ const backendSyncSignature = computed(() =>
     cooldownSec: options.cooldownSec,
     aiScore: options.aiScore,
     aiModel: options.aiModel,
+    sampleFps: options.sampleFps,
     dingtalk: options.dingtalk,
     wecom: options.wecom,
     telegram: options.telegram,
@@ -2020,6 +2060,41 @@ const push = useAlertPush(options, {
    */
   getCameras: () => cameras.value
 })
+
+/*
+ * 待录入满库提醒（**纯前端模式**）。
+ * ----------------------------------------------------------------------------
+ * 后端模式下待录入队列在服务端 SQLite，由 server/headless-monitor.mjs 里的
+ * 同名 watcher 负责；此时前端 `pendingFaces` 恒为空 → 这里自动 no-op，绝不重复提醒。
+ * 纯前端模式（没接后端）下才有意义：队列攒到 PENDING_MAX 张时，按「关键事件单独提醒」
+ * 经 TG 私聊提醒一次，处理下去再攒满才再提醒 —— 判定逻辑与后端**共用同一模块**。
+ */
+const PENDING_FULL_KV_KEY = 'monitor-wall-pending-full-v1'
+const pendingFullWatcher = createPendingFullWatcher({
+  // kv 落 localStorage：刷新页面 / 重启浏览器后仍记得"这个周期提醒过"
+  kvGet: () => {
+    try {
+      return localStorage.getItem(PENDING_FULL_KV_KEY)
+    } catch (e) {
+      return null
+    }
+  },
+  kvSet: (_k, v) => {
+    try {
+      localStorage.setItem(PENDING_FULL_KV_KEY, v)
+    } catch (e) {
+      /* 存不下只是下次可能多提醒一次，不影响本次判定 */
+    }
+  },
+  pushDirectToUsers: (kind, payload) => push.pushDirectToUsers(kind, payload),
+  fullAt: PENDING_MAX
+})
+watch(
+  () => pendingFaces.value.length,
+  (n) => {
+    pendingFullWatcher.refresh(n).catch(() => {})
+  }
+)
 
 function markPush(key, state, error, channels, results) {
   /*
