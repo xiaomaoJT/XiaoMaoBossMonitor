@@ -13,7 +13,7 @@
  *     否则 0.6 次/秒的检测频率下，同一个人站着不动会白白烧掉大量算力。
  */
 import { ref } from 'vue'
-import { Tracker, attachFacesToTracks, pickFaceFor, tracksDueForFace, faceReuseFresh, faceRetryDue, faceTuning } from './useTracker.js'
+import { Tracker, attachFacesToTracks, pickFaceFor, tracksDueForFace, faceReuseFresh, faceRetryDue, faceTuning, pendingFullConf } from './useTracker.js'
 import {
   alignFace,
   cropBox,
@@ -29,6 +29,7 @@ import {
 import {
   DEFAULT_FACE_MAX,
   DEFAULT_FACE_THRESHOLD,
+  PENDING_MAX,
   matchFace,
   pushPendingFace
 } from './useFaceLib.js'
@@ -106,7 +107,9 @@ export function useAiExtras(options) {
       eventOnUnknown: !!c.eventOnUnknown,
       collectUnknown: c.collectUnknown !== false,
       // 采集调优三旋钮：解析收口在 useTracker.faceTuning（前后端同一份判定）
-      ...faceTuning(c)
+      ...faceTuning(c),
+      // 待录入内存队列容量（= 满库阈值）：与 App.vue 的满库 watcher 共用同一份解析
+      ...pendingFullConf(c, PENDING_MAX)
     }
   }
 
@@ -336,7 +339,8 @@ export function useAiExtras(options) {
             thumb,
             at: now,
             camId: cam.id,
-            camName: cam.name
+            camName: cam.name,
+            max: fc.fullAt
           })
         }
         if (!fc.eventOnUnknown) continue
@@ -473,7 +477,8 @@ export function useAiExtras(options) {
                       thumb: out.faceThumb,
                       at: now,
                       camId: cam.id,
-                      camName: cam.name
+                      camName: cam.name,
+                      max: fc.fullAt
                     })
                   }
                 }

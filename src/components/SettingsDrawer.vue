@@ -1555,6 +1555,31 @@
 
               <div class="opt">
                 <span>
+                  <strong>待录入队列容量</strong>
+                  <em>
+                    攒满这么多张未录入人脸就滚动删最旧的（新的照收）；同时是「满库」提醒阈值。
+                    0 = 自动（后端 100 / 纯前端 24）
+                  </em>
+                </span>
+                <div class="test-row">
+                  <input class="field mini" type="number" min="0" max="500" v-model.number="opts.face.pendingFullAt" />
+                  <span class="unit">张</span>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
+                  <strong>满库预警线</strong>
+                  <em>到容量的这个比例先提醒一次（默认 0.8）；再涨到满会再提醒一次</em>
+                </span>
+                <div class="range-row">
+                  <input type="range" min="0.5" max="0.99" step="0.05" v-model.number="opts.face.pendingWarnRatio" />
+                  <b>{{ Math.round((Number(opts.face.pendingWarnRatio) || 0.8) * 100) }}%</b>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
                   <em>这几个值会随配置同步到后端检测服务；改完记得点右下角「保存并应用」</em>
                 </span>
                 <div class="test-row">
@@ -1613,8 +1638,16 @@
               </div>
               <div class="face-acts" v-if="pendingLibOpen">
                 <button class="mini-btn danger" v-if="allPendingFaces.length" @click="doIgnoreAllPending">全部忽略</button>
-                <button class="mini-btn ghost" v-if="faceBackendOn" @click="refreshBackendPending">刷新待录入</button>
-                <span class="muted" v-if="faceBackendOn">来自后端检测服务</span>
+                <button
+                  class="mini-btn ghost"
+                  v-if="faceBackendOn"
+                  :disabled="pendingRefreshing"
+                  @click="refreshBackendPending"
+                >
+                  {{ pendingRefreshing ? '刷新中…' : '刷新待录入' }}
+                </button>
+                <span class="muted" v-if="faceBackendOn && !pendingRefreshNote">来自后端检测服务</span>
+                <span class="muted pending-refresh-note" v-if="pendingRefreshNote">{{ pendingRefreshNote }}</span>
               </div>
             </div>
 
@@ -4263,10 +4296,27 @@ const allPendingFaces = computed(() =>
   faceBackendOn.value ? [...backendPendingFaces.value, ...pendingFaces.value] : [...pendingFaces.value]
 )
 
+/** 刷新待录入：加载态 + 结果提示（以前点下去毫无反馈，用户不知道有没有生效） */
+const pendingRefreshing = ref(false)
+const pendingRefreshNote = ref('')
+
 /** 拉一次后端待录入队列（后端模式下人脸是在服务端抓的） */
 async function refreshBackendPending() {
-  if (!faceBackendOn.value) return
-  await loadBackendPendingFaces(opts.backend.url)
+  if (!faceBackendOn.value || pendingRefreshing.value) return
+  pendingRefreshing.value = true
+  pendingRefreshNote.value = ''
+  try {
+    await loadBackendPendingFaces(opts.backend.url)
+    if (backendPendingError.value) {
+      pendingRefreshNote.value = `刷新失败：${backendPendingError.value}`
+    } else {
+      const n = backendPendingFaces.value.length
+      const t = new Date(backendPendingLoadedAt.value || Date.now()).toLocaleTimeString('zh-CN')
+      pendingRefreshNote.value = `已刷新 · ${n} 张 · ${t}`
+    }
+  } finally {
+    pendingRefreshing.value = false
+  }
 }
 
 /**
@@ -4509,9 +4559,9 @@ const FACE_DET_SIZES = [320, 480, 640, 800, 960, 1280]
 const faceTuneOpen = ref(false)
 
 /**
- * 恢复采集调优的四个旋钮。
+ * 恢复采集调优的旋钮。
  * 默认值从 **同一份** `cloneDefaultOptions()`（= defaults.js，其 face 默认值又取自
- * useTracker.FACE_TUNING）读，不在这里另写字面量 —— 免得「恢复默认」恢复出另一个数。
+ * useTracker.FACE_TUNING / PENDING_FULL）读，不在这里另写字面量 —— 免得「恢复默认」恢复出另一个数。
  */
 function resetFaceTune() {
   const d = _DEFAULTS.face || {}
@@ -4519,6 +4569,8 @@ function resetFaceTune() {
   opts.face.headRatio = d.headRatio
   opts.face.detSize = d.detSize
   opts.face.dedupeSec = d.dedupeSec
+  opts.face.pendingFullAt = d.pendingFullAt
+  opts.face.pendingWarnRatio = d.pendingWarnRatio
 }
 
 function triggerEnrollFile() {

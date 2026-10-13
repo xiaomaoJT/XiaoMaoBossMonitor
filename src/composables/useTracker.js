@@ -516,6 +516,49 @@ export function faceTuning(face) {
 }
 
 /**
+ * 待录入队列「容量 / 满库阈值 / 预警线」的缺省值与上下限 —— **唯一判定**。
+ *
+ * 以前这两个数写死在两处：后端 `analyzer.PENDING_KEEP = 100`、前端 `useFaceLib.PENDING_MAX = 24`，
+ * 想改只能改代码重构建。现在收口成 `options.face` 下的两个旋钮（设置页「采集调优」里可调）：
+ *   - `pendingFullAt`  队列容量**同时**就是满库阈值（「满了」= 到了上限，文案才不自相矛盾）。
+ *                      缺省 0 = **自动**：后端跟 `PENDING_KEEP`、前端跟 `PENDING_MAX`，
+ *                      于是「不配置时行为与升级前逐字节一致」。
+ *   - `pendingWarnRatio` 到容量的这个比例先预警一次。
+ *
+ * ⚠️ 「满」和「预警」是两级、各提醒一次：先到预警线（默认 80%）催一次，再到上限提醒一次；
+ *    掉回预警线以下才算「处理过了」，下次再涨上来才会重新提醒（见 server/pending-full.mjs）。
+ */
+export const PENDING_FULL = {
+  /** 队列容量 = 满库阈值；0 = 自动（跟随后端 PENDING_KEEP / 前端 PENDING_MAX） */
+  fullAt: { def: 0, min: 0, max: 500 },
+  /** 预警线 = 容量 × 该比例（0.5~0.99） */
+  warnRatio: { def: 0.8, min: 0.5, max: 0.99 }
+}
+
+/**
+ * 解析 `options.face` 里的待录入容量/预警旋钮。
+ * @param {object} face `options.face`
+ * @param {number} fallback 自动模式下的容量（后端传 PENDING_KEEP、前端传 PENDING_MAX）
+ * @returns {{fullAt:number, warnAt:number, warnRatio:number, auto:boolean}}
+ */
+export function pendingFullConf(face, fallback) {
+  const c = face || {}
+  const fb = Math.max(1, Math.round(Number(fallback) || 100))
+  const raw = Number(c.pendingFullAt)
+  const auto = !Number.isFinite(raw) || raw <= 0
+  const fullAt = auto
+    ? fb
+    : tuningClamp(Math.round(raw), PENDING_FULL.fullAt.min || 1, PENDING_FULL.fullAt.max)
+  const rr = Number(c.pendingWarnRatio)
+  const warnRatio = Number.isFinite(rr) && rr > 0
+    ? tuningClamp(rr, PENDING_FULL.warnRatio.min, PENDING_FULL.warnRatio.max)
+    : PENDING_FULL.warnRatio.def
+  // 预警线至少 1；且严格小于容量（否则预警和满库同点，两级就退化成一级）
+  const warnAt = Math.max(1, Math.min(fullAt - 1, Math.floor(fullAt * warnRatio)))
+  return { fullAt, warnAt: warnAt < 1 ? 1 : warnAt, warnRatio, auto }
+}
+
+/**
  * 在若干张人脸里，挑出最可能属于这个人形框的那一张（补拍窗口用）。
  * 与 attachFacesToTracks 共用 faceBoxAffinity——「哪张脸属于哪个人」
  * 只允许有一个答案，不许两端各演算一遍。

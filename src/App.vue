@@ -219,12 +219,19 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CameraTile from './components/CameraTile.vue'
 import EventPanel from './components/EventPanel.vue'
 import PrivacyMask from './components/PrivacyMask.vue'
 import TopBar from './components/TopBar.vue'
-import SettingsDrawer from './components/SettingsDrawer.vue'
+/*
+ * 设置抽屉（8394 行，连带 AboutSystem / StatsPanel 约 1 万行）**不在首屏关键路径上**：
+ * 它只在 `settingsOpen` 为真时才挂载（见模板里的 v-if）。改成按需加载后，这份代码
+ * 从首屏主包移出 → 首屏要下载 / 解析 / 编译的 JS 显著变小、打开更快。
+ * 配套在 onMounted 里**空闲预取**：等首屏稳定后再悄悄把这份 chunk 拉进缓存，
+ * 于是第一次点「设置」也几乎无感，不会出现"点了半天抽屉不出来"。
+ */
+const SettingsDrawer = defineAsyncComponent(() => import('./components/SettingsDrawer.vue'))
 import {
   BRAND,
   DECODER_PATH,
@@ -310,6 +317,7 @@ import {
  * 用同一套"每个填满周期只提醒一次"的判定，不会各写一份然后漂移。
  */
 import { createPendingFullWatcher } from '../server/pending-full.mjs'
+import { pendingFullConf } from './composables/useTracker.js'
 import {
   clearWatch,
   onWatchCommand,
@@ -2096,7 +2104,8 @@ const pendingFullWatcher = createPendingFullWatcher({
 watch(
   () => pendingFaces.value.length,
   (n) => {
-    pendingFullWatcher.refresh(n).catch(() => {})
+    // 现算容量/预警线：设置页改了旋钮无需刷新页面即生效（缺省 → PENDING_MAX，与升级前一致）
+    pendingFullWatcher.refresh(n, pendingFullConf(opts.face, PENDING_MAX)).catch(() => {})
   }
 )
 
@@ -3354,20 +3363,36 @@ async function onEndTempSilent(flush) {
 const tempSilentState = ref({ active: false, untilLabel: '', leftLabel: '', channels: [], reason: '' })
 /** 状态轮询定时器：只在设置抽屉打开时跑，1 秒一次足够让倒计时走字 */
 let tempSilentTimer = null
+/**
+ * 在途保护：上一次 `/api/temp-silent` 还没回来就别再发下一次。
+ * ⚠️ 没有它的话，定时器每秒无条件发一条 fetch，而后端只要卡一下（单线程被推理按住、
+ *    网络抖动），请求就会**越堆越多且一直 pending** —— 正是「接口反复刷、状态一直 pending」。
+ *    加上它以后，慢的时候自动降频，绝不堆积。
+ */
+let tempSilentInFlight = false
 
 async function refreshTempSilentState() {
+  // 页面切到后台就不必再轮询（省电、也少给后端添压）
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
   if (backendActive.value) {
+    if (tempSilentInFlight) return
     const url = String((options.backend && options.backend.url) || '')
     if (!url) {
       tempSilentState.value = { active: false }
       return
     }
+    tempSilentInFlight = true
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(timeoutReason('临时静默状态', 5000)), 5000)
     try {
-      const r = await fetch(`${url}/api/temp-silent`)
+      const r = await fetch(`${url}/api/temp-silent`, { signal: ctrl.signal })
       const data = await r.json().catch(() => ({}))
       tempSilentState.value = data && data.active ? data : { active: false }
     } catch (e) {
       tempSilentState.value = { active: false }
+    } finally {
+      clearTimeout(t)
+      tempSilentInFlight = false
     }
     return
   }
@@ -3633,6 +3658,18 @@ onMounted(() => {
       600
     )
   }
+
+  /*
+   * 空闲预取设置抽屉的 chunk。
+   * 它已从首屏主包移出（defineAsyncComponent），这里等首屏稳定后再悄悄拉回来 ——
+   * 既不占首屏下载带宽/解析时间，又让第一次点「设置」无需等待。
+   * 用 requestIdleCallback 优先，退化为 1.5s 延时；失败无所谓（打开时会重新拉）。
+   */
+  const prefetchSettings = () => {
+    import('./components/SettingsDrawer.vue').catch(() => {})
+  }
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(prefetchSettings, { timeout: 4000 })
+  else setTimeout(prefetchSettings, 1500)
 })
 
 onBeforeUnmount(() => {

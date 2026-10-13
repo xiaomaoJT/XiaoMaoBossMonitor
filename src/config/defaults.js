@@ -19,7 +19,7 @@ import { secretDigest } from '../composables/sha256.js'
  * 采集调优的缺省值从「唯一判定」处取（useTracker 零依赖，Node 侧也安全）。
  * 不在这里另写一份字面量，免得设置页显示的值与执行层真正用的值悄悄漂开。
  */
-import { FACE_TUNING } from '../composables/useTracker.js'
+import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
 
 const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
 const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
@@ -368,7 +368,15 @@ export const HIDDEN_OPTIONS = {
     /** 头部补检裁剪占人形框高度的比例（只影响整帧漏检的远处人脸） */
     headRatio: FACE_TUNING.headRatio.def,
     /** SCRFD 检测输入边长（必须是 32 的倍数；调大救更远的脸，代价是更慢） */
-    detSize: FACE_TUNING.detSize.def
+    detSize: FACE_TUNING.detSize.def,
+    /**
+     * 待录入队列容量（**同时**是满库阈值）。0 = 自动：后端跟 PENDING_KEEP(100)、
+     * 前端跟 PENDING_MAX(24)。设成一个正数则两端都用它（超容量滚动删最旧）。
+     * 解析与上下限收口在 useTracker.PENDING_FULL / pendingFullConf。
+     */
+    pendingFullAt: PENDING_FULL.fullAt.def,
+    /** 到容量的这个比例先预警一次（默认 0.8 = 80%） */
+    pendingWarnRatio: PENDING_FULL.warnRatio.def
   },
   /**
    * 人形姿态（YOLOv8n-pose，17 关键点）。

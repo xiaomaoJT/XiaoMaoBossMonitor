@@ -315,9 +315,12 @@ export const PENDING_MAX = 24
 
 /**
  * 暂存一张未录入的人脸。
+ * @param {object} o
+ * @param {number} [o.max] 队列容量（来自 `options.face.pendingFullAt` 的解析值；
+ *                         缺省回落到 PENDING_MAX，与升级前一致）
  * @returns {{added:boolean, id?:number}}
  */
-export function pushPendingFace({ vector, thumb, at, camId, camName }) {
+export function pushPendingFace({ vector, thumb, at, camId, camName, max }) {
   if (!vector || !vector.length || !thumb) return { added: false }
   const list = pendingFaces.value
   // 和已有暂存项太像就只刷新时间，不再重复堆一张
@@ -339,7 +342,8 @@ export function pushPendingFace({ vector, thumb, at, camId, camName }) {
     camName: camName || '',
     hits: 1
   })
-  if (list.length > PENDING_MAX) list.splice(PENDING_MAX)
+  const cap = Math.max(1, Math.round(Number(max) || PENDING_MAX))
+  if (list.length > cap) list.splice(cap)
   return { added: true, id }
 }
 
