@@ -182,7 +182,13 @@ export class Tracker {
       /** 上一次「尝试」提特征的时刻（成功或失败都记）—— 失败重试的节流闸门 */
       faceAt: 0,
       /** 上一次「成功」提特征的时刻——复用闸门只看这个，避免一次失败就把人锁死一个去重窗 */
-      faceOkAt: 0
+      faceOkAt: 0,
+      /**
+       * 上一次发起「头区补检」的时刻（无论检出与否都记）。
+       * tracksDueForFace 的窗口节流**只看它** —— 不能复用 faceAt：
+       * faceAt 只在「检出脸并去提特征」时才写，漏检的人头会永远没被记过 → 每帧都重检。
+       */
+      faceSearchAt: 0
     }
   }
 
@@ -407,6 +413,12 @@ export function attachFacesToTracks(tracks, faces, opts = {}) {
  *   - 窗口没到期的轨迹本来就要复用旧结果，检出来了也用不上，白跑一次推理；
  *   - 2fps × 10s 去重窗下，每轨迹最多 0.1 次/秒，相对整帧检测（2 次/秒）可忽略。
  *
+ * ⚠️ 闸门只看 `faceSearchAt`（「发起补检」的时刻，检出与否都记），**不能看 `faceAt`**：
+ *    faceAt 只在「检出脸、去提特征」时才写。漏检的人头（太远 / 背对 / 被 affinity 拒）
+ *    永远进不了这一步 → 永远没被记过 → **每一帧都被判为到期**，640 全推理每帧一发，
+ *    几个通道几个人头就把单线程服务的 HTTP / 静态资源全按住（表现为页面转圈、
+ *    「后端事件轮询超时」）。补检那一步必须自己记时刻。
+ *
  * @param {Array} live 本帧活动轨迹
  * @param {Set<string|number>} covered 整帧检测已经覆盖到的 trackId
  * @param {number} now 时间戳（毫秒）
@@ -416,7 +428,7 @@ export function attachFacesToTracks(tracks, faces, opts = {}) {
 export function tracksDueForFace(live, covered, now, dedupeMs) {
   if (!live || !live.length) return []
   return live.filter(
-    (tr) => !covered.has(tr.id) && (!tr.faceAt || now - tr.faceAt >= dedupeMs)
+    (tr) => !covered.has(tr.id) && (!tr.faceSearchAt || now - tr.faceSearchAt >= dedupeMs)
   )
 }
 

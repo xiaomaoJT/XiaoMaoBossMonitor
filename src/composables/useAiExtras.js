@@ -250,6 +250,9 @@ export function useAiExtras(options) {
     const due = tracksDueForFace(live, covered, now, fc.dedupeSec * 1000)
     if (due.length && isSlotReady('face')) {
       for (const tr of due) {
+        // 先记「本帧已发起补检」——否则漏检的人头每帧都重新到期，640 全推理每帧一发。
+        // 节流窗口由 tracksDueForFace 读这个字段（不能借 faceAt，见那里的说明）。
+        tr.faceSearchAt = now
         const extra = await detectFacesInHead(
           frame.canvas,
           tr.box,
