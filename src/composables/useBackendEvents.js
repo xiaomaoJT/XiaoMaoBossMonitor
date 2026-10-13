@@ -30,6 +30,8 @@ let lastTime = 0
 let errStreak = 0
 /** 防止后端重启导致 key 撞车：进程内递增序号 */
 let seq = 0
+/** 轮询实例标识：stop/重启后让旧 loop 自然退出，避免两套定时器并存 */
+let pollRunId = 0
 
 function normalizeUrl(url) {
   return String(url || '').replace(/\/+$/, '')
@@ -153,8 +155,18 @@ export function startBackendPolling(options, onEvent) {
 
   const base = normalizeUrl(options.backend.url)
   const pollMs = Math.max(1500, Number(options.backend.pollMs) || 4000)
+  const myRun = ++pollRunId
 
-  const tick = async () => {
+  // 链式 setTimeout：上一轮没回来（含 8s 超时 abort）绝不发下一轮 ——
+  // 这是「大量接口 pending 然后 canceled」的根因：原 setInterval 不等人，
+  // 后端一慢就重叠堆积，各自超时 abort，前端看到的全是 canceled。
+  const loop = async () => {
+    if (myRun !== pollRunId) return // 已被 stop/重启取代
+    // 后台标签页 / 最小化：跳过无谓请求省资源；回到前台后在 finally 自然续上
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      timer = setTimeout(loop, pollMs)
+      return
+    }
     try {
       const since = lastTime
       const data = await fetchJson(`${base}/api/events?since=${since}&limit=100`)
@@ -179,16 +191,19 @@ export function startBackendPolling(options, onEvent) {
       backendError.value = netErrorText(e, '后端事件轮询')
       // 连续失败才降级为 error 状态（偶发一次网络抖动不打脸）
       if (errStreak >= 2) backendState.value = 'error'
+    } finally {
+      // 完成（或超时）后才排下一轮 —— 保证在途最多 1 个请求
+      if (myRun === pollRunId) timer = setTimeout(loop, pollMs)
     }
   }
 
-  tick()
-  timer = setInterval(tick, pollMs)
+  loop()
 }
 
 export function stopBackendPolling() {
+  pollRunId += 1 // 让任何在跑的 loop 自然退出
   if (timer) {
-    clearInterval(timer)
+    clearTimeout(timer)
     timer = null
   }
   backendState.value = 'idle'
