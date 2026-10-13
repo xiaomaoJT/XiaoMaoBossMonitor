@@ -216,6 +216,7 @@ import {
   resetDailyStats,
   statsOf
 } from '../composables/useDailyStats'
+import { confirmDialog } from '../composables/confirm.js'
 import DistBars from './charts/DistBars.vue'
 import DonutShare from './charts/DonutShare.vue'
 import HeatGrid from './charts/HeatGrid.vue'
@@ -447,9 +448,15 @@ function hitRankText(d) {
 }
 
 /* ==================== 操作 ==================== */
-function onReset() {
-  // eslint-disable-next-line no-alert
-  if (typeof confirm === 'function' && !confirm('确定清零全部统计数据？此操作不可撤销。')) return
+async function onReset() {
+  if (
+    !(await confirmDialog({
+      title: '清零统计数据',
+      message: '确定清零全部统计数据？\n此操作不可撤销。',
+      variant: 'danger'
+    }))
+  )
+    return
   resetDailyStats()
   emit('reset-done')
 }

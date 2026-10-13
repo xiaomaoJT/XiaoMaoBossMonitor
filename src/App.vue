@@ -163,6 +163,8 @@
       @dismiss="dismissNotify"
     />
 
+    <ConfirmDialog />
+
     <PrivacyMask
       :open="masked"
       :has-password="!!maskPasswordHash"
@@ -242,6 +244,8 @@ import { useAlertPush } from './composables/useAlertPush'
 import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
 import { timeoutReason } from './composables/useNet.js'
 import NotifyStack from './components/NotifyStack.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
+import { confirmDialog } from './composables/confirm.js'
 import { dayKey, dailyStats, statAlarm, statChannelState, statFaceHit, statPersonHit, statPush } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
@@ -1279,7 +1283,7 @@ async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
       `后端：${remoteCams} 路通道 · ${(data.faces || []).length} 人底库 · rev ${data.configRev}\n` +
       `本机：${local} 路通道\n\n` +
       `本机的通道 / 区域 / 推送凭据 / 人脸库会被后端那份整体替换（可撤销：改完再点「立即同步」推回去）。`
-    if (typeof window !== 'undefined' && !window.confirm(msg)) return false
+    if (!(await confirmDialog({ title: '覆盖本机配置', message: msg }))) return false
   }
 
   await applyPulledConfig(data, reason)

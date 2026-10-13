@@ -134,6 +134,7 @@ import { isJessibucaReady } from '../composables/useJessibuca'
 import { PUSH_CHANNELS, pushStats, resetPushStats } from '../composables/usePushStats'
 import { formatDuration, formatUptime, uptimeSnapshot } from '../composables/useSystemUptime'
 import { refreshRemoteStatus } from '../composables/useBackendSync'
+import { confirmDialog } from '../composables/confirm.js'
 
 const props = defineProps({
   cameras: { type: Array, default: () => [] },
@@ -320,8 +321,15 @@ const successRate = computed(() =>
   pushStats.total ? Math.round((pushStats.ok / pushStats.total) * 100) : 0
 )
 
-function onResetStats() {
-  if (typeof window !== 'undefined' && !window.confirm('清零累计推送统计？该操作不影响推送功能本身。')) return
+async function onResetStats() {
+  if (
+    !(await confirmDialog({
+      title: '清零推送统计',
+      message: '清零累计推送统计？\n该操作不影响推送功能本身。',
+      variant: 'danger'
+    }))
+  )
+    return
   resetPushStats()
 }
 
@@ -628,9 +636,10 @@ async function onLogout() {
   const extra = backendOn.value
     ? '退出后本机画面会重新被登录页盖住，常驻设备上的检测与推送不受影响。'
     : '退出后画面播放与检测会一起停止。'
-  const ok = typeof window !== 'undefined'
-    ? window.confirm(`确定退出登录${sessionState.user ? `（${sessionState.user}）` : ''}？\n${extra}`)
-    : true
+  const ok = await confirmDialog({
+    title: '退出登录',
+    message: `确定退出登录${sessionState.user ? `（${sessionState.user}）` : ''}？\n${extra}`
+  })
   if (!ok) return
   await doLogout('已退出登录')
 }

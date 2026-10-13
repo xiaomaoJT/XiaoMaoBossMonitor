@@ -1623,12 +1623,14 @@
               <span>
                 <strong>
                   人脸库（{{ faceLib.length }} / {{ opts.face.libMax }}）
-                  <button class="mini-btn ghost" @click="faceLibOpen = !faceLibOpen">
-                    {{ faceLibOpen ? '收起' : '管理' }}
-                  </button>
-                  <button class="mini-btn" @click="triggerEnrollFile" :disabled="enrollState === 'loading'">
-                    {{ enrollState === 'loading' ? '录入中…' : '上传照片录入' }}
-                  </button>
+                  <span class="opt-acts">
+                    <button class="mini-btn ghost" @click="faceLibOpen = !faceLibOpen">
+                      {{ faceLibOpen ? '收起' : '管理' }}
+                    </button>
+                    <button class="mini-btn" @click="triggerEnrollFile" :disabled="enrollState === 'loading'">
+                      {{ enrollState === 'loading' ? '录入中…' : '上传照片录入' }}
+                    </button>
+                  </span>
                 </strong>
                 <em>报警推送里显示的就是这里的名字</em>
               </span>
@@ -1646,7 +1648,7 @@
               <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
                 <div class="face-card" v-for="f in pagedFaceLib" :key="f.id">
                   <img v-if="f.thumb" :src="f.thumb" alt="人脸" />
-                  <div class="face-meta" v-if="faceRenameId === f.id">
+                  <div class="face-rename" v-if="faceRenameId === f.id">
                     <input
                       class="field mini"
                       v-model.trim="faceRenameText"
@@ -3237,6 +3239,7 @@ import {
 } from '../composables/useBackendEvents'
 import { syncState, syncStateText, localRev, syncRev, pullState, pullError, pushOverwrote, pushFacesSkipped } from '../composables/useBackendSync'
 import { refreshWatchStatus, watchState, watchStatusText } from '../composables/useWatchBridge'
+import { confirmDialog, alertDialog } from '../composables/confirm.js'
 import {
   AI_MODELS,
   aiBackend,
@@ -4481,7 +4484,7 @@ const faceRenameText = ref('')
 async function doAddPending(pf) {
   const res = await addFace(pf.vector, pf.thumb, '', Number(opts.face.libMax) || 50)
   if (!res.ok) {
-    window.alert(res.reason || '录入失败')
+    alertDialog({ title: '录入失败', message: res.reason || '录入失败', variant: 'danger' })
     return
   }
   // 录入成功：前端队列移除；后端队列要回服务端删掉，否则刷新又冒出来。
@@ -4562,7 +4565,7 @@ function doIgnorePending(pf) {
 }
 
 /** 一键忽略所有待录入人脸（前端内存队列 + 后端 SQLite 队列都清掉） */
-function doIgnoreAllPending() {
+async function doIgnoreAllPending() {
   const n = allPendingFaces.value.length
   if (!n) return
   /*
@@ -4571,7 +4574,14 @@ function doIgnoreAllPending() {
    * 「清空人脸库」「删除单个人脸」本来就有 confirm，这里没理由例外。
    */
   const scope = faceBackendOn.value ? '前端暂存和后端队列都会清掉，' : ''
-  if (!window.confirm(`确定忽略全部 ${n} 张待录入人脸？${scope}此操作不可撤销。`)) return
+  if (
+    !(await confirmDialog({
+      title: '忽略全部待录入',
+      message: `确定忽略全部 ${n} 张待录入人脸？\n${scope}此操作不可撤销。`,
+      variant: 'danger'
+    }))
+  )
+    return
   // 前端内存队列：直接清空
   clearPendingFaces()
   // 后端队列：逐条回服务端删除，否则下次刷新又冒出来
@@ -4582,7 +4592,14 @@ function doIgnoreAllPending() {
 }
 
 async function doDeleteFace(f) {
-  if (!window.confirm(`确定删除「${f.name}」的人脸记录？删除后再次出现会重新当作陌生人。`)) return
+  if (
+    !(await confirmDialog({
+      title: '删除人脸记录',
+      message: `确定删除「${f.name}」的人脸记录？\n删除后再次出现会重新当作陌生人。`,
+      variant: 'danger'
+    }))
+  )
+    return
   await deleteFace(f.id)
 }
 
@@ -4598,7 +4615,14 @@ async function commitRenameFace() {
 }
 
 async function doClearFaces() {
-  if (!window.confirm('确定清空整个人脸库？该操作不可撤销。')) return
+  if (
+    !(await confirmDialog({
+      title: '清空人脸库',
+      message: '确定清空整个人脸库？\n该操作不可撤销。',
+      variant: 'danger'
+    }))
+  )
+    return
   await clearFaces()
 }
 
@@ -5310,7 +5334,7 @@ function persistProfiles() {
   try {
     localStorage.setItem(PROFILE_KEY, JSON.stringify(profiles.value))
   } catch (e) {
-    alert('方案保存失败（本地存储不可用）：' + ((e && e.message) || e))
+    alertDialog({ title: '保存失败', message: '方案保存失败（本地存储不可用）：' + ((e && e.message) || e), variant: 'danger' })
   }
 }
 
@@ -5326,7 +5350,7 @@ function snapshot() {
 function saveProfile() {
   const name = String(profileName.value || '').trim()
   if (!name) {
-    alert('请先填一个方案名称')
+    alertDialog({ title: '请填写名称', message: '请先填一个方案名称' })
     return
   }
   const snap = snapshot()
@@ -5362,10 +5386,10 @@ function applyProfile(p) {
   testState.text = `已切换到方案「${p.name}」，记得点右下角「保存并应用」生效`
 }
 
-function removeProfile(id) {
+async function removeProfile(id) {
   const hit = profiles.value.find((p) => p.id === id)
   if (!hit) return
-  if (!confirm(`确定删除方案「${hit.name}」？`)) return
+  if (!(await confirmDialog({ title: '删除方案', message: `确定删除方案「${hit.name}」？`, variant: 'danger' }))) return
   profiles.value = profiles.value.filter((p) => p.id !== id)
   persistProfiles()
   if (activeProfileId.value === id) activeProfileId.value = ''
@@ -5891,7 +5915,7 @@ function importConfig(e) {
       testState.kind = 'ok'
       testState.text = '配置已导入，点右下角「保存并应用」生效'
     } catch (err) {
-      alert('配置文件解析失败：' + err.message)
+      alertDialog({ title: '导入失败', message: '配置文件解析失败：' + err.message, variant: 'danger' })
     }
   }
   reader.readAsText(file)
@@ -6358,6 +6382,16 @@ function loadHidden() {
 }
 
 /* ---------- 人脸库 ---------- */
+/* 标题右侧的「管理 / 上传照片录入」按钮组：与字数计数之间留间距，
+   两个按钮之间也留间距（原来两个 button 直接相邻、零间隙）。 */
+.opt-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 /*
  * 固定卡片宽度 88px + auto-fill 自动铺列：一行几列随抽屉宽度变。
  * 脚本据此（读 auto-fill 解析出的列数）算「每页 = 列数 × 4 行」，超出翻页。
@@ -6468,6 +6502,23 @@ function loadHidden() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 改名输入框：原本复用 .face-meta 会继承 overflow:hidden，而 .field.mini 宽 118px
+   远超卡片内容区（88−12=76px），被裁成"截断"。这里单独成类、不裁剪，
+   并把输入框收到卡片内（width:100% + border-box），既不被截断也能看清在改谁。 */
+.face-rename {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.face-rename .field.mini {
+  width: 100%;
+  box-sizing: border-box;
+  height: 26px;
+  text-align: center;
+  font-size: 12px;
 }
 
 .face-acts {
