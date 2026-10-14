@@ -1621,7 +1621,7 @@
                     <button class="mini-btn" :disabled="enrollingPending[pf.id]" @click="doAddPending(pf)">
                       {{ enrollingPending[pf.id] ? '录入中' : '录入' }}
                     </button>
-                    <button class="mini-btn ghost" :disabled="enrollingPending[pf.id]" @click="doIgnorePending(pf)">忽略</button>
+                    <button class="mini-btn ghost" v-if="!enrollingPending[pf.id]" :disabled="enrollingPending[pf.id]" @click="doIgnorePending(pf)">忽略</button>
                   </div>
                 </div>
               </div>
@@ -1702,8 +1702,8 @@
                   </div>
                   <span class="face-meta" v-else>{{ f.name }}</span>
                   <div class="face-acts">
-                    <button class="mini-btn ghost" @click="startRenameFace(f)">改名</button>
-                    <button class="mini-btn danger" @click="doDeleteFace(f)">删除</button>
+                    <button class="mini-btn ghost" v-if="!deletingFace[f.id]" @click="startRenameFace(f)">改名</button>
+                    <button class="mini-btn danger" :disabled="deletingFace[f.id]" @click="doDeleteFace(f)">{{ deletingFace[f.id] ? '删除中' : '删除' }}</button>
                   </div>
                 </div>
                 <p class="hint tight" v-if="!faceLib.length">人脸库还是空的：先让摄像头拍到人，出现的脸会进「待录入」。</p>
@@ -4889,6 +4889,10 @@ const faceRenameText = ref('')
  *  按 id 记录而不是全局一个开关：一张在录不影响其它卡片继续点。 */
 const enrollingPending = reactive({})
 
+/** 正在删除中的已录入卡片 id（同 enrollingPending 思路：按 id 记录，
+ *  删除中显「删除中」、隐藏「改名」，防止连点 / 误操作）。 */
+const deletingFace = reactive({})
+
 /* ---------- 待录入：点击缩略图看捕获时的整帧原图 ----------
  * 缩略图只是人脸裁剪，看不出"这人是在什么画面里被抓到的"。
  * 点缩略图打开一个轻量灯箱，显示 capture 时存的整帧（pf.full），
@@ -5050,6 +5054,8 @@ async function doIgnorePagePending() {
 }
 
 async function doDeleteFace(f) {
+  // 已经在删这张了：连点直接拦掉（确认弹窗是 modal，正常点不到，这里兜底防重入）
+  if (deletingFace[f.id]) return
   if (
     !(await confirmDialog({
       title: '删除人脸记录',
@@ -5058,7 +5064,12 @@ async function doDeleteFace(f) {
     }))
   )
     return
-  await deleteFace(f.id)
+  deletingFace[f.id] = true
+  try {
+    await deleteFace(f.id)
+  } finally {
+    delete deletingFace[f.id]
+  }
 }
 
 function startRenameFace(f) {
@@ -7085,11 +7096,11 @@ function loadHidden() {
   flex: 1;
 }
 
-/* 待录入卡片里的两个按钮（录入 / 忽略）挤在 88px 卡片里：
- * 「录入」变「录入中…」后文字变长，若不放开 min-width 会被 nowrap 撑开、
- * 把「忽略」挤出卡片边框。这里只针对「待录入卡片」的子按钮放开收缩 +
- * 超出省略，既能并排又能保证不溢出（全宽的操作行不受影响）。 */
-.face-card.pending .face-acts .mini-btn {
+/* 卡片里的两个按钮（已录入：改名 / 删除；待录入：录入 / 忽略）挤在 88px 卡片里：
+ * 文字稍长（如「录入中」）若不放开 min-width 会被 nowrap 撑开、把另一个按钮挤出
+ * 卡片边框。这里只针对「卡片内」的子按钮放开收缩 + 超出省略，既能并排又能保证不溢出
+ * （全宽的操作行不在这个作用域里，不受影响）。 */
+.face-card .face-acts .mini-btn {
   flex: 1 1 0;
   min-width: 0;
   padding: 0 4px;
