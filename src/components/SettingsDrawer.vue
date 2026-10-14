@@ -1611,8 +1611,10 @@
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
                   <div class="face-acts">
-                    <button class="mini-btn" @click="doAddPending(pf)">录入</button>
-                    <button class="mini-btn ghost" @click="doIgnorePending(pf)">忽略</button>
+                    <button class="mini-btn" :disabled="enrollingPending[pf.id]" @click="doAddPending(pf)">
+                      {{ enrollingPending[pf.id] ? '录入中…' : '录入' }}
+                    </button>
+                    <button class="mini-btn ghost" :disabled="enrollingPending[pf.id]" @click="doIgnorePending(pf)">忽略</button>
                   </div>
                 </div>
               </div>
@@ -4861,16 +4863,28 @@ const gpuText = computed(() => {
 const faceRenameId = ref(null)
 const faceRenameText = ref('')
 
+/** 正在录入中的待录入卡片 id（防止「点下去没反馈 → 连点 → 同一张脸被建出多条」）。
+ *  按 id 记录而不是全局一个开关：一张在录不影响其它卡片继续点。 */
+const enrollingPending = reactive({})
+
 async function doAddPending(pf) {
-  const res = await addFace(pf.vector, pf.thumb, '', Number(opts.face.libMax) || 50)
-  if (!res.ok) {
-    alertDialog({ title: '录入失败', message: res.reason || '录入失败', variant: 'danger' })
-    return
+  // 已经在录这张了：连点直接拦掉（addFace 是 runExclusive，再点会排队，
+  // 等上一张建完再建一张 → 自动编号出「人物2」，纯属重复建档）。
+  if (enrollingPending[pf.id]) return
+  enrollingPending[pf.id] = true
+  try {
+    const res = await addFace(pf.vector, pf.thumb, '', Number(opts.face.libMax) || 50)
+    if (!res.ok) {
+      alertDialog({ title: '录入失败', message: res.reason || '录入失败', variant: 'danger' })
+      return
+    }
+    // 录入成功：前端队列移除；后端队列要回服务端删掉，否则刷新又冒出来。
+    // 人脸库同步后端不用手动触发 —— App.vue 里盯着 faceList 变化会自动补发一份配置。
+    if (pf.fromBackend) await dropBackendPendingFace(opts.backend.url, pf.backendId)
+    else removePendingFace(pf.id)
+  } finally {
+    delete enrollingPending[pf.id]
   }
-  // 录入成功：前端队列移除；后端队列要回服务端删掉，否则刷新又冒出来。
-  // 人脸库同步后端不用手动触发 —— App.vue 里盯着 faceList 变化会自动补发一份配置。
-  if (pf.fromBackend) await dropBackendPendingFace(opts.backend.url, pf.backendId)
-  else removePendingFace(pf.id)
 }
 
 /* ==================== 手动上传照片录入 ====================
