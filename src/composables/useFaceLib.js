@@ -9,7 +9,7 @@
  * 缩略图统一压到 96×96 JPEG，每张约 4~6KB，50 个人总共不到 300KB。
  */
 import { ref } from 'vue'
-import { openDB, FACE_STORE_NAME } from './useEventStore.js'
+import { DB_NAME, DB_VERSION, FACE_STORE_NAME } from './useEventStore.js'
 import {
   cosine,
   loadModel,
@@ -55,6 +55,87 @@ export const pendingLibOpen = ref(false)
 /** 简单互斥，避免并发写坏自增 id */
 let writeChain = Promise.resolve()
 
+/* ==================== 人脸库专用 IndexedDB 连接 ====================
+ * 为什么不复用 useEventStore 那个共享连接：
+ *   人脸写与「事件记录」写**共用同一个连接**时，同一连接上的事务是**串行**的。
+ *   检测器实时跑、每有报警就往同一个库写截图，人脸写要排在事件写后面 → 拥堵；
+ *   更糟的是**死事务级联**：某次人脸写卡死（请求永远不回）时，看门狗虽拒绝了这次
+ *   操作，但那条卡死的事务仍挂在连接上，后续每次人脸写都排在它后面 → 一起卡 15s。
+ *
+ *   单独开一个**同库不同连接**（IndexedDB 的事务只在**连接内**串行，跨连接可并行）：
+ *   · 人脸写不再被事件写堵住 —— 正好落实「优先录入、其余写入暂缓」；
+ *   · 写超时时只重置这一个人脸连接，死事务随连接关闭而消亡，不影响事件写。
+ */
+let faceDbPromise = null
+
+/** 关掉并丢弃人脸连接（写超时兜底 / 需要重开时用）。下一次调用会重新 open。 */
+export function resetFaceDB() {
+  const p = faceDbPromise
+  faceDbPromise = null
+  if (p) {
+    Promise.resolve(p)
+      .then((db) => {
+        try {
+          db.close()
+        } catch (e) {}
+      })
+      .catch(() => {})
+  }
+}
+
+/** 人脸库专用连接（与事件连接隔离）。语义与 useEventStore.openDB 一致：**绝不永久 pending**。 */
+function openFaceDB() {
+  if (faceDbPromise) return faceDbPromise
+  faceDbPromise = new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('当前环境不支持 IndexedDB'))
+      return
+    }
+    let settled = false
+    let timer = null
+    const fail = (msg) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      faceDbPromise = null
+      reject(msg instanceof Error ? msg : new Error(msg))
+    }
+    timer = setTimeout(() => fail('打开本地人脸数据库超时（10s），请关闭本应用的其它标签页后重试'), 10000)
+
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+    /*
+     * 建库：人脸连接与事件连接**同库同版本**，谁先 open 谁触发这一次的
+     * onupgradeneeded，所以这里把**两张表都补齐**（幂等）——
+     * 避免"人脸连接恰好先开 → events 表漏建"。
+     */
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(FACE_STORE_NAME)) {
+        const fs = db.createObjectStore(FACE_STORE_NAME, { keyPath: 'id', autoIncrement: true })
+        fs.createIndex('createdAt', 'createdAt')
+      }
+      if (!db.objectStoreNames.contains('events')) {
+        const os = db.createObjectStore('events', { keyPath: 'key' })
+        os.createIndex('time', 'time')
+      }
+    }
+    req.onblocked = () => fail(new Error('本地人脸数据库正被本应用的其它标签页占用，请关掉其它标签页后重试'))
+    req.onsuccess = () => {
+      if (settled) {
+        try {
+          req.result.close()
+        } catch (e) {}
+        return
+      }
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(req.result)
+    }
+    req.onerror = () => fail('打开本地人脸数据库失败：' + ((req.error && req.error.message) || req.error || '未知原因'))
+  })
+  return faceDbPromise
+}
+
 /**
  * 单次写操作的看门狗上限（毫秒）。
  *
@@ -74,10 +155,16 @@ const WRITE_TIMEOUT_MS = 15000
 function withWatchdog(fn) {
   let timer = null
   const guard = new Promise((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`本地数据库写入超时（${WRITE_TIMEOUT_MS / 1000}s）：请关闭本应用的其它标签页后重试`)),
-      WRITE_TIMEOUT_MS
-    )
+    timer = setTimeout(() => {
+      /*
+       * 超时 = 这次写真的卡死了。**先把人脸连接重置掉**再报错：
+       * 卡死的那条事务还挂在连接上，不重置的话后续每次人脸写都排在它后面 →
+       * 从"一下失败"退化成"整个脸库从此不动"（用户侧表现为"经常报 15s 超时"）。
+       * 重置只关人脸连接，不影响事件写（那是另一个连接）。
+       */
+      resetFaceDB()
+      reject(new Error(`本地数据库写入超时（${WRITE_TIMEOUT_MS / 1000}s）：请关闭本应用的其它标签页后重试`))
+    }, WRITE_TIMEOUT_MS)
     // Node（探针）里别为它吊住事件循环；浏览器返回数字，没有 unref
     if (timer && typeof timer.unref === 'function') timer.unref()
   })
@@ -101,7 +188,7 @@ function reqAsPromise(req) {
 }
 
 async function store(mode) {
-  const db = await openDB()
+  const db = await openFaceDB()
   return db.transaction(FACE_STORE_NAME, mode).objectStore(FACE_STORE_NAME)
 }
 
@@ -207,7 +294,7 @@ export function renameFaces(ids, name) {
     const finalName = String(name == null ? '' : name).trim()
     if (!list.length) return { ok: false, reason: '没有要改名的记录' }
     if (!finalName) return { ok: false, reason: '名字不能为空' }
-    const db = await openDB()
+    const db = await openFaceDB()
     await new Promise((resolve, reject) => {
       // 同一事务里改完：要么全改要么全不改（否则会出现"同一个人一半新名字一半旧名字"）
       const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
@@ -248,7 +335,7 @@ export function deleteFaces(ids) {
   return runExclusive(async () => {
     const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
     if (!list.length) return { ok: false, reason: '没有要删除的记录' }
-    const db = await openDB()
+    const db = await openFaceDB()
     await new Promise((resolve, reject) => {
       const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
       const os = tx.objectStore(FACE_STORE_NAME)
@@ -321,7 +408,7 @@ export function mergeFaces(ids, keepId) {
   return runExclusive(async () => {
     const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
     if (list.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
-    const db = await openDB()
+    const db = await openFaceDB()
     const recs = await new Promise((resolve, reject) => {
       const tx = db.transaction(FACE_STORE_NAME, 'readonly')
       const os = tx.objectStore(FACE_STORE_NAME)
@@ -404,7 +491,7 @@ export function replaceFaces(list, { force = false } = {}) {
     const items = (Array.isArray(list) ? list : []).filter(
       (f) => f && f.name && Array.isArray(f.vector) && f.vector.length
     )
-    const db = await openDB()
+    const db = await openFaceDB()
     if (!force && items.length === 0) {
       // 先看一眼本机还有没有人：有就**什么都不做**（连 clear 都不发）
       const cur = await new Promise((resolve, reject) => {

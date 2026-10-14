@@ -171,7 +171,7 @@ onBeforeUnmount(() => {
   line-height: 1.2;
   text-align: left;
   cursor: pointer;
-  background: color-mix(in srgb, var(--tint) 14%, var(--card));
+  background: var(--field-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
   color: var(--text);
@@ -200,8 +200,10 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding: 4px;
   border-radius: 8px;
-  background: var(--card);
-  border: 1px solid var(--line);
+  /* 浮在毛玻璃之上，必须用主题专门给自绘浮层的不透明 token --pop-bg，
+   * 不能用 var(--card)（该变量未定义 → 解析成透明，弹层透出底下画面）。 */
+  background: var(--pop-bg);
+  border: 1px solid var(--pop-line);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
 }
 .fas-opt {
@@ -215,11 +217,11 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
 }
 .fas-opt:hover {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  background: var(--pop-hover);
 }
 .fas-opt.active {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  color: var(--accent);
+  background: var(--pop-hover);
+  color: var(--accent-text);
 }
 .fas-custom {
   color: var(--text-dim);

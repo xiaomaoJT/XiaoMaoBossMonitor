@@ -10,8 +10,8 @@
  *   - 页面内存里只保留 `thumb` 小缩略图（几十 KB）；
  *   - 详情弹窗打开时才按 key 把原图从库里捞出来。
  */
-const DB_NAME = 'monitor-wall-db'
-const DB_VERSION = 2
+export const DB_NAME = 'monitor-wall-db'
+export const DB_VERSION = 2
 const STORE = 'events'
 /** 人脸库（特征向量 + 缩略图） */
 const FACE_STORE = 'faces'
