@@ -2293,6 +2293,142 @@
               </button>
             </div>
           </div>
+
+          <!-- ==================== 关键事件独立推送（单独机器人） ==================== -->
+          <div class="block-head sub">
+            <h3>关键事件独立推送（单独机器人）</h3>
+            <span class="state-chip" :class="dt.critical && dt.critical.enabled ? 'ready' : ''">
+              {{ dt.critical && dt.critical.enabled ? '已启用' : '未启用' }}
+            </span>
+          </div>
+          <p class="hint">
+            把「静默结束 / 静默汇总 / 人脸命中 / 待录入满库」这几类<b>关键事件</b>，单独打到
+            <b>另一个钉钉机器人</b>上。它和上面的日常推送是<b>两个完全独立的机器人</b>：
+            这里要另配一个 Webhook 和加签密钥 —— 日常群被刷屏、或者夜间静默时，关键事件照样收得到。
+            <br />
+            这几类关键事件<b>同时也仍会走上面的日常推送</b>；这里只是"再单独发一份到另一个群"。
+          </p>
+
+          <label class="opt">
+            <span>
+              <strong>启用关键事件独立推送</strong>
+              <em>关闭则关键事件只走上面的日常推送</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: dt.critical && dt.critical.enabled }"
+              @click="dt.critical.enabled = !(dt.critical && dt.critical.enabled)"
+            ></span>
+          </label>
+
+          <div class="opt col">
+            <span>
+              <strong>关键事件机器人 Webhook</strong>
+              <em>必须与上面的日常推送 Webhook <b>不同</b>（另一个机器人 / 另一个群）</em>
+            </span>
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.dtCritWebhook ? 'text' : 'password'" v-model.trim="dt.critical.webhook" spellcheck="false" autocomplete="off" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." />
+              <button type="button" class="pw-eye" :title="revealed.dtCritWebhook ? '隐藏' : '显示'" @click="revealed.dtCritWebhook = !revealed.dtCritWebhook">{{ revealed.dtCritWebhook ? '🙈' : '👁' }}</button>
+            </div>
+          </div>
+
+          <div class="opt col">
+            <span>
+              <strong>加签密钥</strong>
+              <em>关键事件机器人的加签密钥，与日常推送 <b>互不相同</b>（留空=用关键词 / IP 白名单）</em>
+            </span>
+            <div class="pw-wrap">
+              <input class="field" :type="revealed.dtCritSecret ? 'text' : 'password'" v-model.trim="dt.critical.secret" spellcheck="false" autocomplete="off" placeholder="SECxxxxxxxx" />
+              <button type="button" class="pw-eye" :title="revealed.dtCritSecret ? '隐藏' : '显示'" @click="revealed.dtCritSecret = !revealed.dtCritSecret">{{ revealed.dtCritSecret ? '🙈' : '👁' }}</button>
+            </div>
+          </div>
+
+          <label class="opt">
+            <span>
+              <strong>使用本地代理</strong>
+              <em>与日常推送同理，经 /dingtalk-robot 转发，避免跨域</em>
+            </span>
+            <span class="switch" :class="{ on: dt.critical && dt.critical.useProxy }" @click="dt.critical.useProxy = !(dt.critical && dt.critical.useProxy)"></span>
+          </label>
+
+          <div class="opt col">
+            <span>
+              <strong>推送哪几类关键事件</strong>
+              <em>缺省即开：不勾的类别不会单独推到这个机器人</em>
+            </span>
+            <div class="cam-tags">
+              <button
+                v-for="g in CRIT_EVENTS"
+                :key="g.key"
+                class="tag"
+                :class="{ on: critOn('dingtalk', g.key) }"
+                :title="g.desc"
+                @click="toggleCritEvent('dingtalk', g.key)"
+              >
+                {{ g.label }}
+              </button>
+            </div>
+          </div>
+
+          <div class="opt">
+            <span>
+              <strong>消息格式</strong>
+              <em>markdown 支持标题与图片；text 为纯文本</em>
+            </span>
+            <select class="field mini" v-model="dt.critical.msgType">
+              <option value="markdown">markdown</option>
+              <option value="text">纯文本</option>
+            </select>
+          </div>
+
+          <div class="opt col">
+            <span>
+              <strong>消息标题前缀</strong>
+              <em>建议保留，同时可作为该机器人的「自定义关键词」</em>
+            </span>
+            <input class="field" v-model.trim="dt.critical.titlePrefix" spellcheck="false" placeholder="【监控报警】" />
+          </div>
+
+          <div class="opt">
+            <span>
+              <strong>附带事件截图</strong>
+              <em>关键事件机器人独立于 TG，默认不带图；要嵌图需自备图床 / 上传接口</em>
+            </span>
+            <select class="field mini" v-model="dt.critical.screenshotMode">
+              <option value="none">都不带（仅文字）</option>
+              <option value="litterbox">上传图床后直接嵌图</option>
+              <option value="upload">自建上传接口嵌图</option>
+            </select>
+          </div>
+
+          <label class="opt">
+            <span>
+              <strong>@ 所有人</strong>
+              <em>关键事件推送时 @ 该群所有人</em>
+            </span>
+            <span class="switch" :class="{ on: dt.critical && dt.critical.atAll }" @click="dt.critical.atAll = !(dt.critical && dt.critical.atAll)"></span>
+          </label>
+
+          <div class="opt col">
+            <span>
+              <strong>@ 指定手机号</strong>
+              <em>多个用英文逗号分隔，留空表示不 @ 指定人</em>
+            </span>
+            <input class="field" v-model.trim="dt.critical.atMobiles" spellcheck="false" placeholder="13800000000,13900000000" />
+          </div>
+
+          <div class="opt">
+            <span>
+              <strong>连通性测试</strong>
+              <em>向这个关键事件机器人发一条测试消息</em>
+            </span>
+            <div class="test-row">
+              <span class="test-state" :class="dtCritState.kind" v-if="dtCritState.text">{{ dtCritState.text }}</span>
+              <button class="btn small primary" :disabled="dtCritState.kind === 'loading'" @click="testDingCritical">
+                {{ dtCritState.kind === 'loading' ? '发送中…' : '发送测试' }}
+              </button>
+            </div>
+          </div>
         </section>
 
         <!-- ==================== Telegram 推送 ==================== -->
@@ -3008,6 +3144,131 @@
               <button class="btn small" :disabled="wcState.kind === 'loading'" @click="checkWecom">检查配置</button>
               <button class="btn small primary" :disabled="wcState.kind === 'loading'" @click="testWecom">
                 {{ wcState.kind === 'loading' ? '发送中…' : '发送测试' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- ==================== 关键事件独立推送（单独机器人） ==================== -->
+          <div class="block-head sub">
+            <h3>关键事件独立推送（单独机器人）</h3>
+            <span class="state-chip" :class="wc.critical && wc.critical.enabled ? 'ready' : ''">
+              {{ wc.critical && wc.critical.enabled ? '已启用' : '未启用' }}
+            </span>
+          </div>
+          <p class="hint">
+            把「静默结束 / 静默汇总 / 人脸命中 / 待录入满库」这几类<b>关键事件</b>，单独打到
+            <b>另一个企业微信机器人</b>上。它和上面的日常推送是<b>两个完全独立的机器人</b>。
+            <br />
+            企业微信机器人没有独立的「加签密钥」——它的<b>加密密钥就是 Webhook 地址里 key= 那一串</b>，
+            所以这里只要再粘一个<b>不同的 Webhook</b>（指向另一个机器人 / 另一个群）即可。
+            <br />
+            这几类关键事件<b>同时也仍会走上面的日常推送</b>；这里只是"再单独发一份到另一个群"。
+          </p>
+
+          <label class="opt">
+            <span>
+              <strong>启用关键事件独立推送</strong>
+              <em>关闭则关键事件只走上面的日常推送</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: wc.critical && wc.critical.enabled }"
+              @click="wc.critical.enabled = !(wc.critical && wc.critical.enabled)"
+            ></span>
+          </label>
+
+          <div class="opt col">
+            <span>
+              <strong>关键事件机器人 Webhook</strong>
+              <em>必须与上面的日常推送 Webhook <b>不同</b>；只粘贴 key 那一串也可以</em>
+            </span>
+            <div class="pw-wrap">
+              <input
+                class="field"
+                :type="revealed.wcCritWebhook ? 'text' : 'password'"
+                v-model.trim="wc.critical.webhook"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
+              />
+              <button type="button" class="pw-eye" :title="revealed.wcCritWebhook ? '隐藏' : '显示'" @click="revealed.wcCritWebhook = !revealed.wcCritWebhook">{{ revealed.wcCritWebhook ? '🙈' : '👁' }}</button>
+            </div>
+          </div>
+
+          <div class="opt col">
+            <span>
+              <strong>推送哪几类关键事件</strong>
+              <em>缺省即开：不勾的类别不会单独推到这个机器人</em>
+            </span>
+            <div class="cam-tags">
+              <button
+                v-for="g in CRIT_EVENTS"
+                :key="g.key"
+                class="tag"
+                :class="{ on: critOn('wecom', g.key) }"
+                :title="g.desc"
+                @click="toggleCritEvent('wecom', g.key)"
+              >
+                {{ g.label }}
+              </button>
+            </div>
+          </div>
+
+          <div class="opt col">
+            <span>
+              <strong>消息样式</strong>
+              <em>markdown 排版更好看；需要 @ 时会自动改用纯文本（markdown 不支持 @）</em>
+            </span>
+            <div class="seg-row">
+              <button class="btn small" :class="{ primary: wc.critical && wc.critical.msgType === 'markdown' }" @click="wc.critical.msgType = 'markdown'">markdown</button>
+              <button class="btn small" :class="{ primary: wc.critical && wc.critical.msgType === 'text' }" @click="wc.critical.msgType = 'text'">纯文本</button>
+            </div>
+          </div>
+
+          <div class="opt">
+            <span>
+              <strong>消息标题前缀</strong>
+              <em>也可兼作该机器人的关键词过滤规则</em>
+            </span>
+            <input class="field mini" v-model.trim="wc.critical.titlePrefix" placeholder="【监控报警】" />
+          </div>
+
+          <div class="opt">
+            <span>
+              <strong>附带事件截图</strong>
+              <em>关键事件机器人独立于 TG；image 模式可直接发图，无需图床</em>
+            </span>
+            <select class="field mini" v-model="wc.critical.screenshotMode">
+              <option value="image">直接发一张图片（推荐）</option>
+              <option value="litterbox">上传图床后附链接</option>
+              <option value="none">都不带（仅文字）</option>
+            </select>
+          </div>
+
+          <label class="opt">
+            <span>
+              <strong>@所有人</strong>
+              <em>关键事件推送时 @ 群内所有人（会自动改用纯文本消息）</em>
+            </span>
+            <span class="switch" :class="{ on: wc.critical && wc.critical.atAll }" @click="wc.critical.atAll = !(wc.critical && wc.critical.atAll)"></span>
+          </label>
+
+          <div class="opt col">
+            <span>
+              <strong>@指定成员</strong>
+              <em>手机号，多个用英文逗号分隔（会自动改用纯文本消息）</em>
+            </span>
+            <input class="field" v-model.trim="wc.critical.atMobiles" placeholder="13800000000,13900000000" />
+          </div>
+
+          <div class="opt">
+            <span>
+              <strong>连通性测试</strong>
+              <em>{{ wcCritState.text || '向这个关键事件机器人发一条测试消息' }}</em>
+            </span>
+            <div class="test-row">
+              <button class="btn small primary" :disabled="wcCritState.kind === 'loading'" @click="testWecomCritical">
+                {{ wcCritState.kind === 'loading' ? '发送中…' : '发送测试' }}
               </button>
             </div>
           </div>
@@ -3846,6 +4107,10 @@ function openPicker(e) {
 const revealed = reactive({
   dtWebhook: false,
   dtSecret: false,
+  // 关键事件独立机器人（钉钉 / 企微各一个独立 webhook，钉钉另含加签密钥）
+  dtCritWebhook: false,
+  dtCritSecret: false,
+  wcCritWebhook: false,
   tgToken: false,
   tgChat: false,
   tgGroup: false,
@@ -4509,6 +4774,22 @@ if (opts.dingtalk) normalizeDingTalk(opts.dingtalk)
 if (opts.wecom) normalizeWeCom(opts.wecom)
 if (opts.telegram) normalizeTelegram(opts.telegram)
 
+/*
+ * 兜底：确保「关键事件独立机器人」子块存在。
+ * 正常路径下 App 载入时 fillMissingOptions 已经补齐，但抽屉可能拿到一份
+ * 尚未迁移的老 options（或首次渲染早于迁移）；缺了它，下面的 v-model
+ * 会直接写 undefined.critical.webhook 报错。默认值取自同一份 defaults.js。
+ */
+{
+  const _def = cloneDefaultOptions()
+  if (opts.dingtalk && !opts.dingtalk.critical) {
+    opts.dingtalk.critical = JSON.parse(JSON.stringify(_def.dingtalk.critical))
+  }
+  if (opts.wecom && !opts.wecom.critical) {
+    opts.wecom.critical = JSON.parse(JSON.stringify(_def.wecom.critical))
+  }
+}
+
 /** 钉钉 / 企业微信只要有一个开着，Telegram 就必须开着（它承载图片与原图链接） */
 const tgForced = computed(() => !!opts.dingtalk.enabled || !!opts.wecom.enabled)
 
@@ -4534,6 +4815,34 @@ function toggleEvent(channelKey, evKey) {
   if (!target) return
   if (!target.events) target.events = {}
   target.events[evKey] = !evOn(target, evKey)
+}
+
+/**
+ * 「关键事件单独提醒」的四类事件。
+ * 与上面的 EVENT_GROUPS（报警类型分组）**不是一回事**：那是"哪些类型的报警要推"，
+ * 这是"哪几类关键事件要额外单独提醒"。键与执行层（TG directPush.events /
+ * 钉钉、企微 critical.events）严格一一对应。
+ */
+const CRIT_EVENTS = [
+  { key: 'silence', label: '静默结束', desc: '静默时段结束时推一条汇总' },
+  { key: 'summary', label: '静默汇总', desc: '静默期间收存了多少事件的汇总' },
+  { key: 'face', label: '人脸命中', desc: '识别到已录入的人脸时推送' },
+  { key: 'pending', label: '待录入满库', desc: '待录入人脸库达到预警 / 满库线时推送' }
+]
+
+/** 某渠道的「关键事件」子开关是否开启（缺省即开，与执行层同一语义 `!== false`） */
+function critOn(channelKey, evKey) {
+  const crit = (opts[channelKey] || {}).critical
+  if (!crit) return false
+  const e = crit.events || {}
+  return e[evKey] !== false
+}
+
+function toggleCritEvent(channelKey, evKey) {
+  const crit = (opts[channelKey] || {}).critical
+  if (!crit) return
+  if (!crit.events) crit.events = {}
+  crit.events[evKey] = !critOn(channelKey, evKey)
 }
 
 /* ==================== AI 扩展分析 ==================== */
@@ -5231,6 +5540,37 @@ async function testPush() {
   }
 }
 
+/* ---------- 钉钉「关键事件独立机器人」连通性测试 ---------- */
+const dtCritState = reactive({ kind: '', text: '' })
+
+async function testDingCritical() {
+  dtCritState.kind = 'loading'
+  dtCritState.text = '发送中…'
+  try {
+    const c = (dt.value && dt.value.critical) || {}
+    if (!String(c.webhook || '').trim()) throw new Error('还没有填写关键事件机器人的 Webhook')
+    const msgType = c.msgType || 'markdown'
+    await sendDingTalk(
+      { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy !== false, proxyBase: c.proxyBase || '' },
+      {
+        title: `【测试】${c.titlePrefix || ''}`,
+        text:
+          msgType === 'text'
+            ? `【测试】关键事件独立机器人连通性测试：配置正常，关键事件会推送到本群。`
+            : `**【测试】关键事件独立机器人**\n> 配置正常，关键事件（静默 / 人脸命中 / 满库）会推送到本群。`,
+        msgType,
+        atAll: false,
+        atMobiles: []
+      }
+    )
+    dtCritState.kind = 'ok'
+    dtCritState.text = '发送成功，请查看关键事件所在的那个钉钉群'
+  } catch (e) {
+    dtCritState.kind = 'fail'
+    dtCritState.text = (e && e.message) || '发送失败'
+  }
+}
+
 /* ---------- 企业微信推送 ---------- */
 /*
  * 只做纯引用。旧配置字段的补齐已经在上面的 setup 阶段一次性做完了 ——
@@ -5313,6 +5653,36 @@ async function testWecom() {
   } catch (e) {
     wcState.kind = 'fail'
     wcState.text = (e && e.message) || '发送失败'
+  }
+}
+
+/* ---------- 企业微信「关键事件独立机器人」连通性测试 ---------- */
+const wcCritState = reactive({ kind: '', text: '' })
+
+async function testWecomCritical() {
+  wcCritState.kind = 'loading'
+  wcCritState.text = '正在发送测试消息…'
+  try {
+    const c = (wc.value && wc.value.critical) || {}
+    if (!String(c.webhook || '').trim()) throw new Error('还没有填写关键事件机器人的 Webhook')
+    const msgType = c.msgType || 'markdown'
+    await sendWeCom(
+      { webhook: c.webhook, proxyBase: c.proxyBase || '' },
+      {
+        msgType,
+        content:
+          msgType === 'text'
+            ? '【测试】关键事件独立机器人连通性测试：配置正常，关键事件会推送到本群。'
+            : '**【测试】关键事件独立机器人**\n> 配置正常，关键事件（静默 / 人脸命中 / 满库）会推送到本群。',
+        atAll: false,
+        atMobiles: []
+      }
+    )
+    wcCritState.kind = 'ok'
+    wcCritState.text = '✓ 测试消息已发送，请到关键事件所在的那个企业微信群确认'
+  } catch (e) {
+    wcCritState.kind = 'fail'
+    wcCritState.text = (e && e.message) || '发送失败'
   }
 }
 

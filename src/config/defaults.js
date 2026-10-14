@@ -775,7 +775,41 @@ export const HIDDEN_OPTIONS = {
     /* ---- @ 设置 ---- */
     atAll: false,
     /** 手机号，多个用英文逗号分隔 */
-    atMobiles: ''
+    atMobiles: '',
+
+    /* ---- 关键事件独立推送（单独的机器人，与「日常推送」完全分离） ----
+     * 用户诉求：日常推送（上面的 webhook/secret）和关键事件推送**不能是同一个机器人**，
+     * 否则静默 / 刷屏时关键事件照样收不到。所以这里是一个**独立**的 webhook + 加签密钥，
+     * 指向另一个钉钉机器人（另一个群 / 另一个加签）。
+     * 凭据与日常推送互不相干：日常推送改了、关了，都不影响关键事件这条线。
+     */
+    critical: {
+      /** 是否启用关键事件独立推送（默认关：不配好独立机器人之前不要悄悄多发消息） */
+      enabled: false,
+      /** 关键事件专用机器人 Webhook（必须 ≠ 上面的日常推送 webhook！） */
+      webhook: '',
+      /** 加签密钥（与日常推送不同！安全设置=加签时填写，留空=关键词 / IP 白名单） */
+      secret: '',
+      /** 走本地代理（同日常推送） */
+      useProxy: true,
+      /** 自定义代理基地址，留空 = 自动判断 */
+      proxyBase: '',
+      /** 消息类型：markdown / text（@人时企微会自动转 text，见 useAlertPush） */
+      msgType: 'markdown',
+      /** 标题前缀（兼作机器人自定义关键词） */
+      titlePrefix: '【监控报警】',
+      /**
+       * 哪几类关键事件要单独推。判据与 directPush.events 同语义（缺省即开），
+       * 老配置缺这个字段时按四类全开。
+       */
+      events: { silence: true, summary: true, face: true, pending: true },
+      /* ---- @ 设置（同样全功能） ---- */
+      atAll: false,
+      /** 手机号，多个用英文逗号分隔 */
+      atMobiles: '',
+      /** 截图模式：none=不带图（默认）/ litterbox=上传图床后嵌图 / upload=自建上传接口嵌图 */
+      screenshotMode: 'none'
+    }
   },
 
   /* ---------------- Telegram 推送（图片走这里） ---------------- */
@@ -971,7 +1005,34 @@ export const HIDDEN_OPTIONS = {
     /* ---- 提醒（企业微信 text 消息的 mentioned_list） ---- */
     atAll: false,
     /** 成员手机号，多个用英文逗号分隔 */
-    atMobiles: ''
+    atMobiles: '',
+
+    /* ---- 关键事件独立推送（单独的机器人，与「日常推送」完全分离） ----
+     * 与钉钉同理：日常推送（上面的 webhook）和关键事件推送**不能是同一个机器人**。
+     * 注意：企业微信机器人没有「加签密钥」这种独立字段 —— 它的「加密密钥」就是
+     * webhook 地址里 `?key=xxxx` 那一串。所以这里只需要再配一个**不同的 webhook**
+     * （指向另一个企业微信机器人，即另一个群 / 另一个 key）即可。
+     */
+    critical: {
+      /** 是否启用关键事件独立推送（默认关） */
+      enabled: false,
+      /** 关键事件专用机器人 Webhook（必须 ≠ 上面的日常推送 webhook！完整地址含 key） */
+      webhook: '',
+      /** 自定义代理基地址，留空 = 自动判断 */
+      proxyBase: '',
+      /** 消息类型：markdown / text（@人时必须用 text，见 useAlertPush） */
+      msgType: 'markdown',
+      /** 标题前缀（兼作机器人自定义关键词） */
+      titlePrefix: '【监控报警】',
+      /** 哪几类关键事件要单独推（缺省即开） */
+      events: { silence: true, summary: true, face: true, pending: true },
+      /* ---- @ 设置（同样全功能） ---- */
+      atAll: false,
+      /** 成员手机号，多个用英文逗号分隔 */
+      atMobiles: '',
+      /** 截图模式：image=直接发 base64 截图（推荐）/ litterbox=上传图床后在文字里附链接 / none=不带图 */
+      screenshotMode: 'image'
+    }
   }
 }
 
@@ -1060,6 +1121,20 @@ export const DEFAULT_OPTIONS = (() => {
   wipe(o.dingtalk, ['webhook', 'secret'])
   wipe(o.telegram, ['token', 'chatId', 'groupUsername'])
   wipe(o.wecom, ['webhook'])
+
+  /*
+   * 关键事件独立机器人的凭据同样属于个人化数据，初始化必须清空。
+   * 否则「恢复初始化」之后，旧的关键事件机器人还会继续往另一个群推报警。
+   */
+  if (o.dingtalk.critical) {
+    o.dingtalk.critical.enabled = false
+    o.dingtalk.critical.webhook = ''
+    o.dingtalk.critical.secret = ''
+  }
+  if (o.wecom.critical) {
+    o.wecom.critical.enabled = false
+    o.wecom.critical.webhook = ''
+  }
 
   /*
    * 远程控制的白名单 id **只活在隐藏配置（HIDDEN_OPTIONS）里**，不许进默认配置。

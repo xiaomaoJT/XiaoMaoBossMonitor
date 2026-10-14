@@ -26,7 +26,7 @@ import {
   sendDingTalk,
   uploadScreenshot
 } from './useDingTalk.js'
-import { normalizeWeCom, sendWeCom, sendWeComAlarm } from './useWeCom.js'
+import { normalizeWeCom, sendWeCom, sendWeComAlarm, sendWeComImage } from './useWeCom.js'
 import { recordPush } from './usePushStats.js'
 import { uploadToLitterbox } from './useImageHost.js'
 import { EVENT_GROUPS, TYPE_GROUP, featureText, normalizeEvents } from './useAlarmText.js'
@@ -1940,17 +1940,58 @@ export function useAlertPush(options, hooks = {}) {
    * @param {object} payload { title, text, html, image, caption }
    *        image 存在时发图片（caption 优先于 html/text）；否则发纯文本。
    */
+  /**
+   * 把 Telegram HTML（<b>/<i>/<code>/<a>）转成钉钉 / 企业微信能吃的 markdown。
+   * 关键事件推送复用主渠道同一条正文（payload.html 是 TG HTML），
+   * 必须先做一次格式转换，否则钉钉 / 企微里会残留一堆 <> 标签。
+   */
+  function tgHtmlToMd(html) {
+    return String(html || '')
+      .replace(/<b>([\s\S]*?)<\/b>/g, '**$1**')
+      .replace(/<strong>([\s\S]*?)<\/strong>/g, '**$1**')
+      .replace(/<i>([\s\S]*?)<\/i>/g, '*$1*')
+      .replace(/<code>([\s\S]*?)<\/code>/g, '`$1`')
+      .replace(/<a\s+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g, '[$2]($1)')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+  }
+
+  /**
+   * 关键事件单独提醒 —— 入口。
+   *
+   * 现在 fan-out 到**三路独立通道**，各自用自己独立的凭据 / 开关 / 事件筛选，
+   * 互不拖累（一路没配好不影响另一路）：
+   *   1. Telegram 私聊（原有，指向 directPush 里的接收人）
+   *   2. 钉钉「关键事件独立机器人」（dingtalk.critical 里的独立 webhook + 加签）
+   *   3. 企业微信「关键事件独立机器人」（wecom.critical 里的独立 webhook）
+   *
+   * 三路都判定 `enabled` + `events[kind]`，且只认自己的凭据；
+   * 日常推送（dingtalk/wecom 顶层）是否开启、TG 是否配置，都不影响这两路关键事件推送。
+   */
   async function pushDirectToUsers(kind, payload = {}) {
-    let tg = null
+    const parts = await Promise.all([
+      pushDirectTg(kind, payload),
+      pushCriticalDing(kind, payload),
+      pushCriticalWecom(kind, payload)
+    ])
+    const reasons = parts.map((p) => p.reason).filter(Boolean)
+    const sent = parts.reduce((a, p) => a + (p.sent || 0), 0)
+    if (reasons.length) notify(`关键事件单独提醒部分失败：${reasons.join('；')}`)
+    return { ok: sent > 0, sent, parts }
+  }
+
+  /** 关键事件单独提醒 —— Telegram 私聊（原有逻辑，拆出来便于和另外两路并列） */
+  async function pushDirectTg(kind, payload = {}) {
+    let tg
     try {
       tg = readCfg('tg')
     } catch (e) {
-      return { ok: false, sent: 0, reason: '读取 Telegram 配置失败' }
+      return { ok: false, sent: 0, reason: '' }
     }
-    if (!directPushEventOn(tg, kind)) return { ok: false, sent: 0, reason: '该类关键事件未开启单独提醒' }
-    if (!isReady('tg')) return { ok: false, sent: 0, reason: 'Telegram 未启用或凭据不全' }
+    if (!directPushEventOn(tg, kind)) return { ok: false, sent: 0, reason: '' }
+    if (!isReady('tg')) return { ok: false, sent: 0, reason: '' }
     const to = directPushRecipients(tg)
-    if (!to.length) return { ok: false, sent: 0, reason: '没有可用的接收人' }
+    if (!to.length) return { ok: false, sent: 0, reason: '' }
 
     // 文本消息上限 4096，留出转义与余量；图片说明上限 1024
     const body = String(payload.html || plainFromMarkdown(payload.text || payload.title || '')).slice(0, 3500)
@@ -1972,8 +2013,129 @@ export function useAlertPush(options, hooks = {}) {
         fails.push(`${chatId}：${(e && e.message) || '未知错误'}`)
       }
     }
-    if (fails.length) notify(`关键事件单独提醒有 ${fails.length} 个接收人失败：${fails.join('；')}`)
     return { ok: sent > 0, sent, reason: fails.join('；') }
+  }
+
+  /**
+   * 钉钉「关键事件独立机器人」推送。
+   * 用 dingtalk.critical 里的独立 webhook + 加签密钥，与日常推送完全分离。
+   * 不依赖日常推送 / TG 是否配置，只认自己的开关与凭据。
+   */
+  async function pushCriticalDing(kind, payload = {}) {
+    let dt
+    try {
+      dt = readCfg('ding')
+    } catch (e) {
+      return { ok: false, sent: 0, reason: '' }
+    }
+    const crit = (dt && dt.critical) || null
+    if (!crit || crit.enabled !== true) return { ok: false, sent: 0, reason: '' }
+    if (crit.events && crit.events[kind] === false) return { ok: false, sent: 0, reason: '' }
+    const webhook = String(crit.webhook || '').trim()
+    if (!webhook) return { ok: false, sent: 0, reason: '' }
+
+    const atMobiles = parseMobiles(crit.atMobiles)
+    const atAll = !!crit.atAll
+    const md = payload.html ? tgHtmlToMd(payload.html) : String(payload.text || payload.title || '')
+    let text = md
+    // 钉钉 @手机号：必须把这串 @139... 字面写进正文，机器人才能真正通知到人
+    if (atMobiles.length) {
+      const tokens = atMobiles.map((m) => `@${m}`).join(' ')
+      if (!text.includes(tokens)) text = `${text}\n${tokens}`
+    }
+    // 截图（face 等关键事件带图时）：litterbox / upload 模式上传后嵌进正文
+    if (payload.image && (crit.screenshotMode === 'litterbox' || crit.screenshotMode === 'upload')) {
+      const shot = await resolveShotUrl(
+        {
+          screenshotMode: crit.screenshotMode,
+          imageHostTtl: dt.imageHostTtl,
+          uploadUrl: dt.uploadUrl,
+          uploadField: dt.uploadField,
+          uploadExtra: dt.uploadExtra
+        },
+        payload.image
+      )
+      if (shot.kind === 'image' && shot.url) text = `${text}\n![事件截图](${shot.url})`
+    }
+
+    const cfg = {
+      webhook,
+      secret: String(crit.secret || ''),
+      useProxy: crit.useProxy !== false,
+      proxyBase: crit.proxyBase || ''
+    }
+    try {
+      await sendDingTalk(cfg, {
+        title: crit.titlePrefix || '【监控报警】',
+        text,
+        msgType: crit.msgType || 'markdown',
+        atAll,
+        atMobiles
+      })
+      return { ok: true, sent: 1, reason: '' }
+    } catch (e) {
+      return { ok: false, sent: 0, reason: `钉钉关键事件：${(e && e.message) || '未知错误'}` }
+    }
+  }
+
+  /**
+   * 企业微信「关键事件独立机器人」推送。
+   * 用 wecom.critical 里的独立 webhook，与日常推送完全分离。
+   * ⚠️ 企微 markdown 不支持 @ 人：需要 @ 时（atAll / atMobiles）自动改用 text 消息。
+   */
+  async function pushCriticalWecom(kind, payload = {}) {
+    let wc
+    try {
+      wc = readCfg('wecom')
+    } catch (e) {
+      return { ok: false, sent: 0, reason: '' }
+    }
+    const crit = (wc && wc.critical) || null
+    if (!crit || crit.enabled !== true) return { ok: false, sent: 0, reason: '' }
+    if (crit.events && crit.events[kind] === false) return { ok: false, sent: 0, reason: '' }
+    const webhook = String(crit.webhook || '').trim()
+    if (!webhook) return { ok: false, sent: 0, reason: '' }
+
+    const atMobiles = parseMobiles(crit.atMobiles)
+    const atAll = !!crit.atAll
+    // 企微 markdown 不支持 @，需要 @ 时改用 text 消息
+    const needAt = atAll || atMobiles.length > 0
+    const md = payload.html ? tgHtmlToMd(payload.html) : String(payload.text || payload.title || '')
+    const plain = payload.text || plainFromMarkdown(payload.html || '') || md
+    const msgType = needAt ? 'text' : crit.msgType || 'markdown'
+    let content = needAt ? plain : md
+
+    // litterbox 模式：先把截图传上图床，再把链接附到正文里（text 模式下 link 语法不生效，直接给 URL）
+    if (payload.image && crit.screenshotMode === 'litterbox') {
+      const shot = await resolveShotUrl(
+        { screenshotMode: 'litterbox', imageHostTtl: wc.imageHostTtl },
+        payload.image
+      )
+      if (shot.kind === 'image' && shot.url) {
+        content += msgType === 'text' ? `\n截图：${shot.url}` : `\n[点击查看截图](${shot.url})`
+      }
+    }
+
+    const cfg = { webhook, proxyBase: crit.proxyBase || '' }
+    try {
+      await sendWeCom(cfg, {
+        msgType,
+        content,
+        atAll: needAt ? atAll : false,
+        atMobiles: needAt ? atMobiles : []
+      })
+      // image 模式：另发一条 base64 截图（文字已送达，图片失败不把整条判为失败）
+      if (payload.image && crit.screenshotMode === 'image') {
+        try {
+          await sendWeComImage(cfg, payload.image)
+        } catch (e) {
+          /* 文字已送达，截图失败只记录 */
+        }
+      }
+      return { ok: true, sent: 1, reason: '' }
+    } catch (e) {
+      return { ok: false, sent: 0, reason: `企业微信关键事件：${(e && e.message) || '未知错误'}` }
+    }
   }
 
   /* ------------------------------------------------------------------ */
