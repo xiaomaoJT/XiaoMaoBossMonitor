@@ -66,6 +66,55 @@
       </p>
     </section>
 
+    <!-- ==================== 在线设备（谁打开过这个后端） ==================== -->
+    <section class="card">
+      <header class="card-head">
+        <h4>在线设备</h4>
+        <div class="head-ops">
+          <span class="pct" v-if="clients">{{ clients.online }} 在线 · 近 24h {{ clients.total }} 台</span>
+          <span class="pct" v-else>{{ backendOn ? '读取中…' : '前端模式' }}</span>
+        </div>
+      </header>
+
+      <p class="hint" v-if="!clients">
+        {{
+          backendOn
+            ? '正在从后端读取设备列表…'
+            : '当前是前端模式：这个页面自己就是监测，没有"多端共用的后端"，因此没有设备清单。'
+        }}
+      </p>
+      <template v-else>
+        <p class="hint" v-if="!clients.list.length">
+          后端还没记录到任何页面 —— 页面每 4 秒轮询一次，稍候即会出现。
+        </p>
+        <div class="dev-list">
+          <div class="dev" v-for="d in clients.list" :key="d.cid" :class="{ off: !d.online }">
+            <span class="dev-dot"></span>
+            <div class="dev-main">
+              <div class="dev-name">
+                {{ d.name || d.label || '未知设备' }}
+                <span class="dev-self" v-if="d.cid === myCid">本机</span>
+              </div>
+              <div class="dev-meta">
+                <!-- 有自报名时第一行已经是它了，这里只补"它是什么环境 + 从哪来" -->
+                <template v-if="d.name">{{ d.label }}</template>
+                <template v-if="d.name && d.ip"> · </template>
+                <template v-if="d.ip">{{ d.ip }}</template>
+              </div>
+            </div>
+            <div class="dev-side">
+              <span class="dev-when">{{ d.online ? '在线' : ago(d.lastAt) }}</span>
+              <span class="dev-hits">{{ d.hits }} 次</span>
+            </div>
+          </div>
+        </div>
+        <p class="hint">
+          「在线」= 最近 {{ Math.round((clients.onlineMs || 90000) / 1000) }} 秒内请求过后端；页面切到后台会暂停轮询，
+          这时会显示成「N 分钟前」。名单仅保留最近 24 小时出现过的设备，只含 IP 与设备类型，不含任何凭据。
+        </p>
+      </template>
+    </section>
+
     <!-- ==================== 系统信息分区（含设备 / 能力 / 存储） ==================== -->
     <section class="card" v-for="sec in sections" :key="sec.title">
       <header class="card-head">
@@ -133,7 +182,8 @@ import { estimateUsage, formatBytes } from '../composables/useEventStore'
 import { isJessibucaReady } from '../composables/useJessibuca'
 import { PUSH_CHANNELS, pushStats, resetPushStats } from '../composables/usePushStats'
 import { formatDuration, formatUptime, uptimeSnapshot } from '../composables/useSystemUptime'
-import { refreshRemoteStatus } from '../composables/useBackendSync'
+import { refreshRemoteStatus, remoteStatus } from '../composables/useBackendSync'
+import { clientId } from '../composables/useClientId.js'
 import { confirmDialog } from '../composables/confirm.js'
 
 const props = defineProps({
@@ -309,6 +359,20 @@ function ago(ts) {
   if (hour < 24) return `${hour} 小时前`
   return `${Math.floor(hour / 24)} 天前`
 }
+
+/* ==================== 在线设备 ==================== */
+/*
+ * 「谁打开过这个后端」。
+ * 数据源是 remoteStatus（useBackendSync 的共享 ref）—— 它由本页每 10 秒的
+ * refreshRemoteStatus 刷新，和被复用的运行时长快照是**同一次**请求，
+ * 所以这里不额外发请求。后端模式下才有；前端模式没有"多端共用"这回事。
+ */
+const myCid = clientId()
+const clients = computed(() => {
+  const c = remoteStatus.value && remoteStatus.value.clients
+  if (!c || !Array.isArray(c.list)) return null
+  return c
+})
 
 /* ==================== 推送统计 ==================== */
 const pushChannels = PUSH_CHANNELS
@@ -611,6 +675,25 @@ function allText() {
   })
   lines.push('')
 
+  lines.push('— 在线设备 —')
+  if (clients.value) {
+    lines.push(`在线 ${clients.value.online} 台 · 近 24 小时出现 ${clients.value.total} 台`)
+    clients.value.list.forEach((d) => {
+      // 有自报名（原生壳 / 桌面端）时以它为首，再补环境与来源；没有就只留环境
+      const head = d.name ? `${d.name}（${d.label || '未知设备'}）` : d.label || '未知设备'
+      lines.push(
+        `${d.online ? '●' : '○'} ${head}` +
+          (d.ip ? ` · ${d.ip}` : '') +
+          (d.online ? ' · 在线' : ` · 最近 ${new Date(d.lastAt).toLocaleString('zh-CN')}`) +
+          ` · ${d.hits} 次` +
+          (d.cid === myCid ? ' · 本机' : '')
+      )
+    })
+  } else {
+    lines.push(backendOn.value ? '读取中…' : '前端模式，无设备清单')
+  }
+  lines.push('')
+
   sections.value.forEach((sec) => {
     lines.push(`— ${sec.title} —`)
     sec.rows.forEach((r) => lines.push(`${r.k}：${r.v}`))
@@ -893,6 +976,97 @@ async function copyAll() {
 .ok {
   color: var(--ok-text);
   font-style: normal;
+}
+
+/* ---------- 在线设备 ---------- */
+.dev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.dev {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+  border: 1px solid var(--line);
+}
+
+/* 不在线：整条压暗（不是隐藏 —— 用户要看的是"谁刚才还在"） */
+.dev.off {
+  opacity: 0.62;
+}
+
+.dev-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent);
+}
+.dev.off .dev-dot {
+  background: color-mix(in srgb, var(--text) 30%, transparent);
+  box-shadow: none;
+}
+
+.dev-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dev-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dev-self {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+}
+
+.dev-meta {
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dev-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.dev-when {
+  color: var(--text-soft);
+}
+.dev.off .dev-when {
+  color: var(--text-dim);
+}
+
+.dev-hits {
+  color: var(--text-dim-2);
 }
 
 .fail {

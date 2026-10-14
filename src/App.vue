@@ -165,6 +165,13 @@
 
     <ConfirmDialog />
 
+    <!--
+      首次打开 / 接管后端时的同步进度。
+      进程内单例（composables/useSyncProgress），由 App.vue 的拉取流程真实驱动，
+      不是自走的假进度条 —— 见该文件的说明。
+    -->
+    <SyncProgress />
+
     <PrivacyMask
       :open="masked"
       :has-password="!!maskPasswordHash"
@@ -239,7 +246,6 @@ import {
   STORAGE_KEY,
   cloneDefaultCameras,
   cloneDefaultOptions,
-  isFaceHit,
   migrateSecretFields,
   normalizeCameraChannels,
   normalizeCameraSilent,
@@ -252,8 +258,15 @@ import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from 
 import { timeoutReason } from './composables/useNet.js'
 import NotifyStack from './components/NotifyStack.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import SyncProgress from './components/SyncProgress.vue'
 import { confirmDialog } from './composables/confirm.js'
-import { dayKey, dailyStats, statAlarm, statChannelState, statFaceHit, statPersonHit, statPush } from './composables/useDailyStats'
+import {
+  beginSyncFlow,
+  finishSyncFlow,
+  skipSyncFlow,
+  stepSyncFlow
+} from './composables/useSyncProgress.js'
+import { dayKey, dailyStats, setStatsRemote, statEvent, syncStatsFromRemote } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
   buildStatusAlertMessage,
@@ -271,13 +284,17 @@ import {
   patchEvent as dbPatchEvent,
   pruneEvents,
   putEvent as dbPutEvent,
+  putEvents as dbPutEvents,
   toLightRecord
 } from './composables/useEventStore'
 import { exportEventsToFolder, downloadJson, supportsDirectoryPicker } from './composables/useFileIO'
 import { alarmBrief, alarmLabel } from './composables/useAlarmText'
 import {
+  backendEventToPayload,
   backendOn,
+  fetchBackendHistory,
   markReadOnBackend,
+  mergeEventLists,
   refreshBackendWatchdog,
   runBackendPatrol,
   sendBackendSilentNotice,
@@ -687,7 +704,14 @@ async function loadHistory() {
 
 /** 追加一条事件：内存里放轻量版，库里存完整版（含原图截图），并淘汰超限旧记录 */
 async function appendEvent(record) {
-  const next = [record, ...events.value]
+  /*
+   * ⚠️ 同 key 只留一条。
+   * 轮询是**增量**的、历史回填是**整体**的，两者可能覆盖到同一条事件
+   * （回填刚跑完，轮询的 since 又落在了同一时间窗里）。不过滤的话内存列表里
+   * 会出现两条一模一样的记录：未读数翻倍、事件面板看着像"重复报警"。
+   * IndexedDB 那边以 key 为主键，put 天然幂等，不用管。
+   */
+  const next = [record, ...events.value.filter((e) => e.key !== record.key)]
   const dropped = next.length > maxEvents.value ? next.slice(maxEvents.value) : []
   events.value = next.slice(0, maxEvents.value).map((e) => (e.key === record.key ? toLightRecord(record) : e))
   // 今日报警独立计数（不受 maxEvents 淘汰影响，见 todayAlarmCount 注释）
@@ -783,6 +807,15 @@ const lastEventText = computed(() => {
 
 let toastTimer = null
 let eventSeq = 0
+/**
+ * 本机历史是否已从 IndexedDB 载入完成。
+ *
+ * ⚠️ 存在的唯一原因：`loadHistory()` 是**整体赋值**（`events.value = list`）。
+ * 后端开关那个 watch 是 `immediate` 的，在 setup 阶段就跑 —— 那时 events 还是空数组，
+ * 若在那里做历史回填，紧接着 onMounted 的 loadHistory 会把刚回填的整批**冲掉**。
+ * 所以回填必须等"历史加载完"这个信号（见 onMounted 与本文件里对它的判断）。
+ */
+let historyReady = false
 
 function showToast(text, force = false) {
   if (masked.value && !force) return
@@ -1136,7 +1169,24 @@ watch(
     `${(options.backend && options.backend.pollMs) || ''}`,
   () => {
     if (backendActive.value) {
+      /*
+       * 统计也"跟着后端走"：把权威地址告诉 useDailyStats，并立刻同步一次 ——
+       * 这样刚打开开关，统计页看到的就已经是后端那份，而不是本机的空白。
+       * 之后由 useBackendEvents 的轮询循环定时刷新。
+       */
+      setStatsRemote(options.backend.url)
+      syncStatsFromRemote().catch(() => {})
       startBackendPolling(options, onBackendEvent)
+      /*
+       * 打开后端开关时回填一次历史事件 —— 否则本机列表里只有"开关打开之后"的事件，
+       * 与其它机器 / 后端的完整历史对不上。
+       * 首屏那次由 onMounted 负责（必须等 loadHistory 落地，见 historyReady 的说明）。
+       */
+      if (historyReady) {
+        backfillHistoryFromBackend().then((n) => {
+          if (n) showToast(`已从后端载入 ${n} 条历史事件`)
+        })
+      }
       /*
        * 「与后端对齐」——注意**不是**无条件把本机配置推过去。
        *
@@ -1151,6 +1201,8 @@ watch(
     } else {
       stopBackendPolling()
       stopConfigSync()
+      // 关掉后端服务 → 回到"本机自己统计"（与旧行为一致）
+      setStatsRemote('')
     }
     // 巡检定时器归属会跟着模式切换（本地 ↔ 服务端），这里重排一次。
     // 延到下一个 tick 再排：这个 watch 是 immediate 的，比 patrolTimer 的声明还早执行
@@ -1276,13 +1328,30 @@ async function alignWithBackend() {
  */
 async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
   if (!options.backend || !options.backend.url) return false
+  /*
+   * 同步进度面板。
+   * 首次打开（空大屏 → 自动接管）与用户手点「从后端拉取」都走这里，
+   * 每一步都由**真实的 await** 驱动（拉配置 / 人脸库在 applyPulledConfig 里、
+   * 历史事件与统计在本函数尾部），不做会自己往前爬的假进度条。
+   */
+  const useFlow = reason !== 'silent'
+  if (useFlow) {
+    beginSyncFlow(reason === 'manual' ? '正在从后端拉取配置…' : '首次打开 · 正在接管后端')
+    // 「连接后端」这一步在 alignWithBackend 里已经问过了（refreshRemoteStatus 成功才走到这）
+    stepSyncFlow('probe', 'done')
+    stepSyncFlow('config', 'doing')
+  }
+
   const r = await pullConfig(options.backend.url)
   if (!r.ok) {
+    // finishSyncFlow 会把"进行中"的那一步（config）自动标成失败
+    if (useFlow) finishSyncFlow(r.error || '配置拉取失败')
     if (reason === 'manual') showToast(`拉取失败：${r.error}`)
     return false
   }
   const data = r.data
   const remoteCams = Array.isArray(data.cameras) ? data.cameras.length : 0
+  if (useFlow) stepSyncFlow('config', 'done', `${remoteCams} 路通道`)
 
   if (confirm) {
     const local = cameras.value.length
@@ -1291,10 +1360,35 @@ async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
       `后端：${remoteCams} 路通道 · ${(data.faces || []).length} 人底库 · rev ${data.configRev}\n` +
       `本机：${local} 路通道\n\n` +
       `本机的通道 / 区域 / 推送凭据 / 人脸库会被后端那份整体替换（可撤销：改完再点「立即同步」推回去）。`
-    if (!(await confirmDialog({ title: '覆盖本机配置', message: msg }))) return false
+    if (!(await confirmDialog({ title: '覆盖本机配置', message: msg }))) {
+      // 用户取消：把没跑的步骤收成"跳过"，面板自己收起来（别留一个永远 40% 的进度条）
+      if (useFlow) finishSyncFlow()
+      return false
+    }
   }
 
-  await applyPulledConfig(data, reason)
+  try {
+    await applyPulledConfig(data, reason, useFlow)
+  } catch (e) {
+    if (useFlow) finishSyncFlow((e && e.message) || '采用后端配置失败')
+    showToast(`采用后端配置失败：${(e && e.message) || e}`)
+    return false
+  }
+
+  /*
+   * 历史事件 + 统计：这两步以前是各走各的（事件靠增量轮询慢慢攒、统计靠定时器），
+   * 于是"拉完配置"这一刻，新机器上事件列表还是空的、统计还是旧的。
+   * 既然都在这儿了，就顺手补齐 —— 用户点完"从后端拉取"看到的就是完整一份。
+   */
+  if (useFlow) {
+    stepSyncFlow('history', 'doing')
+    const n = await backfillHistoryFromBackend()
+    stepSyncFlow('history', 'done', n ? `回填 ${n} 条` : '已是最新')
+    stepSyncFlow('stats', 'doing')
+    await syncStatsFromRemote().catch(() => {})
+    stepSyncFlow('stats', 'done')
+    finishSyncFlow()
+  }
 
   /*
    * 用户**手动确认过**的那一次，采用完直接整页重载。
@@ -1309,9 +1403,11 @@ async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
    * 否则每台新机器首次打开都会白刷一次页面。
    *
    * 延迟 700ms：让「已从后端拉取配置（N 路通道）」的提示先露个面再刷。
+   * 进度面板那边已经 finishSyncFlow（完成态停留 1.8s），所以这里延到 1.9s 再刷，
+   * 免得刚显示"已与后端对齐"就被刷新打断 —— 那看起来像"是不是又出错了"。
    */
   if (confirm && typeof location !== 'undefined' && typeof location.reload === 'function') {
-    setTimeout(() => location.reload(), 700)
+    setTimeout(() => location.reload(), 1900)
   }
   return true
 }
@@ -1325,7 +1421,7 @@ async function pullFromBackend({ confirm = true, reason = 'manual' } = {}) {
  * 顺序上先停掉一切不该再跑的东西，再整体换配置，最后落盘 ——
  * 换到一半被定时器读到旧配置是最难查的一类问题。
  */
-async function applyPulledConfig(data, reason = 'manual') {
+async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
   applyingRemote = true
   try {
     // 通道：与载入存档时走同一条归一化链路（少了它，老字段形态会让画面出不来）
@@ -1422,14 +1518,25 @@ async function applyPulledConfig(data, reason = 'manual') {
     let facesSkippedLocal = 0
     try {
       const n = (data.faces || []).length
+      if (useFlow) stepSyncFlow('faces', 'doing')
       const r = await replaceFaces(data.faces || [])
       if (r && r.skipped) {
         facesSkippedLocal = Number(r.count) || 0
+        /*
+         * 「被保住」不是"没同步" —— 后端那份底库是空的，本机的没被清掉。
+         * 进度面板上要标成 skip 而不是 done：done 会让人以为"人已经过来了"，
+         * 而实际上两边对底库的认识此刻并不一致。
+         */
+        if (useFlow) skipSyncFlow('faces', `后端为空，保留本机 ${facesSkippedLocal} 人`)
         console.warn(`⚠️  后端人脸库是空的，本机 ${facesSkippedLocal} 人已保留（没被清空）`)
       } else if (n) {
+        if (useFlow) stepSyncFlow('faces', 'done', `${n} 人`)
         console.log(`👤 人脸库已从后端拉取：${n} 人`)
+      } else {
+        if (useFlow) stepSyncFlow('faces', 'done', '后端底库为空')
       }
     } catch (e) {
+      if (useFlow) stepSyncFlow('faces', 'fail')
       console.warn('⚠️  人脸库拉取失败：', (e && e.message) || e)
     }
 
@@ -2131,12 +2238,24 @@ function markPush(key, state, error, channels, results) {
   dbPatchEvent(key, patch).catch(() => {})
 }
 
-function onAlarm(payload) {
+/**
+ * 由 payload 造一条事件记录。
+ *
+ * 抽出来是因为有**两条**入口要造同一种记录：
+ *   ① 实时（本机检测 / 后端轮询）→ onAlarm；
+ *   ② 历史回填（从后端整体取回最近 N 条）→ backfillHistoryFromBackend。
+ * 以前这段只长在 onAlarm 里，回填就得另写一份 —— 两份形状一旦漂开，
+ * 事件面板上"实时那批"和"回填那批"会显示得不一样（详情页缺字段、推送状态对不上）。
+ *
+ * ⚠️ 只造记录，**不带任何副作用**（不弹卡片、不响铃、不推推送）：
+ * 回填历史时若带上这些，用户一打开页面就会被几十条旧报警轰炸一遍。
+ */
+function buildRecord(payload) {
   eventSeq += 1
   const cam = cameras.value.find((c) => c.id === payload.id) || {}
   const info = payload.info || null
 
-  const record = {
+  return {
     ...payload,
     /**
      * 后端事件用它自己那条记录的 key（两边同一个 key），
@@ -2165,6 +2284,61 @@ function onAlarm(payload) {
     pushChannels: payload.backendPushChannels || '',
     pushResults: payload.backendPushResults || null
   }
+}
+
+/**
+ * 从后端回填历史事件 —— 让**不同机器打开看到的事件内容对齐**。
+ *
+ * 为什么需要：后端模式下事件是**增量轮询**的，而首拉只覆盖最近 1 分钟
+ * （见 useBackendEvents 的 startBackendPolling）。于是每台机器的事件列表里
+ * 都只有"自己打开之后"发生的那部分：A 机昨天开过、能看到昨天的，
+ * B 机今天第一次打开、列表里一片空白 —— 而真相是后端库里躺着同一份完整历史。
+ *
+ * 这里把最近一批整体取回来（条数跟着本机 maxEvents 走），按 key 去重后
+ * **写进本机 IndexedDB + 合并进内存列表**。已读状态以后端那份为准
+ * （任何一台机器标已读都会 POST /api/read 回后端，所以它本来就是共享的）。
+ *
+ * 单飞：同一时刻只跑一次（首屏与"打开后端开关"两条路径可能同时触发）。
+ * @returns {Promise<number>} 实际新增（本机原先没有的）条数
+ */
+let backfillInFlight = null
+async function backfillHistoryFromBackend() {
+  if (!backendActive.value) return 0
+  if (backfillInFlight) return backfillInFlight
+  backfillInFlight = (async () => {
+    const r = await fetchBackendHistory(options.backend.url, maxEvents.value)
+    if (!r.ok) return 0
+    const known = new Set(events.value.map((e) => e.key))
+    const fresh = []
+    for (const ev of r.events) {
+      const payload = backendEventToPayload(ev)
+      const rec = buildRecord(payload)
+      if (known.has(rec.key)) continue
+      known.add(rec.key)
+      // 已读状态以后端为准（它才是多端共享的那一份）
+      rec.read = !!ev.read
+      fresh.push(rec)
+    }
+    if (!fresh.length) return 0
+    try {
+      await dbPutEvents(fresh)
+    } catch (e) {
+      /* 落库失败也先把内存列表补齐，下次打开再试 */
+    }
+    const merged = mergeEventLists(events.value, fresh, maxEvents.value)
+    events.value = merged.map(toLightRecord)
+    pruneEvents(maxEvents.value).catch(() => {})
+    seedTodayCount()
+    return fresh.length
+  })().finally(() => {
+    backfillInFlight = null
+  })
+  return backfillInFlight
+}
+
+function onAlarm(payload) {
+  const record = buildRecord(payload)
+  const cam = cameras.value.find((c) => c.id === payload.id) || {}
 
   appendEvent(record)
   if (options.alarmSound) beep(payload.type)
@@ -2185,26 +2359,15 @@ function onAlarm(payload) {
   /*
    * 统计打点（item 111）。
    * 记在这里而不是事件面板里，是因为这是"事件产生"的唯一入口 ——
-   * 前端检测、后端轮询、通道状态都走 onAlarm，一处覆盖全部。
-   * 通道状态（offline/online）不计入"报警"，单列一类，否则报警数会被断线刷高。
+   * 本机检测、后端轮询、通道状态都走 onAlarm，一处覆盖全部。
+   * 「一条事件该记哪几项统计」的判定（报警分类型 / 识别人次 / 人脸命中 /
+   * 掉线恢复）在 useDailyStats.statEvent **一处**，后端 handleEvent 共用同一份。
+   *
+   * ⚠️ 后端模式下**不在这里记**：那份统计的权威在后端（它 7×24 在累计），
+   *    前端定时从 /api/stats 拉回来展示即可。这里再记一遍只会和权威值打架 ——
+   *    何况"页面一关就不记了"的本机计数，本来就不该是"今日一共报了多少次"的答案。
    */
-  if (isSystemEvent(record)) statChannelState(record.type, record.time)
-  else {
-    statAlarm(record.type, record.time)
-    if (record.type === 'face' || record.faceName) statPersonHit(record.faceName, record.time)
-    /*
-     * 人脸命中（命中人脸库里已录入的人）单独记一份。
-     *
-     * 与上面那个 statPersonHit 是**两个概念**，都要记、不能合并：
-     *   · personHits —— 识别人次，含陌生人（回答"看见过多少人"）；
-     *   · faceHits   —— 命中次数，只算库内的人（回答"自己人来了几次"）。
-     * 判据用的是 defaults.isFaceHit —— 与推送收窄、TG 关键事件直推、
-     * 后端 /hits 指令**同一份**，四处不会各算一套。
-     */
-    if (isFaceHit(record)) {
-      statFaceHit(record.faceName, { camName: record.name, camId: record.id, score: record.faceScore }, record.time)
-    }
-  }
+  if (!(backendActive.value && record.source === 'backend')) statEvent(record)
 
   // 报警自动放大该画面（无人值守时很有用）
   if (options.alert && options.alert.autoZoom && !masked.value) {
@@ -2241,18 +2404,11 @@ function onAlarm(payload) {
       payload.backendPushResults || null
     )
     /*
-     * 统计打点（item 111）：后端模式下 recordPush 跑在服务端，前端收不到，
-     * 于是"三端推送成功率"会一直是空。这里改从后端事件自带的 pushResults
-     * 还原一次统计 —— 后端模式统计口径与前端模式一致。
+     * 这里以前还会"从后端事件自带的 pushResults 还原一次推送统计"。
+     * 现在不需要了：后端模式下**统计整份以后端为准**（前端定时拉 /api/stats），
+     * 而推送那几项后端本来就在记（notify → useAlertPush → usePushStats.recordPush）。
+     * 前端再还原一遍只是往一份马上会被覆盖的本机副本里写，徒增两份口径。
      */
-    const pr = record.pushResults
-    if (pr && typeof pr === 'object') {
-      Object.keys(pr).forEach((name) => {
-        const v = pr[name]
-        const id = name === '钉钉' ? 'ding' : name === '企微' ? 'wecom' : name === 'TG' ? 'tg' : ''
-        if (id) statPush(id, v === 'ok', record.time)
-      })
-    }
     return
   }
 
@@ -3636,6 +3792,19 @@ onMounted(() => {
     events.value = list
     // 用已载入的记录补齐当日计数（重启后「今日报警」不会从 0 开始）
     seedTodayCount()
+    /*
+     * 历史就位（historyReady）之后才能回填 —— 顺序反了会被这次整体赋值冲掉。
+     *
+     * 这一步是「不同机器打开看到同一份事件内容」的落点：后端模式下事件是
+     * 增量轮询的，本机库里的历史只到"上次关页面"为止，中间那段是空的。
+     * 从后端取回最近一批补上，三台机器看到的才对得齐。
+     */
+    historyReady = true
+    if (backendActive.value) {
+      backfillHistoryFromBackend().then((n) => {
+        if (n) showToast(`已从后端载入 ${n} 条历史事件`)
+      })
+    }
     // 记录就位后再挂手表桥接：首屏推过去的就是完整列表，而不是空数组
     initWatchBridge()
   })

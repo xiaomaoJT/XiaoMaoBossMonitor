@@ -2777,10 +2777,10 @@
                 <span class="switch" :class="{ on: tg.remote.allowReboot }" @click="tg.remote.allowReboot = !tg.remote.allowReboot"></span>
               </div>
 
-              <!-- ---------- 静默查岗（/check duty）调参 ---------- -->
+              <!-- ---------- 静默查岗（/duty）调参 ---------- -->
               <div class="sub-label mt">静默查岗</div>
               <p class="hint tight">
-                静默期间私聊机器人发 <code>/check duty</code>，会把「静默开始到现在」积压的事件汇总推过来，
+                静默期间私聊机器人发 <code>/duty</code>，会把「静默开始到现在」积压的事件汇总推过来，
                 并把区间内<b>所有截图</b>逐张发过去；再发一次只看上次查岗之后的新事件。
               </p>
               <div class="opt">
@@ -6109,9 +6109,13 @@ async function testDirectPush() {
  * ⚠️ 这是**有意为之的第二份**：前端不能直接 import 那个模块（它顶层用了
  * node:fs / node:path，进不了浏览器打包）。所以**新增指令时两处都要改**。
  * 只改后端 → 指令能用但设置页看不到；只改这里 → 列表里有但发出去是「未知指令」。
- * `/tmp/collect-probe/ui-probe.mjs` 里有一条断言专门盯着这份列表。
+ * `/tmp/hits-img-probe/parity-commands.mjs` 里有一组断言专门盯着这份列表：
+ * 逐条比对 cmd 与 **usage**（用户照着设置页抄的用法串必须与后端逐字一致），
+ * 并配「后端每条都在前端」「前端没有后端不认的」两条方向相反的检查。
  */
 const TG_COMMANDS = [
+  { cmd: 'help', usage: '/help', desc: '查看全部可用指令与用法说明（在输入框敲 / 也能唤起指令菜单）' },
+  { cmd: 'start', usage: '/start', desc: '系统与机器人介绍：这套监控系统能做什么、机器人能帮你远程做什么' },
   {
     cmd: 'silent',
     usage: '/silent <小时数> [渠道]',
@@ -6126,14 +6130,24 @@ const TG_COMMANDS = [
     desc: '完整运行状态：运行时长（含中断）/ 通道出帧 / 检测能力 / 推送渠道 / 静默 / 远程控制 / 记录与登录'
   },
   {
+    cmd: 'compile',
+    usage: '/compile',
+    desc: '统计报表：今日/昨日/近 7 天的报警类型分布、小时高峰、人脸命中榜、三端推送成功率、断线恢复、人脸库与通道状态'
+  },
+  {
     cmd: 'collect',
     usage: '/collect [T|Y] [起-止] [img]',
     desc: '时段内事件汇总（整天完整、不再按 1000 条截断）：T=今日、Y=昨日（省略为今日），起止按小时如 9-18（省略为全天）。人脸命中逐个列出每次记录；汇总过长分多条发送；加 img 连截图一起推'
   },
   {
     cmd: 'hits',
-    usage: '/hits [T|Y]',
-    desc: '人脸库概览：待录入数量 + 已录入名单 + 今日/昨日的命中记录（时间 / 通道 / 是谁）。T=今日、Y=昨日，省略为今日'
+    usage: '/hits [T|Y] [img]',
+    desc: '人脸库概览：待录入数量 + 已录入名单 + 今日/昨日的命中记录（时间 / 通道 / 是谁）。T=今日、Y=昨日，省略为今日；加 img 连命中截图一起推'
+  },
+  {
+    cmd: 'search',
+    usage: '/search [T|Y] HH:MM [img]',
+    desc: '检索某一天的某一分钟内的所有事件（加 img 连截图一起推）。仅支持 T(今日)/Y(昨日)，如 /search T 14:11 img'
   },
   {
     cmd: 'csilent',
@@ -6141,8 +6155,12 @@ const TG_COMMANDS = [
     desc: '通道静默：只让某一路监控在指定时段不推送。如 /csilent 门口 2（2 小时）、/csilent 门口 08:00（到 08:00）、/csilent off 门口（恢复）'
   },
   { cmd: 'cams', usage: '/cams', desc: '通道状态一览：每路是否在线出帧、是否正处在通道静默（含到几点、静默哪些渠道）' },
-  { cmd: 'check', usage: '/check duty', desc: '静默查岗：把静默期间积压的事件汇总推过来（含全部截图）' },
-  { cmd: 'duty', usage: '/duty', desc: '静默查岗（/check duty 的短别名，两者等效）' },
+  /*
+   * 这里**不再**有 `check` 条目：`/check duty` 已合并进 `/duty`（服务端只认
+   * `/duty` 与免空格的 `/checkduty`），旧列表还留着它 → 用户照着设置页发
+   * `/check duty` 会收到「未知指令」。列表跟着**真正能用的指令**走。
+   */
+  { cmd: 'duty', usage: '/duty', desc: '静默查岗：把静默期间积压的事件汇总推过来（含全部截图）；旧写法 /checkduty 仍可用' },
   { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）' },
   { cmd: 'hardreboot', usage: '/hardreboot', desc: '重启整台电脑（最后手段，需两次开启 + 二次确认）' }
 ]

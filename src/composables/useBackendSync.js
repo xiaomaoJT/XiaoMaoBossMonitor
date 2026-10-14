@@ -32,6 +32,8 @@
  */
 import { ref, computed } from 'vue'
 import { netErrorText, timeoutReason } from './useNet.js'
+// ⚠️ 相对 import 必须带 .js：后端用 Node ESM 直接加载前端模块，不补扩展名
+import { clientQuery } from './useClientId.js'
 
 export const syncState = ref('idle') // idle | syncing | ok | error
 export const syncError = ref('')
@@ -279,7 +281,8 @@ export async function refreshRemoteStatus(url) {
   const base = backendBase(url)
   if (!base) return null
   try {
-    const data = await fetchJson(`${base}/api/status`, 6000)
+    // 带上 cid：这条请求同时也是"这台设备还在看"的心跳（后端的设备列表靠它）
+    const data = await fetchJson(`${base}/api/status${clientQuery(true)}`, 6000)
     remoteStatus.value = data
     // ⚠️ 这是「后端当前版本」，不是「本机版本」（后者是 localRev，见文件头说明）
     if (data && data.configRev !== undefined) syncRev.value = Number(data.configRev) || syncRev.value

@@ -60,6 +60,13 @@
  *     （反过来，新版本写的存档被**旧版本**读到也没事：旧代码压根不看这些字段。）
  */
 import { reactive } from 'vue'
+/*
+ * 「什么算人脸命中」的唯一判定在 defaults.js（推送收窄 / TG 关键事件直推 /
+ * 后端 /hits / 统计四处共用）。这里 import 它，是为了让下面 statEvent 成为
+ * 「一条事件该记哪些统计」的**唯一**入口 —— 前端 onAlarm 与后端 handleEvent
+ * 都调它，两边不会各写一套"哪些算报警、哪些算命中"。
+ */
+import { isFaceHit } from '../config/defaults.js'
 
 const KEY = 'monitor-wall-daily-stats-v1'
 /** 保留天数（含今天） */
@@ -456,6 +463,38 @@ export function statChannelState(state, ts = Date.now()) {
   }
 }
 
+/**
+ * 一条事件该记哪些统计 —— **唯一判定**。
+ * ----------------------------------------------------------------------------
+ * 前端 App.vue 的 onAlarm（本机检测 / 后端轮询事件都走它）与后端
+ * headless-monitor.mjs 的 handleEvent（后端检测出来的事件）都调这里。
+ *
+ * 为什么必须收拢成一份：
+ *   "掉线算不算报警"、"识别到人脸算不算命中"这类判定一旦在前端和后端各写
+ *   一遍，两边的统计迟早对不上（面板说 5 次、远端说 4 次）。现在——包括
+ *   「后端权威统计」上线后——前端的按天统计是**从后端读回来**的，
+ *   所以真正写这份统计的只有后端一处，判定也只留这一处。
+ *
+ * @param {object} rec 事件记录（前端 record / 后端 record 同构：至少有
+ *                      type / time / faceName / name / id / faceScore）
+ */
+export function statEvent(rec) {
+  if (!rec) return
+  const t = Number(rec.time) || Date.now()
+  // 掉线 / 恢复单列一类，不计入"报警"（否则报警数会被断线刷高）
+  if (rec.type === 'offline' || rec.type === 'online') {
+    statChannelState(rec.type, t)
+    return
+  }
+  statAlarm(rec.type, t)
+  // 识别人次（含陌生人）：人脸事件、或任何带人名的记录都算
+  if (rec.type === 'face' || rec.faceName) statPersonHit(rec.faceName, t)
+  // 命中（只算库内的人）：判据用 defaults.isFaceHit，与推送 / 远端 /hits 同一份
+  if (isFaceHit(rec)) {
+    statFaceHit(rec.faceName, { camName: rec.name, camId: rec.id, score: rec.faceScore }, t)
+  }
+}
+
 /** 清零统计 */
 export function resetDailyStats() {
   dailyStats.days = {}
@@ -463,6 +502,73 @@ export function resetDailyStats() {
     if (typeof localStorage !== 'undefined') localStorage.removeItem(KEY)
   } catch (e) {
     /* 忽略 */
+  }
+  /*
+   * 后端模式下这份统计的**权威在后端**（见文件尾「后端权威统计」一段）：
+   * 只清本机的话，下一次同步又会把后端那份原样拉回来，用户看到"清了又回来"。
+   * 所以清零必须一起下发（fire-and-forget，失败不阻塞本地清零）。
+   */
+  if (remoteUrl) {
+    try {
+      fetch(`${remoteUrl}/api/stats/reset`, { method: 'POST' }).catch(() => {})
+    } catch (e) {
+      /* 忽略 */
+    }
+  }
+}
+
+/* ==================== 后端权威统计（多端一致） ==================== */
+/*
+ * 为什么要这一段：
+ *   按天统计以前只活在**开着的那个浏览器**的 localStorage 里 —— 页面关掉就
+ *   不记了，换台机器打开就是从零开始。而报警/识别/命中本来就是后端常驻进程
+ *   产生的（它 7×24 在跑），统计却没跟着走。
+ *
+ * 现在的分工（后端模式）：
+ *   · **后端累计并落盘**（复用本模块的 statAlarm/statPersonHit/statFaceHit/
+ *     statChannelState/statPush，存 server/data 下），任何机器都拿得到；
+ *   · **前端只读**：定时把 GET /api/stats 拉回来替换本机 days，页面展示
+ *     （aggregate / 热力图 / 命中榜）全部照旧吃 dailyStats.days，不用改；
+ *   · **清零双向**：resetDailyStats 同时下发 POST /api/stats/reset。
+ *
+ * 前端独立模式（没开后端）时 remoteUrl 为空，本机自己累计 —— 与旧行为一致。
+ */
+let remoteUrl = ''
+
+/** 设置/清除「权威统计所在的后端地址」；传空字符串 = 回到本机自统计 */
+export function setStatsRemote(url) {
+  remoteUrl = String(url || '').replace(/\/+$/, '')
+}
+
+/** 当前权威统计地址（空 = 本机自统计）；测试与诊断用 */
+export function statsRemote() {
+  return remoteUrl
+}
+
+/** 用后端那一份整体替换本机 days（会走 prune 归一化，旧结构自动补齐） */
+export function replaceStatsDays(days) {
+  dailyStats.days = prune(days && typeof days === 'object' ? days : {})
+}
+
+/**
+ * 从后端拉一次权威统计并替换本机。
+ * @returns {Promise<boolean>} 是否成功拉到并应用
+ */
+export async function syncStatsFromRemote(timeoutMs = 8000) {
+  if (!remoteUrl) return false
+  const ctrl = new AbortController()
+  const to = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(`${remoteUrl}/api/stats`, { signal: ctrl.signal })
+    if (!res.ok) return false
+    const data = await res.json()
+    if (!data || !data.days || typeof data.days !== 'object') return false
+    replaceStatsDays(data.days)
+    return true
+  } catch (e) {
+    return false
+  } finally {
+    clearTimeout(to)
   }
 }
 

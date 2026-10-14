@@ -12,6 +12,16 @@
  */
 import { ref, computed } from 'vue'
 import { netErrorText, timeoutReason } from './useNet.js'
+// ⚠️ 相对 import 必须带 .js：后端用 Node ESM 直接加载前端模块，不补扩展名
+import { syncStatsFromRemote } from './useDailyStats.js'
+import { clientQuery } from './useClientId.js'
+
+/**
+ * 权威统计多久刷一次（按轮询次数计）。
+ * 统计是低频数据，没必要每轮（默认 4s）都拉；5 轮 ≈ 20s 足够"看一眼就新"。
+ * 刚开后端开关那一次由 App.vue 主动同步，这里只负责后续的定时刷新。
+ */
+const STATS_SYNC_EVERY = 5
 
 export const backendState = ref('idle') // idle | polling | error
 export const backendError = ref('')
@@ -30,6 +40,8 @@ let lastTime = 0
 let errStreak = 0
 /** 防止后端重启导致 key 撞车：进程内递增序号 */
 let seq = 0
+/** 轮询轮次计数，用来给"权威统计"做低频刷新（见 STATS_SYNC_EVERY） */
+let pollCount = 0
 /** 轮询实例标识：stop/重启后让旧 loop 自然退出，避免两套定时器并存 */
 let pollRunId = 0
 
@@ -38,14 +50,17 @@ function normalizeUrl(url) {
 }
 
 /**
- * 把后端事件记录转成 onAlarm 的 payload。
+ * 后端事件记录 → onAlarm 的 payload。
  * thumb / faceThumb 已是绝对 URL（服务端拼好的），前端 <img> 直接能显示；
  * shot 留空（原图就在 thumb 指向的文件里，详情页复用 thumb）。
  *
  * 后端已经做完的附加分析（人脸是谁、什么动作、是否补过图）一并带过来，
  * 事件面板和详情页因此能显示得和本机检测一样完整。
+ *
+ * 导出给「历史回填」复用（App.vue 的 backfillHistoryFromBackend）——
+ * 回填与实时轮询走**同一份**转换，两端形状不会漂。
  */
-function toPayload(ev) {
+export function backendEventToPayload(ev) {
   return {
     id: ev.camId,
     name: ev.camName || ev.camId,
@@ -103,6 +118,61 @@ export async function markReadOnBackend(options, keys) {
   }
 }
 
+/**
+ * 合并「本机已有事件」与「刚回填回来的事件」：按 key 去重 → 按时间倒序 → 截断到上限。
+ *
+ * 纯函数（不改入参），放这里是为了能被探针直接验 —— App.vue 只负责把它算出来的
+ * 结果落库并赋值给 `events.value`，不再自己写一遍排序/去重/截断。
+ *
+ * ⚠️ 重复时**以后端那份为准**（fresh 在前）：回填带回来的 `read` / `push` 是
+ * 共享状态，而本机那份可能是"这条还没标已读"的旧副本。内存列表里只放轻量记录，
+ * 用哪一份对截图没影响（IndexedDB 那边同 key 不重复写入，本机的原图不会被冲掉）。
+ *
+ * @param {object[]} existing 本机现有记录
+ * @param {object[]} fresh    回填回来的记录
+ * @param {number}   max      保留上限（与 maxEvents 同源）
+ */
+export function mergeEventLists(existing, fresh, max) {
+  const limit = Math.max(1, Number(max) || 200)
+  const seen = new Set()
+  const all = []
+  // fresh 在前：同一个 key 先入为主，于是"重复时以后端为准"是自然结果
+  for (const r of [...(fresh || []), ...(existing || [])]) {
+    if (!r || !r.key || seen.has(r.key)) continue
+    seen.add(r.key)
+    all.push(r)
+  }
+  all.sort((a, b) => (b.time || 0) - (a.time || 0))
+  return all.slice(0, limit)
+}
+
+/**
+ * 从后端一次性取回最近 N 条事件（不带 since）——「历史回填」用。
+ *
+ * 为什么需要它：轮询是**增量**的，首拉只覆盖最近 1 分钟（startBackendPolling 里
+ * `lastTime = Date.now() - 60000`）。于是每台机器打开页面时，事件列表里都只有
+ * 「自己打开之后」发生的那部分 —— A 机看到的和 B 机看到的对不上，
+ * 明明后端库里躺着同一份完整历史。
+ *
+ * 这里把最近一批整体取回来，交给 App.vue 合并进本机库 + 内存列表，
+ * 三台机器打开看到的就是**同一份内容**（已读状态也一样：它是从后端读的，
+ * 任何一台标已读都会 POST /api/read 回后端）。
+ *
+ * 失败不抛：回填是"锦上添花"，失败了顶多是列表短一些，实时轮询照常工作。
+ * @returns {Promise<{ok:boolean, events:object[], error?:string}>}
+ */
+export async function fetchBackendHistory(url, limit = 200) {
+  const base = normalizeUrl(url)
+  if (!base) return { ok: false, events: [] }
+  const n = Math.max(1, Math.min(2000, Number(limit) || 200))
+  try {
+    const data = await fetchJson(`${base}/api/events?limit=${n}${clientQuery()}`, 20000)
+    return { ok: true, events: Array.isArray(data.events) ? data.events : [] }
+  } catch (e) {
+    return { ok: false, events: [], error: netErrorText(e, '历史事件回填') }
+  }
+}
+
 async function fetchJson(url, timeoutMs = 8000) {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(timeoutReason('后端接口', timeoutMs)), timeoutMs)
@@ -126,7 +196,7 @@ export async function refreshBackendStatus(options) {
     return null
   }
   try {
-    const st = await fetchJson(`${normalizeUrl(options.backend.url)}/api/status`, 5000)
+    const st = await fetchJson(`${normalizeUrl(options.backend.url)}/api/status${clientQuery(true)}`, 5000)
     backendStatus.value = st
     backendError.value = ''
     return st
@@ -169,16 +239,23 @@ export function startBackendPolling(options, onEvent) {
     }
     try {
       const since = lastTime
-      const data = await fetchJson(`${base}/api/events?since=${since}&limit=100`)
+      // cid：顺带让后端把"这台设备还在看"记一笔（设备列表的唯一心跳来源）
+      const data = await fetchJson(`${base}/api/events?since=${since}&limit=100${clientQuery()}`)
       lastTime = Math.max(lastTime, Number(data.now) || Date.now())
       errStreak = 0
       backendError.value = ''
       backendState.value = 'polling'
       backendLastSyncAt.value = Date.now()
+      /*
+       * 顺带低频刷一次权威统计（GET /api/stats）：后端模式下统计只在服务端累计，
+       * 前端展示的就是这一份。失败不打扰事件轮询 —— 下次再刷即可。
+       */
+      pollCount += 1
+      if (pollCount % STATS_SYNC_EVERY === 0) syncStatsFromRemote().catch(() => {})
       const events = Array.isArray(data.events) ? data.events : []
       for (const ev of events) {
         seq += 1
-        const payload = toPayload(ev)
+        const payload = backendEventToPayload(ev)
         payload._backendSeq = seq
         try {
           onEvent(payload)
