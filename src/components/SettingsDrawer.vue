@@ -1693,21 +1693,12 @@
                   <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
                   <!-- 录入时手动归入：选已知的人（同名归到他那一堆）或自定义名字；留空=自动编号，保持旧行为 -->
                   <div class="face-assign" v-if="faceNameOptions.length">
-                    <select
-                      class="field mini"
+                    <FaceAssignSelect
                       v-model="pendingAssign[pf.id]"
-                      :disabled="enrollingPending[pf.id]"
-                      title="录入时归入：选一个已知的人，或自定义名字"
-                    >
-                      <option value="">新建（自动编号）</option>
-                      <option v-for="nm in faceNameOptions" :key="nm" :value="nm">归入：{{ nm }}</option>
-                      <option value="__custom__">归入：自定义…</option>
-                    </select>
-                    <input
-                      v-if="pendingAssign[pf.id] === '__custom__'"
-                      class="field mini"
-                      v-model.trim="pendingCustom[pf.id]"
-                      placeholder="自定义名字"
+                      :options="faceNameOptions"
+                      placeholder="新建（自动编号）"
+                      :custom="true"
+                      custom-placeholder="自定义名字"
                       :disabled="enrollingPending[pf.id]"
                     />
                   </div>
@@ -1831,6 +1822,19 @@
                     />
                   </div>
                   <span class="face-meta" v-else :title="g.name">{{ g.name }}</span>
+                  <!-- 手动归类（卡级）：把"这个人"整体归入另一个已知的人。
+                   * 修的是自动归类把同一个人拆成两张卡的情况 —— 选另一个人的名字，
+                   * 这一整张卡的样本会一起改过去、重新并到那个人那一组。
+                   * 只在"库里确实有其它人可并"时才出现（没别人可并就没什么可归的）。 -->
+                  <div class="face-assign" v-if="otherNames(g).length">
+                    <FaceAssignSelect
+                      v-model="groupAssign[g.key]"
+                      :options="otherNames(g)"
+                      placeholder="归入到…"
+                      :disabled="assigningGroup[g.key]"
+                      @change="onGroupAssign(g)"
+                    />
+                  </div>
                   <div class="face-acts">
                     <!-- 保存中：明确的「在干活」反馈 —— 没有它就是用户嘴里的"点了没反应" -->
                     <button class="mini-btn face-busy" v-if="renamingFace[g.key]" disabled>保存中</button>
@@ -1866,31 +1870,16 @@
                     <span class="fgp-name" :title="it.name">{{ it.name }}</span>
                     <!-- 手动归入：把这一条样本单独改名到某个人（修自动归类误并的问题） -->
                     <div class="fgp-assign">
-                      <select
-                        class="field mini"
+                      <FaceAssignSelect
                         v-model="sampleAssign[it.id]"
+                        :options="faceNameOptions"
+                        placeholder="归入…"
+                        :custom="true"
+                        custom-placeholder="自定义名字"
+                        custom-confirm-text="确定"
                         :disabled="assigningSample[it.id]"
                         @change="onSampleAssign(it)"
-                        title="把这一条样本手动归入某个人"
-                      >
-                        <option value="">归入…</option>
-                        <option v-for="nm in faceNameOptions" :key="nm" :value="nm">归入：{{ nm }}</option>
-                        <option value="__custom__">归入：自定义…</option>
-                      </select>
-                      <input
-                        v-if="sampleAssign[it.id] === '__custom__'"
-                        class="field mini"
-                        v-model.trim="sampleCustom[it.id]"
-                        placeholder="自定义名字"
-                        :disabled="assigningSample[it.id]"
-                        @keyup.enter="commitSampleAssign(it)"
                       />
-                      <button
-                        v-if="sampleAssign[it.id] === '__custom__'"
-                        class="mini-btn"
-                        :disabled="assigningSample[it.id]"
-                        @click="commitSampleAssign(it)"
-                      >{{ assigningSample[it.id] ? '归入中' : '确定' }}</button>
                     </div>
                     <button class="mini-btn danger" :disabled="deletingSample[it.id]" @click="doDeleteSample(it)">
                       {{ deletingSample[it.id] ? '删除中' : '删除' }}
@@ -3812,6 +3801,7 @@ import {
 import { syncState, syncStateText, localRev, syncRev, pullState, pullError, pushOverwrote, pushFacesSkipped } from '../composables/useBackendSync'
 import { refreshWatchStatus, watchState, watchStatusText } from '../composables/useWatchBridge'
 import { confirmDialog, alertDialog } from '../composables/confirm.js'
+import FaceAssignSelect from './FaceAssignSelect.vue'
 import {
   AI_MODELS,
   aiBackend,
@@ -5324,6 +5314,50 @@ async function commitSampleAssign(it) {
     })
   } finally {
     delete assigningSample[it.id]
+  }
+}
+
+/* ---------- 手动归类（卡级）：把"这个人"整体归入另一个已知的人 ----------
+ * 用户诉求：人脸库里已建档的「人」也要能手动归类，而不仅是单条样本。
+ * 典型场景：自动归类把同一个人拆成了两张卡（不同角度 / 不同摄像头各一张），
+ * 用户想手动声明"这两张卡是同一个人" —— 在源卡上选目标卡的名字，
+ * 这一整张卡的样本会一起改名过去、重新并到目标那一组。
+ * 做法：每张卡片挂一个「归入到…」下拉（选项 = 库里其它人的名字，排除自己），
+ * 选好后调 renameFaces 把整组样本改名（保留各角度向量，只统一名字 → 重分组）。
+ * 语义与单条样本归入一致：只是批量改名、不弹确认框（可逆，改名回来即可）。 */
+const groupAssign = reactive({}) // g.key -> '' | 目标名字
+const assigningGroup = reactive({}) // g.key -> bool（归入进行中）
+/** 库里"其它人"的名字列表：下拉选项来源，排除当前这张卡自己的名字
+ * （避免把自己并入自己这种无意义操作；同名的两张卡在按名分组下本就不会并存）。 */
+function otherNames(g) {
+  return (faceNameOptions.value || []).filter((n) => n !== (g && g.name))
+}
+/** 下拉选了已知名字就直接归入（自定义场景不存在于卡级：新建人用「改名」即可） */
+function onGroupAssign(g) {
+  const v = groupAssign[g.key]
+  if (v) doGroupAssign(g, v)
+}
+async function doGroupAssign(g, name) {
+  if (!g || !name || assigningGroup[g.key]) return
+  assigningGroup[g.key] = true
+  try {
+    const r = await renameFaces(g.items.map((i) => i.id), name)
+    if (!r.ok) {
+      alertDialog({ title: '归入失败', message: r.reason || '归入失败', variant: 'danger' })
+      return
+    }
+    // 整组样本改过去后：源卡消失、目标卡多了这些样本；清掉本卡归入状态，
+    // 源卡若正展开也收起（watch 也会兜底，这里显式更稳）。
+    groupAssign[g.key] = ''
+    if (selectedGroupKey.value === g.key) selectedGroupKey.value = ''
+  } catch (e) {
+    alertDialog({
+      title: '归入失败',
+      message: '归入时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      variant: 'danger'
+    })
+  } finally {
+    delete assigningGroup[g.key]
   }
 }
 
