@@ -32,8 +32,32 @@ export function isAvailable() {
 }
 
 /**
+ * 打开数据库超时（毫秒）。
+ * 见下面 openDB 的说明：这是"绝不永久 pending"的兜底，不是性能调优参数。
+ */
+const OPEN_TIMEOUT_MS = 10000
+
+/**
  * 打开数据库。
  * v2 新增人脸库 store；升级时只补建缺的 store，不动已有事件数据。
+ *
+ * ⚠️ 这个 Promise 会被**缓存**在 dbPromise 里，所以它**绝不能永远不落地**。
+ *
+ * 起因是一个真实的"改了名但保存不了、刷新前怎么点都没反应"：只要这个 Promise
+ * 卡在 pending，后面**每一次**人脸 / 事件读写都排在它后面（transaction 拿不到 db），
+ * 界面上就是「点改名没反应 / 一直转 / 经常卡住」，而且不会有任何报错——
+ * 因为没有任何东西被拒绝。
+ *
+ * 三条真实的"永不落地"路径，以前一条都没处理：
+ *   1. 另一个标签页还持有**旧版本**连接 → 升级被阻塞：onupgradeneeded 不触发、
+ *      onsuccess 也不来，连 onerror 都没有，**只有 onblocked 会响**（以前没监听）。
+ *      这是同一个应用开两个标签页时最常见的卡死原因。
+ *   2. 隐私模式 / 存储被禁用时某些实现既不 success 也不 error。
+ *   3. 升级过程中被别的连接"堵着"，用户又不去关那个标签页 —— 无限期等。
+ *
+ * 所以：onblocked 立刻报错；再加一根超时兜底。两条路都要**清掉缓存**——
+ * 不清的话，一次卡死就把这个页面永久钉死，只能刷新；清了以后下一次调用还能重试
+ * （重新 open 一次是完全安全的，大不了多一个连接）。
  */
 export function openDB() {
   if (dbPromise) return dbPromise
@@ -42,6 +66,18 @@ export function openDB() {
       reject(new Error('当前环境不支持 IndexedDB'))
       return
     }
+    let settled = false
+    let timer = null
+    const fail = (msg) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      // 关键：把缓存清掉，允许下一次重试（否则一次失败 = 本页永久失效）
+      dbPromise = null
+      reject(msg instanceof Error ? msg : new Error(msg))
+    }
+    timer = setTimeout(() => fail(`打开本地数据库超时（${OPEN_TIMEOUT_MS / 1000}s），请关闭本应用的其它标签页后重试`), OPEN_TIMEOUT_MS)
+
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = () => {
       const db = req.result
@@ -55,8 +91,21 @@ export function openDB() {
         fs.createIndex('createdAt', 'createdAt')
       }
     }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
+    // 被别的标签页阻塞：立刻给出**能照做**的原因，而不是干等
+    req.onblocked = () => fail(new Error('本地数据库正被本应用的其它标签页占用，请关掉其它标签页后重试'))
+    req.onsuccess = () => {
+      if (settled) {
+        // 已经超时报错了，这个连接没人要 —— 关掉，别占着
+        try {
+          req.result.close()
+        } catch (e) {}
+        return
+      }
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(req.result)
+    }
+    req.onerror = () => fail('打开本地数据库失败：' + ((req.error && req.error.message) || req.error || '未知原因'))
   })
   return dbPromise
 }

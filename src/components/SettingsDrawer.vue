@@ -327,6 +327,80 @@
                   临时静默可在手机上发 <code>/csilent {{ cam.name || cam.id }} 2</code>。
                 </p>
               </div>
+
+              <!--
+                日常事件静默：非关键事件不再逐条推，改为按所选间隔合并成一条汇总。
+                ⚠️ 只在**非静默时段**工作 —— 只要有静默窗口在生效就让位（否则同一条事件
+                会同时进「静默汇总」和「日常汇总」两份）。已攒下的那批不丢，恢复后补发。
+              -->
+              <div class="cam-silent cam-digest" :class="{ on: camDigestInfo(cam).active }">
+                <div class="cs-row">
+                  <button
+                    class="tag mini"
+                    :class="{ on: camDigestCfg(cam).enabled }"
+                    title="把这一路的日常事件攒起来，按间隔合并推送"
+                    @click="toggleCamDigest(cam)"
+                  >
+                    <svg viewBox="0 0 24 24" width="12" height="12">
+                      <path
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.7"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M4 6.5h16M4 12h11M4 17.5h14"
+                      />
+                    </svg>
+                    日常事件静默
+                  </button>
+                  <span class="live-tag" v-if="camDigestInfo(cam).active">
+                    汇总中 · 每 {{ digestIntervalLabel(camDigestCfg(cam).intervalMinutes) }}一条
+                  </span>
+                  <span class="cs-state" v-else-if="camDigestInfo(cam).pausedBySilent">
+                    已开启（静默时段中 · 暂不汇总）
+                  </span>
+                  <span class="cs-state" v-else-if="camDigestCfg(cam).enabled">已开启（未选渠道，暂不生效）</span>
+                  <span class="cs-state off" v-else>未开启</span>
+                  <span class="cs-flex"></span>
+                  <span class="cs-label">汇总渠道</span>
+                  <button
+                    v-for="ch in CAM_CHANNELS"
+                    :key="'cdg-' + ch.key"
+                    class="tag mini ch"
+                    :class="{ on: camDigestCfg(cam).channels.includes(ch.key) }"
+                    :title="`这一路的日常汇总推送到${ch.label}`"
+                    @click="toggleCamDigestChannel(cam, ch.key)"
+                  >
+                    {{ ch.label }}
+                  </button>
+                </div>
+
+                <div class="cs-row" v-if="camDigestCfg(cam).enabled">
+                  <span class="cs-label">汇总间隔</span>
+                  <select
+                    class="field mini"
+                    :value="camDigestCfg(cam).intervalMinutes"
+                    @change="setCamDigestInterval(cam, $event.target.value)"
+                  >
+                    <option v-for="m in DIGEST_INTERVAL_CHOICES" :key="'cdi-' + m" :value="m">
+                      {{ digestIntervalLabel(m) }}
+                    </option>
+                  </select>
+                  <span class="cs-state">
+                    每 {{ digestIntervalLabel(camDigestCfg(cam).intervalMinutes) }}最多一条汇总；期间没有事件就不打扰
+                  </span>
+                </div>
+
+                <p class="hint tight">
+                  只影响<b>这一路</b>的<b>日常事件</b>（移动 / 人形 / 计数等）：不再逐条推，
+                  改为把这段时间的事件合并成<b>一条汇总</b>推到所选渠道。
+                  <b>关键事件不受影响</b>（人脸命中、静默提醒、满库提醒该推就推）。
+                  <br />
+                  与「通道静默」「免打扰」是<b>让位</b>关系：只要有静默窗口在生效，本功能就暂停吸收
+                  —— 那些事件归静默汇总，不会重复；窗口结束后自动恢复，已攒下的那批立刻补发。
+                  间隔可选 {{ DIGEST_INTERVAL_MIN }} ~ {{ DIGEST_INTERVAL_MAX }} 分钟。
+                </p>
+              </div>
             </div>
           </div>
           <div class="empty-tip" v-else>
@@ -1676,7 +1750,7 @@
                     </button>
                   </span>
                 </strong>
-                <em>报警推送里显示的就是这里的名字</em>
+                <em>报警推送里显示的就是这里的名字；同一个人的多个角度会归到一张卡片，共用一个名字</em>
               </span>
               <input
                 ref="enrollFileEl"
@@ -1689,25 +1763,104 @@
               <p class="enroll-status" v-if="enrollState !== 'idle'" :class="enrollState === 'error' ? 'err' : (enrollState === 'done' ? 'ok' : 'busy')">
                 {{ enrollMsg }}
               </p>
+
+              <!-- 同一人归类：只在"确实有人占了多条"时才出现（没重复就没什么可归的） -->
+              <div class="face-group-toggle" v-if="faceLibOpen && groupedExtra > 0">
+                <span class="switch" :class="{ on: groupBySim }" @click="toggleGroupBySim"></span>
+                <span>
+                  <strong>同一人归类显示</strong>
+                  <em>
+                    已把同一人的多角度样本并到一张卡片：{{ faceGroups.length }} 人 · {{ faceLib.length }} 条样本。
+                    判据是「相同名字」或「相似度 ≥ {{ Number(groupThreshold).toFixed(2) }}」（与上面的识别阈值同一个数）。
+                    觉得并错了就关掉，立刻恢复一张一条。
+                  </em>
+                </span>
+              </div>
+
               <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
-                <div class="face-card" v-for="f in pagedFaceLib" :key="f.id">
-                  <img v-if="f.thumb" :src="f.thumb" alt="人脸" />
-                  <div class="face-rename" v-if="faceRenameId === f.id">
+                <div
+                  class="face-card"
+                  :class="{ grouped: g.count > 1, selected: selectedGroupKey === g.key }"
+                  v-for="g in pagedFaceGroups"
+                  :key="g.key"
+                >
+                  <!-- 缩略图 = 这个人最早录入的那张（代表样本）；多条时可点开看全部角度 -->
+                  <div
+                    class="face-thumb"
+                    :class="{ clickable: g.count > 1 }"
+                    :title="g.count > 1 ? '点开看这个人的全部角度样本' : ''"
+                    @click="toggleGroupPanel(g)"
+                  >
+                    <img v-if="g.thumb" :src="g.thumb" alt="人脸" />
+                    <span class="face-count" v-if="g.count > 1">{{ g.count }}</span>
+                    <span
+                      class="face-warn"
+                      v-if="g.count > 1 && g.sameName === false"
+                      title="这一组里有多个名字，推送时会各按各的名字 —— 改名可统一"
+                      >!</span
+                    >
+                  </div>
+                  <div class="face-rename" v-if="faceRenameKey === g.key">
                     <input
                       class="field mini"
                       v-model.trim="faceRenameText"
-                      @keyup.enter="commitRenameFace"
-                      @blur="commitRenameFace"
+                      :disabled="renamingFace[g.key]"
+                      :placeholder="g.name"
+                      @keyup.enter="commitRenameGroup"
+                      @blur="commitRenameGroup"
                     />
                   </div>
-                  <span class="face-meta" v-else>{{ f.name }}</span>
+                  <span class="face-meta" v-else :title="g.name">{{ g.name }}</span>
                   <div class="face-acts">
-                    <button class="mini-btn ghost" v-if="!deletingFace[f.id]" @click="startRenameFace(f)">改名</button>
-                    <button class="mini-btn danger" :disabled="deletingFace[f.id]" @click="doDeleteFace(f)">{{ deletingFace[f.id] ? '删除中' : '删除' }}</button>
+                    <!-- 保存中：明确的「在干活」反馈 —— 没有它就是用户嘴里的"点了没反应" -->
+                    <button class="mini-btn face-busy" v-if="renamingFace[g.key]" disabled>保存中</button>
+                    <template v-else>
+                      <button class="mini-btn ghost" v-if="!deletingFace[g.key]" @click="startRenameGroup(g)">改名</button>
+                      <button class="mini-btn danger" :disabled="deletingFace[g.key]" @click="doDeleteGroup(g)">{{ deletingFace[g.key] ? '删除中' : '删除' }}</button>
+                    </template>
                   </div>
                 </div>
                 <p class="hint tight" v-if="!faceLib.length">人脸库还是空的：先让摄像头拍到人，出现的脸会进「待录入」。</p>
               </div>
+
+              <!-- 点开一张「一个人」的卡片：看他的全部角度样本，可合并、可删掉拍歪的那张 -->
+              <div class="face-group-panel" v-if="selectedGroup">
+                <div class="fgp-head">
+                  <strong>{{ selectedGroup.name }}</strong>
+                  <span class="fgp-tag">{{ selectedGroup.count }} 个角度样本</span>
+                  <span class="fgp-tag warn" v-if="selectedGroup.sameName === false">
+                    名字不一致 · 最弱一环 {{ simPct(selectedGroup.score) }}
+                  </span>
+                  <span class="fgp-tag ok" v-else>同名归为一组</span>
+                  <span class="fgp-acts">
+                    <button class="mini-btn" :disabled="!!mergingGroup" @click="doMergeGroup(selectedGroup)">
+                      {{ mergingGroup ? '合并中…' : '合并为一条' }}
+                    </button>
+                    <button class="mini-btn ghost" @click="selectedGroupKey = ''">收起</button>
+                  </span>
+                </div>
+                <div class="fgp-samples">
+                  <div class="fgp-item" v-for="(it, i) in selectedGroup.items" :key="it.id">
+                    <img v-if="it.thumb" :src="it.thumb" alt="样本" />
+                    <span class="fgp-sim" :title="i === 0 ? '代表样本（最早录入的那张）' : '与代表样本的相似度'">{{ i === 0 ? '代表' : simPct(it.sim) }}</span>
+                    <span class="fgp-name" :title="it.name">{{ it.name }}</span>
+                    <button class="mini-btn danger" :disabled="deletingSample[it.id]" @click="doDeleteSample(it)">
+                      {{ deletingSample[it.id] ? '删除中' : '删除' }}
+                    </button>
+                  </div>
+                </div>
+                <!-- 名字这件事必须说透：推送里叫什么，取决于这几条的**名字是否统一** -->
+                <p class="hint tight" v-if="selectedGroup.sameName === false">
+                  这 {{ selectedGroup.count }} 条现在各有各的名字（{{ selectedGroup.names.join(' / ') }}），
+                  推送会按命中的那条来 —— 也就是同一个人的不同角度可能推出不同名字。
+                  点卡片上的「改名」统一成一个名字后，不管哪个角度都推这个名字。
+                </p>
+                <p class="hint tight" v-else>
+                  这几条同名，推送里都用「{{ selectedGroup.name }}」；改名会一起改。
+                  「合并为一条」还能把各角度的特征合成一份（识别更稳，也腾出名额）。
+                </p>
+              </div>
+
               <div class="face-pager" v-if="faceLibOpen && libPageCount > 1">
                 <button class="mini-btn ghost" :disabled="libPage <= 1" @click="libPage -= 1">上一页</button>
                 <span class="face-page-text">{{ libPage }} / {{ libPageCount }}</span>
@@ -2379,6 +2532,23 @@
             </div>
           </div>
 
+          <!--
+            「静默时段也允许推送」—— 这几类关键事件在免打扰 / 通道静默期间要不要照推。
+            缺省为开：老版本这几类是**硬编码放行**的，默认必须保持原行为，
+            否则升级用户的收件习惯会突然变。
+          -->
+          <label class="opt">
+            <span>
+              <strong>静默时段也允许推送</strong>
+              <em>关闭后：处于免打扰 / 通道静默时，上面勾选的这几类事件也不单独推</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: critThroughSilence('dingtalk') }"
+              @click="toggleCritThroughSilence('dingtalk')"
+            ></span>
+          </label>
+
           <div class="opt">
             <span>
               <strong>消息格式</strong>
@@ -2618,6 +2788,19 @@
                   {{ e.label }}
                 </button>
               </div>
+
+              <!-- 「静默时段也允许推送」语义与钉钉 / 企微那两处完全一致 -->
+              <label class="opt">
+                <span>
+                  <strong>静默时段也允许推送</strong>
+                  <em>关闭后：处于免打扰 / 通道静默时，上面勾选的这几类事件也不再私聊推送</em>
+                </span>
+                <span
+                  class="switch"
+                  :class="{ on: critThroughSilence('tg') }"
+                  @click="toggleCritThroughSilence('tg')"
+                ></span>
+              </label>
 
               <div class="sub-label mt">接收人</div>
               <p class="hint tight">
@@ -3223,6 +3406,19 @@
             </div>
           </div>
 
+          <!-- 「静默时段也允许推送」语义与钉钉那处完全一致 -->
+          <label class="opt">
+            <span>
+              <strong>静默时段也允许推送</strong>
+              <em>关闭后：处于免打扰 / 通道静默时，上面勾选的这几类事件也不单独推</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: critThroughSilence('wecom') }"
+              @click="toggleCritThroughSilence('wecom')"
+            ></span>
+          </label>
+
           <div class="opt col">
             <span>
               <strong>消息样式</strong>
@@ -3531,14 +3727,23 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   BRAND,
+  camDigestState,
   camSilentState,
+  clampDigestMinutes,
   cloneDefaultCameras,
   cloneDefaultOptions,
   cloneHiddenConfig,
   DEFAULT_BACKEND_URL,
+  DEFAULT_CAM_DIGEST_CHANNELS,
   DEFAULT_CAM_SILENT_CHANNELS,
   DEFAULT_SILENT_CHANNELS,
+  defaultCamDigest,
   defaultCamSilent,
+  DIGEST_INTERVAL_CHOICES,
+  DIGEST_INTERVAL_MAX,
+  DIGEST_INTERVAL_MIN,
+  digestCfgOf,
+  digestIntervalLabel,
   HIDDEN_PASSCODE_HASH,
   syncChannelCameras
 } from '../config/defaults'
@@ -3590,23 +3795,28 @@ import { EVENT_DEFAULTS, EVENT_GROUPS } from '../composables/useAlarmText'
 import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
 import { camExtOn, camHitOn } from '../composables/useAiExtras'
 import {
+  DEFAULT_FACE_THRESHOLD,
   addFace,
   backendPendingError,
   backendPendingFaces,
   backendPendingLoadedAt,
   clearFaces,
   clearPendingFaces,
-  deleteFace,
+  deleteFaces,
   dropBackendPendingFace,
   enrollFromImage,
   faceLibOpen,
+  faceRowsVersion,
   faces as faceLib,
+  groupFaces,
   loadBackendPendingFaces,
+  mergeFaces,
   pendingFaces,
   pendingLibOpen,
+  rawFaceRows,
   refreshFaces,
   removePendingFace,
-  renameFace
+  renameFaces
 } from '../composables/useFaceLib'
 import { runtimeInfo, runtimeLine } from '../composables/useDeviceInfo'
 import {
@@ -4869,6 +5079,37 @@ function toggleCritEvent(channelKey, evKey) {
   crit.events[evKey] = !critOn(channelKey, evKey)
 }
 
+/**
+ * 取某个渠道的「关键事件」配置块。
+ * TG 那处叫 directPush（私聊推送），钉钉 / 企微那两处叫 critical（独立机器人）。
+ */
+function critBlockOf(which) {
+  if (which === 'tg') return opts.telegram && opts.telegram.directPush
+  const ch = which === 'wecom' ? opts.wecom : opts.dingtalk
+  return ch && ch.critical
+}
+
+/**
+ * 「静默时段也允许推送」（关键事件）是否开启。
+ *
+ * ⚠️ 缺省 true —— 这几类关键事件在老版本里是**硬编码放行**的（静默期间照样推），
+ * 所以默认必须保持"静默也推"，否则升级用户行为会突变：原本夜里能收到的
+ * 静默汇总 / 人脸命中，升级后突然收不到了。
+ * 判定与执行层（useAlertPush.criticalSilentBlocked）严格一致：**只有显式 false 才算关**。
+ *
+ * @param {string} which 'dingtalk' | 'wecom' | 'tg'
+ */
+function critThroughSilence(which) {
+  const blk = critBlockOf(which)
+  return !!blk && blk.throughSilence !== false
+}
+
+function toggleCritThroughSilence(which) {
+  const blk = critBlockOf(which)
+  if (!blk) return
+  blk.throughSilence = blk.throughSilence === false
+}
+
 /* ==================== AI 扩展分析 ==================== */
 /** 运行时的推理后端（给用户一个"这台机器能不能开重模型"的判断依据） */
 const gpuReady = computed(() => (aiSlotBackend.value || {}).detector === 'webgpu')
@@ -4882,14 +5123,92 @@ const gpuText = computed(() => {
 
 /** 人脸库 */
 // faceLibOpen 来自 useFaceLib（模块级）：抽屉关掉再打开时展开状态要保留，见那里的说明
-const faceRenameId = ref(null)
+
+/* ---------- 同一个人的多角度样本：归类显示 ----------
+ * 用户在库里看到的问题是：同一个人被拍了好几次（正面 / 侧面 / 低头），
+ * 每次都占一张卡片、各顶着「人脸 7」「人脸 12」这种自动编号 ——
+ * 十几张卡片其实没几个人，**推送里也会按命中的那一条各叫各的名字**。
+ * 所以这里按「人」显示：一「人」一张卡片，点开看他的全部角度。
+ */
+/** 正在改名的那张卡片 —— 存的是**一「人」的组 key**，不是某一条记录的 id */
+const faceRenameKey = ref(null)
 const faceRenameText = ref('')
+/** 正在保存名字的组 key（按组记录：一个人在存，不影响另一个人继续改） */
+const renamingFace = reactive({})
+/** 正在合并的组 key / 正在删除的样本记录 id */
+const mergingGroup = ref('')
+const deletingSample = reactive({})
+/** 当前点开看全部角度的那一组 */
+const selectedGroupKey = ref('')
+
+const GROUP_SIM_KEY = 'monitor-wall-face-group-sim-v1'
+/**
+ * 是否按相似度把「同一个人」的多角度样本归到一张卡片。
+ *
+ * 默认开 —— 这正是要的效果：同一个人只占一张卡片、只有一个名字。
+ * 但相似度是**概率**，偶尔会把两个长得像的人并到一起，所以必须留一个关掉的开关：
+ * 关掉后只按「同名」这个**确定**的判据归类，立刻恢复一张一条。
+ * 这个偏好存 localStorage：它属于"我想怎么看这份名单"，不该每次打开设置都被重置。
+ */
+const groupBySim = ref(readGroupSim())
+function readGroupSim() {
+  try {
+    return localStorage.getItem(GROUP_SIM_KEY) !== '0'
+  } catch (e) {
+    return true
+  }
+}
+function toggleGroupBySim() {
+  groupBySim.value = !groupBySim.value
+  try {
+    localStorage.setItem(GROUP_SIM_KEY, groupBySim.value ? '1' : '0')
+  } catch (e) {}
+}
+
+/**
+ * 归类用的相似度判据 = **设置页那个「识别阈值」**（上面「识别阈值」滑块）。
+ *
+ * 刻意不另立一套常量：识别时判「这是同一个人」用的是它，库里归类显示也该是它。
+ * 否则会出现"推送说认出是谁了、库里却把这个人分成两条"这种自相矛盾的界面。
+ */
+const groupThreshold = computed(() => Number(opts.face.matchThreshold) || DEFAULT_FACE_THRESHOLD)
+
+/**
+ * 人脸库按「人」分组。依赖 faceRowsVersion —— 完整记录（含向量）在 useFaceLib 里
+ * 刻意不进响应式（512 维 × 人数，白花代理开销），只用一个版本号当"库变了"的信号。
+ */
+const faceGroups = computed(() => {
+  void faceRowsVersion.value
+  return groupFaces(rawFaceRows(), { threshold: groupThreshold.value, bySimilarity: groupBySim.value })
+})
+
+/** 一个"人"占了多条、多出来的条数：>0 才展示归类开关与说明 */
+const groupedExtra = computed(() => Math.max(0, faceLib.value.length - faceGroups.value.length))
+
+/** 当前展开的那一组（没展开 / 组已不存在时为 null） */
+const selectedGroup = computed(
+  () => faceGroups.value.find((g) => g.key === selectedGroupKey.value && g.count > 1) || null
+)
+/** 组没了（被合并 / 删除 / 改名后不再同名）就自动收起面板，别留一个空壳 */
+watch(faceGroups, (gs) => {
+  if (selectedGroupKey.value && !gs.some((g) => g.key === selectedGroupKey.value && g.count > 1)) {
+    selectedGroupKey.value = ''
+  }
+})
+function toggleGroupPanel(g) {
+  if (!g || g.count < 2) return
+  selectedGroupKey.value = selectedGroupKey.value === g.key ? '' : g.key
+}
+/** 相似度显示成百分比（界面与探针共用同一处格式化） */
+function simPct(s) {
+  return Math.round(Math.max(0, Math.min(1, Number(s) || 0)) * 100) + '%'
+}
 
 /** 正在录入中的待录入卡片 id（防止「点下去没反馈 → 连点 → 同一张脸被建出多条」）。
  *  按 id 记录而不是全局一个开关：一张在录不影响其它卡片继续点。 */
 const enrollingPending = reactive({})
 
-/** 正在删除中的已录入卡片 id（同 enrollingPending 思路：按 id 记录，
+/** 正在删除中的卡片组 key（同 enrollingPending 思路：按组记录，
  *  删除中显「删除中」、隐藏「改名」，防止连点 / 误操作）。 */
 const deletingFace = reactive({})
 
@@ -4927,6 +5246,17 @@ async function doAddPending(pf) {
     // 人脸库同步后端不用手动触发 —— App.vue 里盯着 faceList 变化会自动补发一份配置。
     if (pf.fromBackend) await dropBackendPendingFace(opts.backend.url, pf.backendId)
     else removePendingFace(pf.id)
+  } catch (e) {
+    /*
+     * 必须接住异常：写入会超时报错（本地库卡死 / 被别的标签页占住），
+     * 以前这里没有 catch —— 于是卡片就停在「录入中」，界面上一条提示都没有，
+     * 用户只能反复点。宁可明确告诉他"没录上、为什么没录上"。
+     */
+    alertDialog({
+      title: '录入失败',
+      message: '写入本地人脸库时出错：' + ((e && e.message) || e) + '\n这张脸还在待录入里，可以稍后重试。',
+      variant: 'danger'
+    })
   } finally {
     delete enrollingPending[pf.id]
   }
@@ -5053,34 +5383,160 @@ async function doIgnorePagePending() {
   for (const pf of list) doIgnorePending(pf)
 }
 
-async function doDeleteFace(f) {
+/**
+ * 删除一张卡片 = 删除**这个人**（可能含多个角度样本）。
+ *
+ * 文案必须说清"是一整组几条"，因为这些记录在库里是"一个人"：
+ * 只删掉其中一条，剩下的还会以这个人的样子出现在推送里。
+ */
+async function doDeleteGroup(g) {
   // 已经在删这张了：连点直接拦掉（确认弹窗是 modal，正常点不到，这里兜底防重入）
-  if (deletingFace[f.id]) return
+  if (!g || deletingFace[g.key]) return
+  const n = g.count || 1
+  const sameName = g.sameName !== false
+  /* 名字不一致时，名字没法用「某某」指代 —— 那样会让用户以为删的是别的人 */
+  const who = sameName ? `「${g.name}」` : `这一组（${g.names.join(' / ')}）`
+  const msg =
+    n > 1
+      ? `确定删除${who}的 ${n} 条人脸记录？\n（这一组是同一个人的 ${n} 个角度样本，会一起删掉；删除后再次出现会重新当作陌生人。）`
+      : `确定删除${who}的人脸记录？\n删除后再次出现会重新当作陌生人。`
+  if (!(await confirmDialog({ title: '删除人脸记录', message: msg, variant: 'danger' }))) return
+  deletingFace[g.key] = true
+  try {
+    await deleteFaces(g.items.map((i) => i.id))
+    if (selectedGroupKey.value === g.key) selectedGroupKey.value = ''
+  } catch (e) {
+    alertDialog({
+      title: '删除失败',
+      message: '删除时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      variant: 'danger'
+    })
+  } finally {
+    delete deletingFace[g.key]
+  }
+}
+
+/** 删掉一个人的其中一张角度样本（模糊 / 拍歪了的那张），保留这个人的其它样本 */
+async function doDeleteSample(it) {
+  if (!it || deletingSample[it.id]) return
   if (
     !(await confirmDialog({
-      title: '删除人脸记录',
-      message: `确定删除「${f.name}」的人脸记录？\n删除后再次出现会重新当作陌生人。`,
+      title: '删除这张样本',
+      message: `确定删除「${it.name}」的这一张样本（${fmtPendingAt(it.createdAt)}）？\n该样本的人脸特征会一起删掉，其它角度的样本不受影响。`,
       variant: 'danger'
     }))
   )
     return
-  deletingFace[f.id] = true
+  deletingSample[it.id] = true
   try {
-    await deleteFace(f.id)
+    await deleteFaces([it.id])
+  } catch (e) {
+    alertDialog({ title: '删除失败', message: '删除时出错：' + ((e && e.message) || e), variant: 'danger' })
   } finally {
-    delete deletingFace[f.id]
+    delete deletingSample[it.id]
   }
 }
 
-function startRenameFace(f) {
-  faceRenameId.value = f.id
-  faceRenameText.value = f.name
+/**
+ * 把这一组的多角度样本**合并成一条**。
+ *
+ * 合并后特征按样本数加权平均、名字沿用这条人的名字，于是无论哪个角度被拍到，
+ * 命中的都是同一条记录、推送里都是同一个名字，而且腾出人脸库名额。
+ * 属于不可撤销（合并后各角度各自的缩略图不再单独保留），所以要二次确认。
+ */
+async function doMergeGroup(g) {
+  if (!g || g.count < 2 || mergingGroup.value) return
+  const sameName = g.sameName !== false
+  if (
+    !(await confirmDialog({
+      title: '合并为一条人脸记录',
+      message:
+        `把${sameName ? `「${g.name}」` : `这一组（${g.names.join(' / ')}）`}的 ${g.count} 条样本合并成 1 条？\n` +
+        `合并后名字沿用「${g.name}」，人脸特征取加权平均（各角度都能对上，识别更稳），并腾出 ${g.count - 1} 个名额。\n` +
+        '此操作不可撤销。',
+      variant: 'danger'
+    }))
+  )
+    return
+  mergingGroup.value = g.key
+  try {
+    const r = await mergeFaces(g.items.map((i) => i.id), g.items[0].id)
+    if (!r.ok) {
+      alertDialog({ title: '合并失败', message: r.reason || '合并失败', variant: 'danger' })
+      return
+    }
+    selectedGroupKey.value = ''
+  } catch (e) {
+    alertDialog({
+      title: '合并失败',
+      message: '合并时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      variant: 'danger'
+    })
+  } finally {
+    mergingGroup.value = ''
+  }
 }
 
-async function commitRenameFace() {
-  if (faceRenameId.value == null) return
-  await renameFace(faceRenameId.value, faceRenameText.value)
-  faceRenameId.value = null
+function startRenameGroup(g) {
+  if (!g) return
+  faceRenameKey.value = g.key
+  faceRenameText.value = g.name
+}
+
+/**
+ * 提交改名 —— 改的是**这个人**（该组全部样本一起改）。
+ *
+ * 为什么要一起改：库里的名字直接决定推送内容。只改其中一条的话，
+ * 同一个人的不同角度会各推各的名字（用户看到的就是"一次叫小刘、一次叫人脸 7"），
+ * 而且"同名归类"的判据就是名字，改一条会让这张卡片立刻散开。
+ *
+ * 这里的三个细节都是踩过的坑：
+ *   1. **保存中要有反馈**：写入是排队执行的（前面可能还压着别的写操作），
+ *      不给反馈时用户看到的就是"点了没反应"，于是连点、以为卡住。
+ *   2. **防重入**：同一张卡片保存期间再触发（回车后紧接着失焦）直接返回。
+ *   3. **只收尾自己那一次**：改 A 的时候顺手去改 B，A 的 await 回来时不能把
+ *      B 的编辑框关掉（以前就是这个 bug，表现为"点 B 的改名一开就没了"）。
+ */
+async function commitRenameGroup() {
+  const key = faceRenameKey.value
+  if (key == null || renamingFace[key]) return
+  const g = faceGroups.value.find((x) => x.key === key)
+  if (!g) {
+    faceRenameKey.value = null
+    return
+  }
+  const name = String(faceRenameText.value || '').trim()
+  // 空名字 / 没改动：什么都不写（空名字会被库拒掉，白写一次还会往后端推一遍配置）
+  if (!name || (name === g.name && g.sameName !== false)) {
+    faceRenameKey.value = null
+    return
+  }
+  renamingFace[key] = true
+  try {
+    const r = await renameFaces(g.items.map((i) => i.id), name)
+    if (!r.ok) {
+      faceRenameKey.value = null
+      alertDialog({ title: '改名失败', message: r.reason || '改名失败', variant: 'danger' })
+      return
+    }
+    faceRenameKey.value = null
+  } catch (e) {
+    /*
+     * 失败必须收掉编辑态并**明说**：
+     * 以前这里既不 catch 也不提示，一次写入失败（比如数据库被别的标签页占住）
+     * 就是"输入框一直开着、怎么点都没反应" —— 用户说的"经常卡住"。
+     * 收掉编辑态还有个副作用要避免：编辑框留着、弹窗又抢走焦点会再触发一次失焦提交，
+     * 变成反复重试。
+     */
+    faceRenameKey.value = null
+    alertDialog({
+      title: '改名失败',
+      message: '保存时出错：' + ((e && e.message) || e) + '\n名字没有改动。如果一直失败，试试关掉本应用的其它标签页再试。',
+      variant: 'danger'
+    })
+  } finally {
+    delete renamingFace[key]
+  }
 }
 
 async function doClearFaces() {
@@ -5092,7 +5548,12 @@ async function doClearFaces() {
     }))
   )
     return
-  await clearFaces()
+  try {
+    await clearFaces()
+  } catch (e) {
+    // 同 doAddPending：写库失败必须说出来，不能让按钮点下去毫无反应
+    alertDialog({ title: '清空失败', message: '清空本地人脸库时出错：' + ((e && e.message) || e), variant: 'danger' })
+  }
 }
 
 watch(faceLibOpen, (v) => {
@@ -5171,15 +5632,16 @@ function observeFaceGrids() {
 
 const libPageSize = computed(() => Math.max(1, libCols.value * FACE_ROWS))
 const pendingPageSize = computed(() => Math.max(1, pendingCols.value * FACE_ROWS))
+/** 人脸库按「人」分页（不是按记录）：一「人」一张卡片，页数才不会因为多角度样本虚高 */
 const libPageCount = computed(() =>
-  Math.max(1, Math.ceil((faceLib.value.length || 0) / libPageSize.value))
+  Math.max(1, Math.ceil((faceGroups.value.length || 0) / libPageSize.value))
 )
 const pendingPageCount = computed(() =>
   Math.max(1, Math.ceil((allPendingFaces.value.length || 0) / pendingPageSize.value))
 )
-const pagedFaceLib = computed(() => {
+const pagedFaceGroups = computed(() => {
   const p = Math.min(Math.max(1, libPage.value), libPageCount.value)
-  return faceLib.value.slice((p - 1) * libPageSize.value, p * libPageSize.value)
+  return faceGroups.value.slice((p - 1) * libPageSize.value, p * libPageSize.value)
 })
 const pagedPending = computed(() => {
   const p = Math.min(Math.max(1, pendingPage.value), pendingPageCount.value)
@@ -5419,7 +5881,9 @@ function addCamera() {
     zones: [],
     // 通道静默要给默认值，否则新加的通道 cam.silent 是 undefined，
     // 卡片里的静默开关读不到字段、状态会显示成"未开启"却又点不动时段
-    silent: defaultCamSilent()
+    silent: defaultCamSilent(),
+    // 日常事件静默同理：新通道也带上，别等用户点一下开关才长出这个字段
+    digest: defaultCamDigest()
   })
 }
 
@@ -5868,6 +6332,56 @@ function addCamSilSlot(cam) {
 }
 function removeCamSilSlot(cam, i) {
   ensureCamSil(cam).slots.splice(i, 1)
+}
+
+/* ---------- 日常事件静默（每一路单独配间隔 + 渠道） ---------- */
+
+/**
+ * 只读地取这一路的日常静默配置 —— 直接复用 defaults 的 digestCfgOf。
+ * 它返回的是**兜底后的副本**（缺字段给默认值、不往 cam 上补字段），
+ * 正是渲染期该用的东西；真正要写的时候走下面的 ensureCamDigest。
+ */
+function camDigestCfg(cam) {
+  return digestCfgOf(cam)
+}
+
+/** 写之前才把配置对象补齐（只在事件处理里调用） */
+function ensureCamDigest(cam) {
+  if (!cam.digest || typeof cam.digest !== 'object') cam.digest = defaultCamDigest()
+  const d = cam.digest
+  d.intervalMinutes = clampDigestMinutes(d.intervalMinutes)
+  if (!Array.isArray(d.channels)) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
+  return d
+}
+
+/**
+ * 这一路此刻的日常静默状态 —— 与引擎（useAlertPush.digestStateOf）用的是
+ * **同一个纯函数** camDigestState，只是喂进去的「此刻有没有静默窗口」由界面这边的
+ * 三份状态拼出来：
+ *   ① 全局免打扰时段（silentActiveNow）
+ *   ② 全局临时静默（tempActive）
+ *   ③ 这一路的通道静默（camSilActive）
+ * 各算一份的话，迟早出现「界面说在汇总、实际没汇总」。
+ */
+function camDigestInfo(cam) {
+  return camDigestState(cam, {
+    silentActive: silentActiveNow.value || tempActive.value || camSilActive(cam)
+  })
+}
+
+function toggleCamDigest(cam) {
+  const d = ensureCamDigest(cam)
+  d.enabled = !d.enabled
+}
+
+function toggleCamDigestChannel(cam, ch) {
+  const d = ensureCamDigest(cam)
+  // 与通道静默一致：刻意允许清空（空数组即不生效，行为明确，不会静默掉别的东西）
+  d.channels = d.channels.includes(ch) ? d.channels.filter((x) => x !== ch) : [...d.channels, ch]
+}
+
+function setCamDigestInterval(cam, v) {
+  ensureCamDigest(cam).intervalMinutes = clampDigestMinutes(v)
 }
 
 /* ---------- 配置方案（多套配置保存 / 切换 / 导入导出） ---------- */
@@ -7127,6 +7641,197 @@ function loadHidden() {
   white-space: nowrap;
 }
 
+/* ---------------- 同一人归类（多角度样本）----------------
+ * 库里按「人」显示：一「人」一张卡片。卡片上要多带两个信息 ——
+ *   ① 这个人的**几个角度**（右下角数字角标）
+ *   ② 这一组里名字**是不是统一的**（右上角 ! 标记）
+ * ② 是必须的：推送里叫什么名字，取决于这几条记录各自的名字。
+ * 名字不一致时同一个人的不同角度会推不同的名字，用户看到只会觉得"识别乱了"，
+ * 而根源在库这边没统一 —— 所以要让它在卡片上就能被发现。
+ */
+.face-thumb {
+  position: relative;
+  width: 100%;
+  line-height: 0;
+}
+
+.face-thumb.clickable {
+  cursor: zoom-in;
+}
+.face-thumb.clickable:hover img {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.face-count {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 78%, #000);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.face-warn {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--warn-text) 88%, #000);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* 归到一组的卡片：描边稍重，提示"这不止一条记录" */
+.face-card.grouped {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line-soft));
+}
+
+/* 正在展开看角度样本的那张卡片 */
+.face-card.selected {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* 「保存中」按钮：只是个状态位，别让人以为是可点的操作 */
+.face-busy {
+  opacity: 0.85;
+  cursor: default;
+}
+
+/* 归类开关（带说明的那种，不是一行 switch，所以不能直接用 .opt） */
+.face-group-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+.face-group-toggle > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.face-group-toggle strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.face-group-toggle em {
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+  color: var(--text-dim-2);
+}
+.face-group-toggle .switch {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+/* ---------------- 一个人的角度样本面板 ---------------- */
+.face-group-panel {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-soft));
+  background: color-mix(in srgb, var(--tint) 4%, transparent);
+}
+
+.fgp-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.fgp-head strong {
+  font-size: 13px;
+  color: var(--text);
+}
+.fgp-tag {
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--tint) 8%, transparent);
+}
+.fgp-tag.ok {
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.fgp-tag.warn {
+  color: var(--warn-text);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.fgp-acts {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.fgp-samples {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 76px);
+  gap: 8px;
+}
+
+.fgp-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+.fgp-item img {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+  background: #0a0f18;
+}
+.fgp-sim {
+  font-size: 10px;
+  color: var(--text-dim-2);
+}
+.fgp-name {
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fgp-item .mini-btn {
+  width: 100%;
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 待录入缩略图可点击看原图（只有存到整帧时才给 pointer + 提示） */
 .pending-thumb.clickable {
   cursor: zoom-in;
@@ -8165,6 +8870,17 @@ function loadHidden() {
 }
 .cs-state.off {
   opacity: 0.72;
+}
+
+/* ---------- 日常事件静默（监控通道卡片内） ----------
+   复用 .cam-silent 的骨架（同一条卡片里的第二段），只把"正在汇总"的高亮
+   换成强调色，和上面"通道静默"的警示色区分开：那是"别打扰我"，这是"攒着一起发"。 */
+.cam-digest.on {
+  border-top-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.cam-digest select.field.mini {
+  min-width: 96px;
 }
 
 .slot-del {

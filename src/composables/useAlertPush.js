@@ -34,9 +34,12 @@ import { camHitOn } from '../config/features.js'
 import { runtimeLine } from './useDeviceInfo.js'
 import {
   BRAND,
+  camDigestState,
   camSilentOverview,
   camSilentState,
   channelCredReady,
+  digestIntervalLabel,
+  isFaceHit,
   matchSilentSlotAt,
   parseSilentSlots,
   slotBoundaryAt
@@ -787,6 +790,168 @@ export function useAlertPush(options, hooks = {}) {
     }
   }
 
+  /* ==================== 通道级「日常事件静默」（按间隔汇总） ====================
+   * 与上面的通道静默同构，只是驱动方式从「时段」换成「间隔」：
+   *   · 通道静默：命中时段 → 收存 → 时段结束发一条汇总；
+   *   · 日常静默：平时就一直收存 → 每满一个间隔发一条汇总。
+   *
+   * 两条规则（判定收在 defaults.camDigestState，这里只喂运行时状态）：
+   *   1) **让位于静默窗口**：此刻有任一静默窗口生效（全局免打扰 ∨ 这一路的通道静默）
+   *      就不吸收新事件 —— 否则同一条事件会既进静默汇总又进日常汇总。
+   *   2) **不吸收关键事件**（在库的人脸命中，判据 isFaceHit）：它的意义就是"立刻知道"。
+   */
+
+  /**
+   * 每路通道一份的日常收存状态（惰性创建）。
+   *   buf / seen      收存的报警快照与去重集合
+   *   since           本批**第一条**入队的时刻 —— 间隔从它算起，
+   *                   而不是从"上一次汇总时刻"算起（否则长时间没事件时会立刻补一条空汇总）
+   *   armedDue/timer  已排的到点时刻与定时器（幂等重排靠它们比对）
+   */
+  const digestStore = new Map()
+  function digestSlot(id) {
+    let st = digestStore.get(id)
+    if (!st) {
+      st = { buf: [], seen: new Set(), since: 0, armedDue: 0, timer: null }
+      digestStore.set(id, st)
+    }
+    return st
+  }
+
+  /**
+   * 这一路此刻的日常静默状态 —— **唯一判定**在 `defaults.camDigestState`。
+   * 这里只负责把"此刻有没有静默窗口生效"喂给它：那是本文件的运行时状态
+   * （要读全局免打扰 + 这一路的通道静默），纯函数拿不到。
+   * 展示层（/cams、设置页）读的是同一个函数 —— 各算一份会出现
+   * 「界面说在收存、实际没生效」这种最难查的不一致。
+   */
+  function digestStateOf(cam, now) {
+    const camS = camSilentState(cam, now)
+    return camDigestState(cam, { silentActive: !!(silentState(now).active || camS.active) })
+  }
+
+  /** 丢掉一路的定时器与收存（配置关闭 / 通道被删 / 恢复初始化） */
+  function clearCamDigest(id) {
+    const st = digestStore.get(id)
+    if (!st) return
+    if (st.timer) clearTimeout(st.timer)
+    st.timer = null
+    st.armedDue = 0
+    st.buf.length = 0
+    st.seen.clear()
+    st.since = 0
+  }
+
+  /**
+   * 排程这一路的日常汇总（**幂等**，心跳每 30 秒都会调它）。
+   * @returns {boolean} 此刻是否**已到点** —— true 表示调用方应当立刻 flush
+   */
+  function armCamDigest(camId, now = Date.now()) {
+    const st = digestSlot(camId)
+    if (!st.buf.length) {
+      if (st.timer) {
+        clearTimeout(st.timer)
+        st.timer = null
+      }
+      st.armedDue = 0
+      return false
+    }
+    const s = digestStateOf(camById(camId), now)
+    /*
+     * 让位于静默窗口 → 收掉定时器，交给心跳重试。
+     * 不在这里排一个"窗口结束后才该响"的定时器：那等于把两套时间轴搅在一起
+     * （静默窗口本身有自己的心跳与收尾），排出来的时长还得先算窗口还剩多久。
+     */
+    if (!s.active) {
+      if (st.timer) {
+        clearTimeout(st.timer)
+        st.timer = null
+      }
+      st.armedDue = 0
+      return false
+    }
+    /*
+     * dueAt 每次都从 since + 间隔**重算**，而不是记在状态里加一次：
+     * 用户改了间隔就能立刻生效，不必等下一批事件。
+     */
+    const due = st.since + s.intervalMs
+    if (now >= due) return true
+    if (st.timer && st.armedDue === due) return false
+    if (st.timer) clearTimeout(st.timer)
+    st.armedDue = due
+    st.timer = setTimeout(() => {
+      st.timer = null
+      st.armedDue = 0
+      flushCamDigest(camId).catch(() => {})
+    }, Math.max(1000, due - now))
+    return false
+  }
+
+  /**
+   * 日常汇总收尾：把这一路攒下的事件汇总发出去。
+   *
+   * 三处与通道静默**刻意一致**（理由同 flushCamSilent）：
+   *   1) 没有事件就不发；2) 只发给被静默的那几个渠道；3) 不发"开始提醒"。
+   *
+   * 另外多一条：**静默窗口生效期间不发**，缓冲原样留着，等窗口结束由心跳补发。
+   * 不照发的理由：用户刚把这一路设成免打扰，再来一条汇总就是自相矛盾。
+   * 不丢的理由：这些事件本来就该由日常汇总送达，丢了就永远没人看见。
+   */
+  async function flushCamDigest(camId, opts = {}) {
+    const st = digestSlot(camId)
+    if (!st.buf.length) return null
+    const cam = camById(camId)
+    const now = Date.now()
+    const s = digestStateOf(cam, now)
+    if (!opts.test && !s.active) return null
+    const ids = restrictIds(s.channels)
+    if (!ids.length) return null
+
+    const name = (cam && cam.name) || camId
+    const buf = st.buf.splice(0, st.buf.length)
+    st.seen.clear()
+    const since = st.since || now
+    st.since = 0
+    const summary = buildSilentSummary(buf, silentCfg(), {
+      startMs: buf.reduce((m, r) => Math.min(m, r.time || since), since),
+      endMs: now,
+      variant: 'digest',
+      scopeName: name,
+      intervalMinutes: s.intervalMinutes
+    })
+    const sent = await pushSilentSummary(ids, summary)
+    if (!opts.test && sent.length) {
+      notify(`「${name}」日常事件汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
+    }
+    return summary
+  }
+
+  /**
+   * 日常静默心跳：兜底定时器（休眠 / 卡顿 / 进程重启）＋ 收尾已删通道。
+   * 与 tickCamSilent 同构，挂在**同一个 30 秒心跳**里（见 tickSilentWindow）。
+   */
+  function tickCamDigest(now = Date.now()) {
+    const raw = camerasOf()
+    const list = Array.isArray(raw) ? raw : []
+    const alive = new Set()
+    list.forEach((cam) => {
+      if (!cam || !cam.id) return
+      alive.add(cam.id)
+      const st = digestStore.get(cam.id)
+      if (!st || !st.buf.length) return
+      if (armCamDigest(cam.id, now)) flushCamDigest(cam.id).catch(() => {})
+    })
+    /*
+     * 通道被删 / 关闭日常静默 → 连同缓冲与定时器一起清掉。
+     * 不清的话汇总迟早发往一个已经不存在的通道，Map 也会随反复增删无限长大。
+     */
+    for (const id of [...digestStore.keys()]) {
+      if (alive.has(id)) continue
+      clearCamDigest(id)
+      digestStore.delete(id)
+    }
+  }
+
   /**
    * 开启某一路通道的临时静默（远程 `/csilent` 与设置页共用）。
    * 与全局 startTempSilent 同构：渠道显式传空数组一律拒绝（**不**回落默认，
@@ -1073,6 +1238,11 @@ export function useAlertPush(options, hooks = {}) {
      * 把通道检查放在后面会被跳过（表现成"配了通道静默却永远不结算"）。
      */
     tickCamSilent(now)
+    /*
+     * 日常静默也在这里收尾。放在通道静默**之后**：它的 flush 要判断
+     * "此刻有没有静默窗口生效"，先跑完通道那套，读到的窗口状态才是这一刻最终的样子。
+     */
+    tickCamDigest(now)
     const win = currentWindow(now)
     const prev = activeWin
     const key = win ? win.key : ''
@@ -1717,6 +1887,11 @@ export function useAlertPush(options, hooks = {}) {
       if (st.timer) clearTimeout(st.timer)
     })
     camStore.clear()
+    // 日常事件静默同理：不清的话定时器到点照样把旧汇总发出去
+    digestStore.forEach((st) => {
+      if (st.timer) clearTimeout(st.timer)
+    })
+    digestStore.clear()
     pendingCount.value = 0
   }
 
@@ -1796,26 +1971,87 @@ export function useAlertPush(options, hooks = {}) {
     }
 
     /*
+     * 日常事件静默（cam.digest）：把「本来就能实时推、又不是关键事件」的那部分
+     * 从 send / queue 里摘出来，攒进本路的下一条日常汇总。
+     *
+     * ⚠️ 与上面的静默收存是**互斥**的：camDigestState 在有静默窗口时就是 inactive，
+     *    所以一条事件不可能既进静默汇总又进日常汇总（这是刻意的，别在这里
+     *    "顺手"放宽成两者都收）。
+     */
+    let digested = false
+    if (send.length || queue.length) {
+      const dCam = camById(record.id)
+      const dState = dCam ? digestStateOf(dCam, now) : { active: false }
+      if (dState.active && !isFaceHit(record)) {
+        const hitSend = send.filter((id) => dState.channels.includes(id))
+        const hitQueue = queue.filter((id) => dState.channels.includes(id))
+        if (hitSend.length || hitQueue.length) {
+          const dchans = dState.channels
+          send = send.filter((id) => !dchans.includes(id))
+          queue = queue.filter((id) => !dchans.includes(id))
+          const st = digestSlot(record.id)
+          if (!st.seen.has(record.key)) {
+            st.seen.add(record.key)
+            st.buf.push(silentSnapshot(record))
+            // 间隔从**这一批的第一条**算起：空等一整天之后不该立刻补一条空汇总
+            if (!st.since) st.since = now
+          }
+          armCamDigest(record.id, now)
+          digested = true
+          if (!send.length && !queue.length) {
+            onState(
+              record.key,
+              'silent',
+              `日常事件静默（每 ${digestIntervalLabel(dState.intervalMinutes)} 汇总一次）已收存，` +
+                `将于 ${hhmm(st.since + dState.intervalMs)} 一并推送`
+            )
+          }
+        }
+      }
+    }
+
+    /*
      * 关键事件单独提醒（人脸命中）。
      *
-     * ⚠️ 刻意**不受静默影响、也不依赖是否被收存**：静默的本意就是"别打扰"，
-     * 而这条开关存在的唯一理由恰恰是"静默了也想第一时间知道库内的人来了"。
-     * 若跟着静默一起收存，它就和普通报警没区别了，功能等于不存在。
+     * ⚠️ 刻意**不依赖是否被静默收存**：静默的本意就是"别打扰"，而这条存在的理由
+     * 恰恰是"静默了也想第一时间知道库内的人来了"。若跟着静默一起收存，它就和普通
+     * 报警没区别了、功能等于不存在。
+     * 「静默时段到底推不推」交给三端各自的 critical.throughSilence（缺省即开）——
+     * 默认仍是"静默也推"，与升级前一致；把它关掉就不再推（见 criticalSilentBlocked）。
      * 只在**命中在库人脸**（有 faceName）时发 —— 陌生人脸不在此列，
      * 否则门口路过一个人就打一条私聊，比不静默还吵。
      */
     if (record.type === 'face' && record.faceName) {
-      const shot = record.faceThumb || record.thumb || ''
+      /*
+       * 带**事件原图**（事发那一帧），不是人脸特写。
+       *
+       * 私聊提醒要回答的是"现场刚才怎么回事"，一张 96×96 的脸说明不了周边情况；
+       * 放大的脸由 pushFaceShot 另外单独补一条（那条才是"特写"语义）。
+       * 取值顺序与日常推送一致（rec.shot || rec.thumb）—— 两者都是**整帧原图**的
+       * dataURL：前端 shot = grabArchiveShot(canvas) 全分辨率、thumb = 360 宽缩略；
+       * 后端 notify.makeRecord 收到的是 img.shot = 整帧 dataURL。
+       *
+       * ⚠️ 别再退回 `record.faceThumb`：那是人脸特写，不是事件原图。
+       *    也别只写 `record.thumb`：后端 handleEvent 会把 record.thumb 覆盖成
+       *    **落库用的相对路径**，推送侧拿它当图会变成 0 字节空图、静默发不出去。
+       *    三端（TG / 钉钉 / 企微）都吃这里的 payload.image，所以改这一处即三端一致。
+       */
+      const shot = record.shot || record.thumb || ''
       const who = `${record.faceName}（相似度 ${Math.round((Number(record.faceScore) || 0) * 100)}%）`
-      pushDirectToUsers('face', {
-        image: shot,
-        caption: [
-          `🙂 <b>人脸命中 · ${tgEsc(record.name || '')}</b>`,
-          `认出：<b>${tgEsc(who)}</b>`,
-          `时间：${tgEsc(formatTime(record.time))}`
-        ].join('\n'),
-        text: `人脸命中 · ${record.name || ''} / ${who} / ${formatTime(record.time)}`
-      }).catch(() => {})
+      pushDirectToUsers(
+        'face',
+        {
+          image: shot,
+          caption: [
+            `🙂 <b>人脸命中 · ${tgEsc(record.name || '')}</b>`,
+            `认出：<b>${tgEsc(who)}</b>`,
+            `时间：${tgEsc(formatTime(record.time))}`
+          ].join('\n'),
+          text: `人脸命中 · ${record.name || ''} / ${who} / ${formatTime(record.time)}`
+        },
+        // 带上通道 id：这一路自己的通道静默也要算进「此刻是不是静默时段」
+        { camId: record.id }
+      ).catch(() => {})
     }
 
     if (send.length) await deliver([record], false, send)
@@ -1831,7 +2067,7 @@ export function useAlertPush(options, hooks = {}) {
       return
     }
 
-    if (!send.length && !buffered) {
+    if (!send.length && !buffered && !digested) {
       const reasons = decisions
         .filter((d) => !d.ok && !d.off)
         .map((d) => `${CHANNEL_DEFS.find((x) => x.id === d.id).name}：${d.reason}`)
@@ -1968,6 +2204,25 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /**
+   * 关键事件此刻是否被「静默时段」挡下 —— **全项目唯一判定**。
+   *
+   * 静默时段 = 全局免打扰（options.silent）∨ 该事件所属通道的通道静默（cam.silent）。
+   * 给 camId 才把后一项算上：绝大多数的关键事件（静默提醒 / 汇总 / 满库）没有
+   * "某一路通道"可言，那时只有全局窗口算数。
+   *
+   * 判定与"挡不挡"是两件事：这里只说"此刻在不在静默时段"，
+   * 真正挡不挡由三端各自的 `throughSilence`（缺省即开）决定 ——
+   * 缺省为开是为了与老版本行为一致（关键事件一直是硬编码放行的）。
+   */
+  function criticalSilentBlocked(opts = {}) {
+    const now = Date.now()
+    if (silentState(now).active) return true
+    if (!opts.camId) return false
+    const cam = camById(opts.camId)
+    return !!(cam && camSilentState(cam, now).active)
+  }
+
+  /**
    * 关键事件单独提醒 —— 入口。
    *
    * 现在 fan-out 到**三路独立通道**，各自用自己独立的凭据 / 开关 / 事件筛选，
@@ -1978,12 +2233,16 @@ export function useAlertPush(options, hooks = {}) {
    *
    * 三路都判定 `enabled` + `events[kind]`，且只认自己的凭据；
    * 日常推送（dingtalk/wecom 顶层）是否开启、TG 是否配置，都不影响这两路关键事件推送。
+   *
+   * @param {object} [opts] { camId } 该事件所属通道（有就把它自己的通道静默也算进静默判定）
    */
-  async function pushDirectToUsers(kind, payload = {}) {
+  async function pushDirectToUsers(kind, payload = {}, opts = {}) {
+    // 「此刻在不在静默时段」只算一次，三端共用 —— 各端自己再算一遍迟早会漂
+    const silentBlocked = criticalSilentBlocked(opts)
     const parts = await Promise.all([
-      pushDirectTg(kind, payload),
-      pushCriticalDing(kind, payload),
-      pushCriticalWecom(kind, payload)
+      pushDirectTg(kind, payload, silentBlocked),
+      pushCriticalDing(kind, payload, silentBlocked),
+      pushCriticalWecom(kind, payload, silentBlocked)
     ])
     const reasons = parts.map((p) => p.reason).filter(Boolean)
     const sent = parts.reduce((a, p) => a + (p.sent || 0), 0)
@@ -1992,7 +2251,7 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /** 关键事件单独提醒 —— Telegram 私聊（原有逻辑，拆出来便于和另外两路并列） */
-  async function pushDirectTg(kind, payload = {}) {
+  async function pushDirectTg(kind, payload = {}, silentBlocked = false) {
     let tg
     try {
       tg = readCfg('tg')
@@ -2000,6 +2259,9 @@ export function useAlertPush(options, hooks = {}) {
       return { ok: false, sent: 0, reason: '' }
     }
     if (!directPushEventOn(tg, kind)) return { ok: false, sent: 0, reason: '' }
+    const dp = tg.directPush || {}
+    // 静默时段也允许推送：缺省即开（老配置没有这个字段 → 与升级前一致）
+    if (silentBlocked && dp.throughSilence === false) return { ok: false, sent: 0, reason: '' }
     if (!isReady('tg')) return { ok: false, sent: 0, reason: '' }
     const to = directPushRecipients(tg)
     if (!to.length) return { ok: false, sent: 0, reason: '' }
@@ -2032,7 +2294,7 @@ export function useAlertPush(options, hooks = {}) {
    * 用 dingtalk.critical 里的独立 webhook + 加签密钥，与日常推送完全分离。
    * 不依赖日常推送 / TG 是否配置，只认自己的开关与凭据。
    */
-  async function pushCriticalDing(kind, payload = {}) {
+  async function pushCriticalDing(kind, payload = {}, silentBlocked = false) {
     let dt
     try {
       dt = readCfg('ding')
@@ -2042,6 +2304,8 @@ export function useAlertPush(options, hooks = {}) {
     const crit = (dt && dt.critical) || null
     if (!crit || crit.enabled !== true) return { ok: false, sent: 0, reason: '' }
     if (crit.events && crit.events[kind] === false) return { ok: false, sent: 0, reason: '' }
+    // 静默时段也允许推送：缺省即开（老配置没有这个字段 → 与升级前一致）
+    if (silentBlocked && crit.throughSilence === false) return { ok: false, sent: 0, reason: '' }
     const webhook = String(crit.webhook || '').trim()
     if (!webhook) return { ok: false, sent: 0, reason: '' }
 
@@ -2094,7 +2358,7 @@ export function useAlertPush(options, hooks = {}) {
    * 用 wecom.critical 里的独立 webhook，与日常推送完全分离。
    * ⚠️ 企微 markdown 不支持 @ 人：需要 @ 时（atAll / atMobiles）自动改用 text 消息。
    */
-  async function pushCriticalWecom(kind, payload = {}) {
+  async function pushCriticalWecom(kind, payload = {}, silentBlocked = false) {
     let wc
     try {
       wc = readCfg('wecom')
@@ -2104,6 +2368,8 @@ export function useAlertPush(options, hooks = {}) {
     const crit = (wc && wc.critical) || null
     if (!crit || crit.enabled !== true) return { ok: false, sent: 0, reason: '' }
     if (crit.events && crit.events[kind] === false) return { ok: false, sent: 0, reason: '' }
+    // 静默时段也允许推送：缺省即开（老配置没有这个字段 → 与升级前一致）
+    if (silentBlocked && crit.throughSilence === false) return { ok: false, sent: 0, reason: '' }
     const webhook = String(crit.webhook || '').trim()
     if (!webhook) return { ok: false, sent: 0, reason: '' }
 
@@ -2520,6 +2786,26 @@ export function useAlertPush(options, hooks = {}) {
     camSilentList: (now) => camSilentOverview(camerasOf(), now),
     startCamTempSilent,
     endCamTempSilent,
+    /**
+     * 日常事件静默：立即汇总 / 配置与收存状态一览。
+     * 与通道静默并列导出，供设置页与远程指令共用同一份判定 ——
+     * 各写一份的典型症状是「界面说在收存、实际没生效」。
+     */
+    flushCamDigest,
+    camDigestList: (now) =>
+      (Array.isArray(camerasOf()) ? camerasOf() : [])
+        .filter((c) => c && c.id)
+        .map((c) => {
+          const st = digestStore.get(c.id)
+          return {
+            id: c.id,
+            name: c.name || c.id,
+            ...digestStateOf(c, now || Date.now()),
+            /** 已收存待汇总的条数（0 = 下一条汇总不会发） */
+            buffered: st ? st.buf.length : 0,
+            since: st ? st.since : 0
+          }
+        }),
     stopAll
   }
 }
@@ -2534,6 +2820,15 @@ function tgEsc(s) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+}
+
+/**
+ * 时间戳 → `HH:MM`。只用于"约几点汇总"这类短提示；
+ * 完整时间戳一律走 useDingTalk.formatTime（那里带日期与星期）。
+ */
+function hhmm(ms) {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
 /** 把 markdown 里的标记去掉，得到一个可读的纯文本（Telegram 兜底用） */

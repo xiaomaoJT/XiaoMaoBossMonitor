@@ -52,6 +52,41 @@ export function defaultCamSilent() {
 }
 
 /**
+ * 一路通道「日常事件静默」的默认渠道：三端全静默。
+ *
+ * ⚠️ 与 DEFAULT_CAM_SILENT_CHANNELS **刻意各留一份**（哪怕当前值相同）：
+ * 两者语义不同 —— 一个是"指定时段静默"，一个是"平时按间隔汇总"，
+ * 将来各自调整默认值时不该互相牵连。顺序即展示顺序（钉钉 → 企微 → TG）。
+ */
+export const DEFAULT_CAM_DIGEST_CHANNELS = ['ding', 'wecom', 'tg']
+
+/** 间隔夹紧范围（分钟）。上限 4 小时：再长就不该叫"日常"了，直接关掉更合适 */
+export const DIGEST_INTERVAL_MIN = 1
+export const DIGEST_INTERVAL_MAX = 240
+/** 间隔默认值（分钟） */
+export const DIGEST_INTERVAL_DEFAULT = 30
+/**
+ * 界面下拉里的可选间隔（分钟）。只是**给界面用**的一组档位，
+ * 不是合法性判据 —— 真正落地的合法性判据在 digestIntervalMs() 的夹紧里，
+ * 所以用户导入一份手改的配置写了 7 分钟也能正常工作，不会变成"配置有值但不生效"。
+ */
+export const DIGEST_INTERVAL_CHOICES = [1, 3, 5, 10, 15, 30, 60, 120, 240]
+
+/**
+ * 一路通道「日常事件静默」的默认值（新建通道 / 载入内置配置都用它）。
+ * 默认**关闭**：没配过的通道行为与老版本完全一致。
+ *
+ * 与 defaultCamSilent() 一样放在文件顶部：makeCamera 在**模块初始化时**就要用它。
+ */
+export function defaultCamDigest() {
+  return {
+    enabled: false,
+    intervalMinutes: DIGEST_INTERVAL_DEFAULT,
+    channels: [...DEFAULT_CAM_DIGEST_CHANNELS]
+  }
+}
+
+/**
  * 内置隐藏配置的通道预置（真实名称 / 检测开关 / 摆放坐标）。
  * 仅在「配置方案 → 加载内置配置」输入密码后载入，不出现在初始默认值里。
  * 数组顺序 = 大屏里的默认排列顺序；
@@ -140,7 +175,12 @@ function makeCamera(preset) {
     /** 检测区域列表（区域进出 / 徘徊检测用），空 = 不启用区域规则 */
     zones: [],
     /** 通道静默（对某一路在指定时段静默指定渠道）；默认关，不配就不生效 */
-    silent: defaultCamSilent()
+    silent: defaultCamSilent(),
+    /**
+     * 日常事件静默（对某一路在**非静默时段**按固定间隔收存非关键事件，
+     * 每个间隔只推一条汇总）；默认关，不配就不生效。详见文件下方同名小节。
+     */
+    digest: defaultCamDigest()
   }
 }
 
@@ -803,6 +843,16 @@ export const HIDDEN_OPTIONS = {
        * 老配置缺这个字段时按四类全开。
        */
       events: { silence: true, summary: true, face: true, pending: true },
+      /**
+       * 静默时段也允许推送（缺省 / 显式 true = 允许）。
+       *
+       * 语义：**静默时段（全局免打扰 ∨ 该通道的通道静默）里，这道关键事件也照样
+       * 立即单独推**，而不是等静默结束的汇总。默认**开**、与老版本行为完全一致 ——
+       * 关键事件存在的理由本来就是"静默了也想第一时间知道"，所以这一条一直是硬编码
+       * 放行的；本开关把它变成**可关**：关掉后，静默时段内这一类关键事件不再单独推。
+       * ⚠️ 对 kind='silence'（静默开始提醒）而言，它就是"静默开始时要不要单独推一条"。
+       */
+      throughSilence: true,
       /* ---- @ 设置（同样全功能） ---- */
       atAll: false,
       /** 手机号，多个用英文逗号分隔 */
@@ -925,6 +975,11 @@ export const HIDDEN_OPTIONS = {
        * 老配置里没有这个字段时也能按默认的三类生效。
        */
       events: { silence: true, summary: true, face: true },
+      /**
+       * 静默时段也允许推送（缺省 / 显式 true = 允许）。语义与钉钉 / 企微
+       * critical.throughSilence **完全一致**（见那边的说明），缺省同样为开。
+       */
+      throughSilence: true,
       /** 额外接收人（Telegram 用户 id，纯数字） */
       chatIds: []
     }
@@ -1026,6 +1081,8 @@ export const HIDDEN_OPTIONS = {
       titlePrefix: '【监控报警】',
       /** 哪几类关键事件要单独推（缺省即开） */
       events: { silence: true, summary: true, face: true, pending: true },
+      /** 静默时段也允许推送（缺省/显式 true = 允许）。语义与钉钉 critical.throughSilence 一致 */
+      throughSilence: true,
       /* ---- @ 设置（同样全功能） ---- */
       atAll: false,
       /** 成员手机号，多个用英文逗号分隔 */
@@ -1270,7 +1327,8 @@ export function cloneDefaultCameras() {
     channels: { ...c.channels },
     aiExt: { ...c.aiExt },
     zones: (c.zones || []).map((z) => ({ ...z, rect: { ...z.rect } })),
-    silent: defaultCamSilent()
+    silent: defaultCamSilent(),
+    digest: defaultCamDigest()
   }))
 }
 
@@ -1663,9 +1721,123 @@ export function camSilentOverview(cameras, now = Date.now()) {
         /** 定时时段条数 */
         slotCount: parseSilentSlots(cfg).length,
         /** 定时静默的渠道（未生效时也能看到"配的是哪几端"） */
-        slotChannels: Array.isArray(cfg.channels) ? cfg.channels.slice() : []
+        slotChannels: Array.isArray(cfg.channels) ? cfg.channels.slice() : [],
+        /* ---- 日常事件静默（cam.digest）：按间隔汇总，与上面的时段静默并列 ---- */
+        digestEnabled: !!digestCfgOf(c).enabled,
+        digestMinutes: digestCfgOf(c).intervalMinutes,
+        digestChannels: digestCfgOf(c).channels
       }
     })
+}
+
+/* ==================== 通道级「日常事件静默」（按间隔汇总） ====================
+ * 对「指定的监控通道」，在**非静默时段**下按一个固定**间隔**收存**非关键事件**，
+ * 每个间隔结束只推一条汇总消息 —— 也就是"把零碎提醒摊平成定期播报"。
+ *
+ * 与另外两套静默的关系（三套互不替代，边界必须写清）：
+ *   · 全局静默（options.silent）   —— 按**时段**静默，覆盖全通道，结束发整体汇总；
+ *   · 通道静默（cam.silent）       —— 按**时段**静默，只覆盖这一路，结束发本路汇总；
+ *   · 日常事件静默（cam.digest）   —— 按**间隔**静默，只覆盖这一路，到点发本路汇总。
+ *
+ * 三条铁律：
+ *   1) **只在非静默时段工作**。此刻只要有任一静默窗口生效（全局的或这一路的），
+ *      日常静默就**让位**（不再吸收新事件）—— 否则同一条事件会同时进两个汇总。
+ *      已经收存进 digest 缓冲的那批**不丢**：窗口期间不发，窗口一结束立刻补发。
+ *   2) **关键事件不吸收**。判据是 `isFaceHit`（在库的人脸命中），与推送收窄 /
+ *      TG 直推 / `/hits` / 统计四处**共用同一份**。掉线 / 上线等系统事件根本不走
+ *      报警通道（走 sendDirect），天然不受影响。
+ *   3) **没有事件就不发**。与通道静默一致：为"这段时间什么都没发生"补一条通知，
+ *      等于把刚省下的打扰又还回去。
+ *
+ * 配置挂在每路通道上（cam.digest），与 cam.silent 同理随通道生灭 ——
+ * 另开一张 `_camDigest: { 'cam-1': … }` 就得自己维护增删改名，迟早留下僵尸配置。
+ */
+
+/**
+ * 归一化一路通道的日常静默配置（老存档补字段）。
+ * ⚠️ 与 normalizeCameraSilent 一样是**就地改**，只在载入 / 保存路径上调用，
+ * 别在渲染期调（渲染期读配置就改配置，会让响应式状态在渲染中突变）。
+ */
+export function normalizeCameraDigest(cam) {
+  if (!cam || typeof cam !== 'object') return cam
+  const d = cam.digest && typeof cam.digest === 'object' ? cam.digest : (cam.digest = {})
+  if (d.enabled === undefined) d.enabled = false
+  d.intervalMinutes = clampDigestMinutes(d.intervalMinutes)
+  if (!Array.isArray(d.channels)) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
+  return cam
+}
+
+/**
+ * 把间隔夹到 [DIGEST_INTERVAL_MIN, DIGEST_INTERVAL_MAX]。
+ *
+ * ⚠️「没配」与「配成 0」必须分开，不能都丢给 `Number()`：
+ *   · null / undefined / '' / [] / {} / true → 视为**没配**，落回默认 30；
+ *   · 数字 0（含 "0"、0.4）是**真的配了个数**，按规则夹到下限 1。
+ * 不分开的话，老存档里一个 `intervalMinutes: null` 会被 `Number(null)` 化成 0、
+ * 再夹成 1 —— 变成"每分钟一条汇总"，比默认激进得多，而且看起来完全合法、
+ * 不报任何错（这正是本项目反复踩过的那类"静默走错口径"）。
+ */
+export function clampDigestMinutes(v) {
+  if (v === null || v === undefined || typeof v === 'object' || typeof v === 'boolean') {
+    return DIGEST_INTERVAL_DEFAULT
+  }
+  if (typeof v === 'string' && !v.trim()) return DIGEST_INTERVAL_DEFAULT
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n)) return DIGEST_INTERVAL_DEFAULT
+  return Math.min(DIGEST_INTERVAL_MAX, Math.max(DIGEST_INTERVAL_MIN, n))
+}
+
+/** 间隔的展示文案（"30 分钟" / "2 小时"）。界面与汇总正文**共用这一份** */
+export function digestIntervalLabel(v) {
+  const n = clampDigestMinutes(v)
+  return n >= 60 && n % 60 === 0 ? `${n / 60} 小时` : `${n} 分钟`
+}
+
+/**
+ * 读这一路的日常静默配置（**只读、不 mutate**）。
+ * 渲染期取配置一律走它 —— 缺字段时返回兜底值而不是往 cam 上补字段。
+ */
+export function digestCfgOf(cam) {
+  const d = cam && cam.digest && typeof cam.digest === 'object' ? cam.digest : null
+  if (!d) {
+    return {
+      enabled: false,
+      intervalMinutes: DIGEST_INTERVAL_DEFAULT,
+      channels: [...DEFAULT_CAM_DIGEST_CHANNELS]
+    }
+  }
+  return {
+    enabled: d.enabled === true,
+    intervalMinutes: clampDigestMinutes(d.intervalMinutes),
+    channels: Array.isArray(d.channels) ? d.channels.slice() : [...DEFAULT_CAM_DIGEST_CHANNELS]
+  }
+}
+
+/** 这一路的日常静默间隔（毫秒） */
+export function digestIntervalMs(cfg) {
+  return clampDigestMinutes(cfg && cfg.intervalMinutes) * 60000
+}
+
+/**
+ * 这一路此刻是否在「日常事件静默」—— **全项目唯一判定**（引擎与展示层共用）。
+ *
+ * @param {object} cam   通道配置
+ * @param {object} opts  { silentActive } 此刻是否有静默窗口生效（全局免打扰 ∨ 这一路的通道静默）
+ * @returns {{active:boolean, intervalMs:number, intervalMinutes:number,
+ *            channels:string[], pausedBySilent:boolean}}
+ *   active        现在是否吸收非关键事件进日常缓冲
+ *   pausedBySilent 配了、间隔也在，只是被静默窗口挡住了（界面文案要能区分这两种"没生效"）
+ */
+export function camDigestState(cam, opts = {}) {
+  const cfg = digestCfgOf(cam)
+  const intervalMs = digestIntervalMs(cfg)
+  const base = { intervalMs, intervalMinutes: cfg.intervalMinutes, channels: cfg.channels }
+  if (!cfg.enabled || !cfg.channels.length) {
+    return { active: false, pausedBySilent: false, ...base }
+  }
+  // 让位于静默窗口：窗口期间不吸收新事件（已收存的那批由引擎在窗口结束后补发）
+  if (opts.silentActive) return { active: false, pausedBySilent: true, ...base }
+  return { active: true, pausedBySilent: false, ...base }
 }
 
 /** 新建摄像头时使用的默认地址模板 */

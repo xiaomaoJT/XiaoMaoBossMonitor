@@ -51,8 +51,12 @@ function normalizeUrl(url) {
 
 /**
  * 后端事件记录 → onAlarm 的 payload。
- * thumb / faceThumb 已是绝对 URL（服务端拼好的），前端 <img> 直接能显示；
+ * thumb / faceThumb / personThumb 已是绝对 URL（服务端拼好的），前端 <img> 直接能显示；
  * shot 留空（原图就在 thumb 指向的文件里，详情页复用 thumb）。
+ *
+ * ⚠️ thumb 是**事件原图**（事发那一帧）—— 后端只给这一个原图 URL，所以它不能是裁图。
+ * 两张裁图各有各的字段：faceThumb 人脸特写、personThumb 补拍到的完整人形。
+ * 后端 `/hits img`、`/collect img`、`/search img` 推的也是 thumb，同样依赖这条语义。
  *
  * 后端已经做完的附加分析（人脸是谁、什么动作、是否补过图）一并带过来，
  * 事件面板和详情页因此能显示得和本机检测一样完整。
@@ -77,6 +81,7 @@ export function backendEventToPayload(ev) {
     faceName: ev.faceName || '',
     faceScore: ev.faceScore || 0,
     faceThumb: ev.faceThumb || '',
+    personThumb: ev.personThumb || '',
     actionText: ev.actionText || '',
     personShot: !!ev.personShot,
     /** 后端那条记录的 key：两边用同一个 key，已读 / 推送状态才能对齐 */

@@ -462,9 +462,22 @@
                   <span class="dt-sub" v-if="detail.pushError">{{ detail.pushError }}</span>
                 </dd>
               </div>
-              <div class="dt-row v-sep" v-if="detail.personShotNote">
+              <div class="dt-row v-sep" v-if="detail.personShotNote || detail.personThumb">
                 <dt>完整人形补图</dt>
-                <dd>{{ detail.personShotNote }}</dd>
+                <dd>
+                  <!--
+                    补拍到的完整人形单独展示：它**不再替换事件原图**了
+                    （早期版本会把 shot/thumb 都换成这张，于是 /hits img 推的不是现场）。
+                    有图就显示图，没图时至少还有那一行备注。
+                  -->
+                  <img
+                    class="dt-person"
+                    v-if="detail.personThumb"
+                    :src="detail.personThumb"
+                    alt="完整人形补图"
+                  />
+                  <span v-if="detail.personShotNote">{{ detail.personShotNote }}</span>
+                </dd>
               </div>
               <div class="dt-row wide">
                 <dt>推送通道</dt>
@@ -1862,6 +1875,18 @@ header {
   border: 1px solid var(--line);
   object-fit: cover;
   display: block;
+}
+
+/* 补拍人形是竖向构图，比人脸特写宽一些；object-fit: cover 保证不拉变形 */
+.dt-person {
+  width: 120px;
+  height: 90px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  object-fit: cover;
+  display: block;
+  margin-bottom: 6px;
 }
 
 .dt-url {

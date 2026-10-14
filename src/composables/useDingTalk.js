@@ -28,7 +28,7 @@ import {
   normalizeEvents
 } from './useAlarmText.js'
 import { runtimeLine } from './useDeviceInfo.js'
-import { BRAND } from '../config/defaults.js'
+import { BRAND, digestIntervalLabel } from '../config/defaults.js'
 import { collectAlarmVars, renderTemplate, DEFAULT_DING_TEMPLATE } from './useMessageTemplate.js'
 
 const PROXY_PREFIX = '/dingtalk-robot'
@@ -412,12 +412,16 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
    * `range` 用于 /collect 这类「按绝对时段回查历史」—— 那时根本没有发生静默，
    * 标题里写「静默时段」会让人以为系统记错了，或者以为自己开过静默；
    * `cam` 用于「通道静默」—— 只静默了**一路**通道，标题里必须带上那是哪一路，
-   * 否则同时开了几路通道静默时，几条汇总长得一模一样，分不清是谁的。
+   * 否则同时开了几路通道静默时，几条汇总长得一模一样，分不清是谁的；
+   * `digest` 用于「日常事件静默」—— 它压根不是"某个时段被静默了"，而是
+   * **按间隔**把零碎事件摊平成定期播报。标题里写"静默时段"会让人以为配了免打扰，
+   * 所以单列一个变体，并在引言里点明间隔时长。
    * 只换标题与引言两处措辞，下面所有统计口径完全共用（这是刻意的：同一批事件
    * 不论从哪个入口看，数字与分区必须一致）。
    */
   const isRange = ctx.variant === 'range'
   const isCam = ctx.variant === 'cam'
+  const isDigest = ctx.variant === 'digest'
   /*
    * 展示层两个开关（只影响"怎么摆"，不影响任何统计口径 —— 数字与分区始终共用）：
    *   faceHitDetail   —— 人脸命中**逐条**列（时间·通道·是谁），默认按人聚合。
@@ -431,19 +435,31 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   const scopeSuffix = scopeName ? ` · ${scopeName}` : ''
   const titleName = isRange
     ? '监控事件汇总'
-    : isCam
-      ? `监控通道静默汇总${scopeSuffix}`
-      : '监控静默时段汇总'
+    : isDigest
+      ? `监控日常汇总${scopeSuffix}`
+      : isCam
+        ? `监控通道静默汇总${scopeSuffix}`
+        : '监控静默时段汇总'
   /*
    * 推送通知的标题沿用原来的短名（`【监控静默汇总】`），别顺手改成和正文标题一样 ——
    * 那会改变静默结束那条通知的文案，属于"顺手改坏既有行为"。
    */
-  const shortName = isRange ? '监控事件汇总' : isCam ? `通道静默汇总${scopeSuffix}` : '监控静默汇总'
+  const shortName = isRange
+    ? '监控事件汇总'
+    : isDigest
+      ? `日常汇总${scopeSuffix}`
+      : isCam
+        ? `通道静默汇总${scopeSuffix}`
+        : '监控静默汇总'
+  /** 日常汇总的间隔文案与执行层**共用一份**（defaults.digestIntervalLabel） */
+  const everyLabel = isDigest ? digestIntervalLabel(ctx.intervalMinutes) : ''
   const introText = isRange
     ? `该时段内共 **${total}** 条报警，已汇总于此。`
-    : isCam
-      ? `通道「${scopeName || '（未命名）'}」在静默时段内共 **${total}** 条报警，已汇总于此。`
-      : `静默时段内共 **${total}** 条报警，已统一汇总于此。`
+    : isDigest
+      ? `通道「${scopeName || '（未命名）'}」的日常事件按 **${everyLabel}** 汇总，本批共 **${total}** 条。`
+      : isCam
+        ? `通道「${scopeName || '（未命名）'}」在静默时段内共 **${total}** 条报警，已汇总于此。`
+        : `静默时段内共 **${total}** 条报警，已统一汇总于此。`
 
   const p2 = (n) => String(n).padStart(2, '0')
   const fmtClock = (ms) => {

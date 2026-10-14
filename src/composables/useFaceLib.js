@@ -20,7 +20,7 @@ import {
   faceThumb
 } from './useAiDetector.js'
 import { netErrorText, timeoutReason } from './useNet.js'
-import { looksSame } from './vecMatch.js'
+import { cosineOrRaw, looksSame } from './vecMatch.js'
 
 /** 默认比对阈值：余弦相似度高于它才认为是同一个人 */
 export const DEFAULT_FACE_THRESHOLD = 0.38
@@ -55,8 +55,40 @@ export const pendingLibOpen = ref(false)
 /** 简单互斥，避免并发写坏自增 id */
 let writeChain = Promise.resolve()
 
+/**
+ * 单次写操作的看门狗上限（毫秒）。
+ *
+ * ⚠️ 为什么需要它：这些操作是**串行排队**的（runExclusive），队头卡住 = 后面全卡住。
+ *    真实的卡法有两种，一种在 openDB（数据库被别的标签页阻塞，见那边说明），
+ *    另一种是**某一次 get/put 的请求永远不回**（浏览器实现异常 / 事务被挂起）——
+ *    这时 fn 的 Promise 永远不落地，writeChain 就永久堵死：
+ *    「点改名没反应、点删除没反应、录入也没反应」，且**一条错误都不报**。
+ *    对一个本地 IndexedDB 写操作来说，15 秒还没回来只可能是卡死了。
+ *
+ * 超时后**拒绝**这次操作（而不是一直等）：队列是 `writeChain.then(run, run)`，
+ * 拒绝也会让后面的操作照常跑 —— 于是一次卡死退化成"这一下失败并弹窗"，
+ * 而不是"整个人脸库从此不动"。真出错时用户至少看得见、能重试。
+ */
+const WRITE_TIMEOUT_MS = 15000
+
+function withWatchdog(fn) {
+  let timer = null
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`本地数据库写入超时（${WRITE_TIMEOUT_MS / 1000}s）：请关闭本应用的其它标签页后重试`)),
+      WRITE_TIMEOUT_MS
+    )
+    // Node（探针）里别为它吊住事件循环；浏览器返回数字，没有 unref
+    if (timer && typeof timer.unref === 'function') timer.unref()
+  })
+  return Promise.race([Promise.resolve().then(fn), guard]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 function runExclusive(fn) {
-  const next = writeChain.then(fn, fn)
+  const run = () => withWatchdog(fn)
+  const next = writeChain.then(run, run)
   writeChain = next.catch(() => {})
   return next
 }
@@ -83,6 +115,7 @@ export async function getAllFaces() {
 /** 刷新对外列表（去掉向量，避免 Vue 深度响应式把大数组变慢） */
 export async function refreshFaces() {
   const all = await getAllFaces()
+  rawRows = all
   faces.value = all.map((f) => ({
     id: f.id,
     name: f.name,
@@ -91,8 +124,26 @@ export async function refreshFaces() {
     updatedAt: f.updatedAt || 0,
     samples: f.samples || 1
   }))
+  faceRowsVersion.value += 1
   facesReady.value = true
   return faces.value
+}
+
+/**
+ * 完整记录（**含向量**）的非响应式暂存，只给「同一个人归类」用。
+ *
+ * ⚠️ 刻意**不进响应式**：向量是 512 个浮点 × 人数，塞进 ref 会被 Vue 逐层包代理，
+ *    白花性能（归类只需要读，不需要它响应式）。要响应式的只有"库变了"这个信号，
+ *    那就是下面的 faceRowsVersion。
+ */
+let rawRows = []
+
+/** 每次 refreshFaces 自增 —— 让外部（设置页）的归类 computed 知道该重算了 */
+export const faceRowsVersion = ref(0)
+
+/** 取上面那份完整记录的快照（含向量），调用方只读、别改 */
+export function rawFaceRows() {
+  return rawRows
 }
 
 /** 自动编号：人脸 1 / 人脸 2 ……（跳过已占用的序号） */
@@ -137,26 +188,179 @@ export function addFace(vector, thumb, name, max = DEFAULT_FACE_MAX) {
   })
 }
 
-/** 改名 */
-export function renameFace(id, name) {
+/**
+ * 改名（**一批**记录改成同一个名字）。
+ *
+ * 为什么要批量：人脸库现在按「人」显示 —— 同一人的多角度样本归到一张卡片上，
+ * 卡片上的「改名」当然是改**这个人**的名字，而不是改其中某一条。留一张对不上名字的
+ * 在库里，卡片分组会立刻散开（同名归类的判据就是名字），用户会觉得"改了没用"。
+ *
+ * 一条记录也走这里（renameFace 已并入），避免单条 / 批量两套实现漂移。
+ *
+ * @param {number[]} ids
+ * @param {string} name 空白视为放弃（不写库，返回 ok:false 让界面提示）
+ * @returns {Promise<{ok:boolean, name?:string, count?:number, reason?:string}>}
+ */
+export function renameFaces(ids, name) {
   return runExclusive(async () => {
-    const os = await store('readwrite')
-    const cur = await reqAsPromise(os.get(id))
-    if (!cur) return { ok: false, reason: '该人脸不存在' }
-    cur.name = String(name || '').trim() || cur.name
-    cur.updatedAt = Date.now()
-    await reqAsPromise(os.put(cur))
+    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
+    const finalName = String(name == null ? '' : name).trim()
+    if (!list.length) return { ok: false, reason: '没有要改名的记录' }
+    if (!finalName) return { ok: false, reason: '名字不能为空' }
+    const db = await openDB()
+    await new Promise((resolve, reject) => {
+      // 同一事务里改完：要么全改要么全不改（否则会出现"同一个人一半新名字一半旧名字"）
+      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+      const os = tx.objectStore(FACE_STORE_NAME)
+      const now = Date.now()
+      let hit = 0
+      list.forEach((id) => {
+        const g = os.get(id)
+        g.onsuccess = () => {
+          const cur = g.result
+          if (!cur) return
+          hit += 1
+          cur.name = finalName
+          cur.updatedAt = now
+          os.put(cur)
+        }
+      })
+      tx.oncomplete = () => resolve(hit)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('改名事务被中止'))
+    })
     await refreshFaces()
-    return { ok: true, name: cur.name }
+    return { ok: true, name: finalName, count: list.length }
+  })
+}
+
+/** 改名（单条）—— 与 renameFaces 同一实现，只是包一层，别再写第二套 */
+export function renameFace(id, name) {
+  return renameFaces([id], name)
+}
+
+/**
+ * 删除（**一批**记录）。
+ * 一张卡片 = 一个人（可能含多个角度样本），卡片上的「删除」就是删这个人，
+ * 所以必须支持批量；单条删除（样本人脸墙里删一张）也走这里。
+ */
+export function deleteFaces(ids) {
+  return runExclusive(async () => {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
+    if (!list.length) return { ok: false, reason: '没有要删除的记录' }
+    const db = await openDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+      const os = tx.objectStore(FACE_STORE_NAME)
+      list.forEach((id) => os.delete(id))
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('删除事务被中止'))
+    })
+    await refreshFaces()
+    return { ok: true, count: list.length }
   })
 }
 
 export function deleteFace(id) {
+  return deleteFaces([id])
+}
+
+/**
+ * 把多条记录的特征按**样本数加权**平均，再重新归一化。
+ *
+ * 纯函数（不碰 IndexedDB），所以"合并出来的特征对不对"能被穷举测试 ——
+ * 合并是这个功能里唯一会**改变识别结果**的动作，算错了表现为"合并之后谁都认不出来"，
+ * 而且不报错，只能靠测试守住。
+ *
+ * 为什么按样本数加权而不是简单平均：`samples` 记录这条特征是由几次抓取平均出来的，
+ * 样本多的那条本来就更稳，不该和刚录的一条等权。
+ * 为什么必须重新归一化：归一化向量加权平均后长度 < 1，而"余弦相似度 = 点积"
+ * 这个前提依赖单位长度（见 vecMatch.js），不归一化会让相似度整体偏小、识别变差。
+ *
+ * @param {Array<{vector:number[], samples?:number}>} recs
+ * @returns {{vector:number[], weight:number}|null} 没有可用向量时返回 null
+ */
+export function averageVectors(recs) {
+  const list = (Array.isArray(recs) ? recs : []).filter((r) => r && Array.isArray(r.vector) && r.vector.length)
+  if (!list.length) return null
+  // 维度以第一条为准：混进维度不同的老数据时跳过它，而不是产出 NaN 向量
+  const dim = list[0].vector.length
+  const sum = new Float64Array(dim)
+  let weight = 0
+  for (const r of list) {
+    if (r.vector.length !== dim) continue
+    const w = Math.max(1, Number(r.samples) || 1)
+    for (let i = 0; i < dim; i++) sum[i] += (Number(r.vector[i]) || 0) * w
+    weight += w
+  }
+  if (!weight) return null
+  let norm = 0
+  for (let i = 0; i < dim; i++) norm += sum[i] * sum[i]
+  norm = Math.sqrt(norm) || 1
+  const vector = new Array(dim)
+  for (let i = 0; i < dim; i++) vector[i] = sum[i] / norm
+  return { vector, weight }
+}
+
+/**
+ * 把同一个人的多条记录**合并成一条**（收纳）。
+ *
+ * 做法：把参与合并的各条向量按样本数加权平均（averageVectors），
+ * 写回 `keepId` 那条，其余删掉 —— 与 mergeFace（增量平均）语义一致，
+ * 只是这里一次算完，不会出现"合并到一半"的中间态。
+ *
+ * 为什么值得做：同一人拆成多条时，每条只覆盖一个角度，识别时容易漏
+ * （某个角度谁都对不上）；合并后特征覆盖更全、也更省人脸库名额。
+ *
+ * @param {number[]} ids 参与合并的全部记录 id（含 keepId）
+ * @param {number} [keepId] 保留哪一条（不传就用第一条）
+ * @returns {Promise<{ok:boolean, id?:number, samples?:number, count?:number, reason?:string}>}
+ */
+export function mergeFaces(ids, keepId) {
   return runExclusive(async () => {
-    const os = await store('readwrite')
-    await reqAsPromise(os.delete(id))
+    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
+    if (list.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
+    const db = await openDB()
+    const recs = await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_STORE_NAME, 'readonly')
+      const os = tx.objectStore(FACE_STORE_NAME)
+      const out = []
+      list.forEach((id) => {
+        const g = os.get(id)
+        g.onsuccess = () => {
+          if (g.result) out.push(g.result)
+        }
+      })
+      tx.oncomplete = () => resolve(out)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('读取人脸记录被中止'))
+    })
+    if (recs.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
+    const keep = recs.find((r) => r.id === keepId) || recs[0]
+    const avg = averageVectors(recs)
+    if (!avg) return { ok: false, reason: '这些记录都没有可用的特征向量' }
+
+    const now = Date.now()
+    keep.vector = avg.vector
+    keep.samples = avg.weight
+    keep.updatedAt = now
+    // 创建时间取最早那条：卡片排序沿用"这个人第一次出现的时间"，合并后不会乱跳
+    keep.createdAt = Math.min(...recs.map((r) => Number(r.createdAt) || now))
+    // 缩略图沿用保留那条（不另造）：它是这人最早录入的那张，风格与其它卡片一致
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+      const os = tx.objectStore(FACE_STORE_NAME)
+      os.put(keep)
+      recs.forEach((r) => {
+        if (r.id !== keep.id) os.delete(r.id)
+      })
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('合并事务被中止'))
+    })
     await refreshFaces()
-    return { ok: true }
+    return { ok: true, id: keep.id, samples: avg.weight, count: recs.length }
   })
 }
 
@@ -294,6 +498,130 @@ export async function matchFace(vector, threshold = DEFAULT_FACE_THRESHOLD) {
   }
   if (!best) return null
   return best.score >= threshold ? best : { face: best.face, score: best.score, miss: true }
+}
+
+/* ==================== 同一个人：把多角度样本归类成一「人」 ====================
+ *
+ * 用户在设置页看到的问题是：同一个人被拍了好几次（正面 / 侧面 / 低头），
+ * 每一次都占一张卡片、还各自顶着「人脸 7」「人脸 12」这种自动编号 ——
+ * 库里看着像十几个人，而**推送里也会按命中的那一条各叫各的名字**。
+ *
+ * 归类的意义不只是"看起来整齐"，而是让同一个人**只有一个名字**：
+ * 只要归到一张卡片上，卡片上的改名就会应用到该人的全部样本，
+ * 于是无论哪个角度被拍到、命中哪一条记录，推送里都是同一个名字。
+ *
+ * 判据两条，都不另立一套：
+ *   ① 名字相同 → 同一个人。名字是用户自己起的，这是**确定**的判据。
+ *   ② 相似度 ≥ 识别阈值 → 同一个人。用的就是设置页那个「识别阈值」旋钮
+ *      （`options.face.matchThreshold`，默认 0.38）——「系统认为这是同一个人」
+ *      在识别与归类两处必须是同一份判定，否则会出现"推送说认出来了、
+ *      库里却分成两个人"这种自相矛盾。
+ *
+ * 刻意**不改数据**：归类只影响显示。要不要把它们真的合成一条（合并特征）
+ * 由用户在卡片上点「合并为一条」决定 —— 相似度是概率，不该由界面替用户落锤。
+ */
+
+/** 归类默认阈值 = 识别默认阈值（同一份常量；实际使用时会传设置页那个值进来） */
+export const FACE_GROUP_THRESHOLD = DEFAULT_FACE_THRESHOLD
+
+/**
+ * 把一份人脸记录归成「人」。
+ *
+ * 纯函数（不碰 IndexedDB / Vue），所以能被穷举测试。并查集合并，
+ * 记录数上限本来就是 50，两两比一遍（≤1225 次 512 维点积）可忽略。
+ *
+ * @param {Array<{id:number,name:string,thumb?:string,createdAt?:number,updatedAt?:number,samples?:number,vector:number[]}>} rows
+ * @param {{threshold?:number, bySimilarity?:boolean}} [opts]
+ *        threshold：相似度判据；bySimilarity=false 时只按同名的**确定**判据归类
+ * @returns {Array<{
+ *   key:string, id:number, name:string, thumb:string, createdAt:number,
+ *   count:number, sameName:boolean, names:string[], score:number,
+ *   items:Array<{id:number,name:string,thumb:string,createdAt:number,samples:number,sim:number}>
+ * }>}
+ *   score：组内**最弱一环**的两两相似度（同名组恒为 1）。
+ *          为什么要最弱一环而不是平均：并查集是链式合并的（A~B、B~C 都过阈值，
+ *          但 A~C 可能没过），报平均值会把最松的那一环藏起来 —— 用户看着
+ *          "平均 0.45 挺像"却不知道里面有一条只有 0.31。
+ */
+export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarity = true } = {}) {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && r.id != null)
+  const n = list.length
+  const nameOf = (r) => String((r && r.name) || '').trim()
+  const parent = new Array(n)
+  for (let i = 0; i < n; i++) parent[i] = i
+  const find = (x) => {
+    let r = x
+    while (parent[r] !== r) {
+      parent[r] = parent[parent[r]]
+      r = parent[r]
+    }
+    return r
+  }
+  const union = (a, b) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb)
+  }
+
+  for (let i = 0; i < n; i++) {
+    const ni = nameOf(list[i])
+    for (let j = i + 1; j < n; j++) {
+      if (ni && ni === nameOf(list[j])) {
+        union(i, j)
+        continue
+      }
+      if (!bySimilarity) continue
+      if (cosineOrRaw(list[i].vector, list[j].vector) >= threshold) union(i, j)
+    }
+  }
+
+  const buckets = new Map()
+  for (let i = 0; i < n; i++) {
+    const root = find(i)
+    if (!buckets.has(root)) buckets.set(root, [])
+    buckets.get(root).push(i)
+  }
+
+  const groups = []
+  for (const idxs of buckets.values()) {
+    const recs = idxs.map((i) => list[i])
+    // 代表样本 = 最早录入的那条（getAllFaces 本来就按 createdAt 升序）
+    const rep = recs[0]
+    const names = [...new Set(recs.map(nameOf))]
+    const sameName = names.length === 1
+    let score = 1
+    if (!sameName) {
+      // 最弱一环：组内任意两条之间的最小相似度
+      for (let a = 0; a < recs.length; a++) {
+        for (let b = a + 1; b < recs.length; b++) {
+          const s = cosineOrRaw(recs[a].vector, recs[b].vector)
+          if (s < score) score = s
+        }
+      }
+    }
+    groups.push({
+      key: `g${rep.id}`,
+      id: rep.id,
+      name: rep.name,
+      thumb: rep.thumb || '',
+      createdAt: rep.createdAt || 0,
+      count: recs.length,
+      sameName,
+      names,
+      score,
+      items: recs.map((it) => ({
+        id: it.id,
+        name: it.name,
+        thumb: it.thumb || '',
+        createdAt: it.createdAt || 0,
+        samples: it.samples || 1,
+        sim: it === rep ? 1 : cosineOrRaw(it.vector, rep.vector)
+      }))
+    })
+  }
+  // 按"这个人第一次出现的时间"排，顺序稳定（与录入顺序一致）
+  groups.sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
+  return groups
 }
 
 /* ==================== 待录入人脸（采集暂存） ==================== */
@@ -437,15 +765,29 @@ export async function loadBackendPendingFaces(url) {
   }
 }
 
-/** 从后端队列里删掉一条（录入或忽略之后调用，否则刷新又冒出来） */
+/**
+ * 从后端队列里删掉一条（录入或忽略之后调用，否则刷新又冒出来）。
+ *
+ * ⚠️ 必须带超时：调用方（设置页 doAddPending）是 `await` 它的，
+ *    而后端地址可能是**打不通又不回 RST** 的那种（拔网线 / IP 变了 / 防火墙丢包），
+ *    这时 `fetch` 会一直挂着（TCP 连接超时前不会有任何返回）——
+ *    界面上就是那张卡片永远停在「录入中」，点别的也没反应。删不掉本来只影响
+ *    "下次刷新它又出现"，不值得拿界面的响应性去换，所以到点就放行。
+ */
 export async function dropBackendPendingFace(url, backendId) {
   const base = String(url || '').replace(/\/+$/, '')
   backendPendingFaces.value = backendPendingFaces.value.filter((f) => f.backendId !== Number(backendId))
   if (!base) return
   try {
-    await fetch(`${base}/api/pending-face?id=${encodeURIComponent(backendId)}`)
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(timeoutReason('删除待录入', 6000)), 6000)
+    try {
+      await fetch(`${base}/api/pending-face?id=${encodeURIComponent(backendId)}`, { signal: ctrl.signal })
+    } finally {
+      clearTimeout(t)
+    }
   } catch (e) {
-    /* 删不掉也只是下次又出现，不影响已录入的人脸 */
+    /* 删不掉也只是下次又出现，不影响已录入的人脸；更不该拖住界面 */
   }
 }
 

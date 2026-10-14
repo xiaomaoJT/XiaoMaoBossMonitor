@@ -248,6 +248,7 @@ import {
   cloneDefaultOptions,
   migrateSecretFields,
   normalizeCameraChannels,
+  normalizeCameraDigest,
   normalizeCameraSilent,
   syncChannelCameras
 } from './config/defaults'
@@ -391,13 +392,15 @@ const saved = loadSaved()
 const cameras = ref(
   saved
     ? saved.cameras.map((c) =>
-        normalizeCameraSilent(
-          normalizeCameraChannels({
-            ...c,
-            channels: c.channels ? { ...c.channels } : undefined,
-            roi: c.roi ? { ...c.roi } : null,
-            rect: c.rect ? { ...c.rect } : null
-          })
+        normalizeCameraDigest(
+          normalizeCameraSilent(
+            normalizeCameraChannels({
+              ...c,
+              channels: c.channels ? { ...c.channels } : undefined,
+              roi: c.roi ? { ...c.roi } : null,
+              rect: c.rect ? { ...c.rect } : null
+            })
+          )
         )
       )
     : cloneDefaultCameras()
@@ -1426,13 +1429,15 @@ async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
   try {
     // 通道：与载入存档时走同一条归一化链路（少了它，老字段形态会让画面出不来）
     cameras.value = (Array.isArray(data.cameras) ? data.cameras : []).map((c) =>
-      normalizeCameraSilent(
-        normalizeCameraChannels({
-          ...c,
-          channels: c.channels ? { ...c.channels } : undefined,
-          roi: c.roi ? { ...c.roi } : null,
-          rect: c.rect ? { ...c.rect } : null
-        })
+      normalizeCameraDigest(
+        normalizeCameraSilent(
+          normalizeCameraChannels({
+            ...c,
+            channels: c.channels ? { ...c.channels } : undefined,
+            roi: c.roi ? { ...c.roi } : null,
+            rect: c.rect ? { ...c.rect } : null
+          })
+        )
       )
     )
 
@@ -2420,8 +2425,16 @@ function onAlarm(payload) {
  *
  * 时序：报警（文字/首帧图）已经发出去了 → 这里再补一张人形完整的原图。
  * 做两件事：
- *   1. 把这条事件的截图换成这张（详情弹窗 / 放大 / 导出用的就是它）；
+ *   1. 把补拍图记进事件的 **personThumb**（详情弹窗「完整人形补图」那一行展示）；
  *   2. 按同样的渠道补推一条图片消息，并把结果写进事件的备注。
+ *
+ * ⚠️ **不再覆盖事件的截图**（早期版本把 shot / thumb 都换成这张补拍图）。
+ * 事件截图现在恒为「事发那一帧」原图，理由有两条：
+ *   · 后端那条链路里的 thumb 就是对外唯一的原图（/hits img 等指令推的就是它），
+ *     两种运行模式必须同语义，否则同一个字段在两个模式下指的不是同一样东西；
+ *   · 补拍图是一张**裁出来的人形**，拿它冒充原图会让事件详情和导出都失去现场信息。
+ * 代价是补拍的大图不再留档（它当时已经作为一条消息推到各渠道了），
+ * 这里只留 pushExtraShot 一起给过来的 360px 小图，够详情行展示。
  */
 async function onAlarmShot(payload) {
   if (!payload || !payload.shot) return
@@ -2435,14 +2448,14 @@ async function onAlarmShot(payload) {
   const hit = near[0]
   if (!hit) return
 
-  // 1) 换掉事件里的截图（存库 + 内存里的缩略图）
-  const thumb = payload.thumb || hit.thumb || ''
+  // 1) 记下补拍图（事件截图保持原样）
+  const personThumb = payload.thumb || ''
   const meta = payload.meta || null
   events.value = events.value.map((e) =>
     e.key === hit.key
       ? {
           ...e,
-          thumb,
+          personThumb: personThumb || e.personThumb || '',
           personShot: true,
           faceName: (meta && meta.faceName) || e.faceName || '',
           faceThumb: (meta && meta.faceThumb) || e.faceThumb || '',
@@ -2450,10 +2463,9 @@ async function onAlarmShot(payload) {
         }
       : e
   )
-  notifies.value = notifies.value.map((n) =>
-    n.id === payload.id && Math.abs((n.time || 0) - (payload.at || 0)) < 15000 ? { ...n, thumb } : n
-  )
-  const patch = { shot: payload.shot, thumb, shotInStore: true, personShot: true }
+  // 右上角通知卡片一律保持原图缩略图，不跟着换成补拍图
+  const patch = { personShot: true }
+  if (personThumb) patch.personThumb = personThumb
   if (meta) {
     if (meta.faceName) {
       patch.faceName = meta.faceName
@@ -2472,7 +2484,7 @@ async function onAlarmShot(payload) {
   if (cam.push === false) return
   let note = ''
   try {
-    const res = await push.pushExtraShot({ ...hit, thumb }, payload.shot, meta)
+    const res = await push.pushExtraShot({ ...hit, personThumb }, payload.shot, meta)
     note = res.ok
       ? `完整人形补图：已发送（${res.sent.join(' + ')}）`
       : `完整人形补图：未送达（${res.reason}）`
@@ -2919,7 +2931,7 @@ async function toggleAppFullscreen() {
 
 /* ==================== 设置保存 ==================== */
 function applyConfig({ cameras: cams, options: opts, hiddenIds: hidden }) {
-  cameras.value = cams.map((c) => normalizeCameraSilent(normalizeCameraChannels({ ...c })))
+  cameras.value = cams.map((c) => normalizeCameraDigest(normalizeCameraSilent(normalizeCameraChannels({ ...c }))))
   Object.assign(options, opts)
   // 渠道级监听名单始终跟着通道级推送开关走（用户可能只改了「监控通道」那页）
   syncChannelCameras(cameras.value, options)
