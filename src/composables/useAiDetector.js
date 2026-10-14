@@ -555,6 +555,61 @@ export function cropBox(source, box, outSize = 320, padRatio = 0.12) {
   }
 }
 
+/* ==================== 待录入：捕获整帧原图 ==================== */
+
+/**
+ * 把**整帧画面**等比缩放到目标宽度，并在人脸框处画一圈边框，返回 dataURL。
+ * 给「待录入」卡片做「点缩略图看原图」用 —— 用户想看这张脸是在什么画面里被抓到的。
+ *
+ * ⚠️ 前后端共用：后端靠 imageops 的 canvas shim 跑同一份代码。
+ *   - 输出 canvas 走 `document.createElement('canvas')`（shim 已装）；
+ *   - 边框用 **4 条 fillRect** 而不是 strokeRect —— shim 没实现 strokeRect；
+ *   - 源 `source` 在前端是 HTMLCanvasElement、在后端是 CanvasShim（带 _bitmap），
+ *     drawImage 两种都能认。
+ *
+ * @param {object} source 带 width/height 且可 drawImage 的画布（整帧）
+ * @param {object} [box] 人脸框（归一化 x/y/w/h）；不传则不画边框
+ * @param {{maxW?:number, quality?:number, boxColor?:string}} [opts]
+ * @returns {string} dataURL（失败返回 ''）
+ */
+export function frameShotWithFace(source, box, opts = {}) {
+  if (!source) return ''
+  const maxW = Number(opts.maxW) || 800
+  const quality = Math.max(0.1, Math.min(1, Number(opts.quality) || 0.6))
+  const boxColor = opts.boxColor || '#16c2ff'
+  const sw = source.naturalWidth || source.width || 0
+  const sh = source.naturalHeight || source.height || 0
+  if (!sw || !sh) return ''
+  const dw = Math.max(1, Math.min(maxW, sw))
+  const dh = Math.max(1, Math.round((sh * dw) / sw))
+  const c = document.createElement('canvas')
+  c.width = dw
+  c.height = dh
+  const ctx = c.getContext('2d')
+  if (!ctx) return ''
+  try {
+    ctx.drawImage(source, 0, 0, sw, sh, 0, 0, dw, dh)
+    const b = box || {}
+    if (b.w > 0 || b.h > 0) {
+      const x = Math.max(0, b.x * dw)
+      const y = Math.max(0, b.y * dh)
+      const w = Math.min(dw - x, (b.w || 0) * dw)
+      const h = Math.min(dh - y, (b.h || 0) * dh)
+      if (w > 1 && h > 1) {
+        const lw = Math.max(1, Math.round(dw * 0.004))
+        ctx.fillStyle = boxColor
+        ctx.fillRect(x, y, w, lw) // 上
+        ctx.fillRect(x, y + h - lw, w, lw) // 下
+        ctx.fillRect(x, y, lw, h) // 左
+        ctx.fillRect(x + w - lw, y, lw, h) // 右
+      }
+    }
+    return c.toDataURL('image/jpeg', quality)
+  } catch (e) {
+    return ''
+  }
+}
+
 /* ==================== 人脸：头部区域裁剪放大再检测 ==================== */
 
 /**

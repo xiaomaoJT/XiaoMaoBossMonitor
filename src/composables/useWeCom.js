@@ -271,7 +271,12 @@ export async function sendWeCom(cfg, msg) {
 
   const body = { msgtype: msg.msgType || 'markdown' }
   if (body.msgtype === 'text') {
-    body.text = { content: msg.content || '' }
+    /*
+     * text 模式不支持任何标签（markdown 标签、HTML 标签都原样显示）。
+     * 关键事件推送在需要 @ 人时会被迫切到 text，正文往往来自 Telegram 的 HTML
+     * 或 markdown 模板，这里兜底剥一次标签，保证群里看到的是干净纯文本。
+     */
+    body.text = { content: String(msg.content || '').replace(/<[^>]+>/g, '') }
     const mobiles = Array.isArray(msg.atMobiles)
       ? msg.atMobiles
       : String(msg.atMobiles || '')

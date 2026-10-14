@@ -320,7 +320,7 @@ export const PENDING_MAX = 24
  *                         缺省回落到 PENDING_MAX，与升级前一致）
  * @returns {{added:boolean, id?:number}}
  */
-export function pushPendingFace({ vector, thumb, at, camId, camName, max }) {
+export function pushPendingFace({ vector, thumb, full, at, camId, camName, max }) {
   if (!vector || !vector.length || !thumb) return { added: false }
   const list = pendingFaces.value
   // 和已有暂存项太像就只刷新时间，不再重复堆一张
@@ -329,6 +329,8 @@ export function pushPendingFace({ vector, thumb, at, camId, camName, max }) {
       it.at = at || Date.now()
       it.camName = camName || it.camName
       it.hits = (it.hits || 1) + 1
+      // 同一张脸刷新时间，但「后来抓到的这帧」往往更清晰/更完整，顺手更新原图
+      if (full) it.full = full
       return { added: false, id: it.id }
     }
   }
@@ -337,6 +339,7 @@ export function pushPendingFace({ vector, thumb, at, camId, camName, max }) {
     id,
     vector: Float32Array.from(vector),
     thumb,
+    full: full || '',
     at: at || Date.now(),
     camId: camId || '',
     camName: camName || '',
@@ -389,6 +392,7 @@ function normBackendPending(base, list) {
       backendId: Number(f.id),
       vector: f.vector, // 后端返回的就是普通数组，addFace 直接收
       thumb: f.thumb || '',
+      full: f.full || '', // 后端抓到人脸时一并存的整帧原图（点缩略图看大图用）
       at: Number(f.at) || Date.now(),
       camId: f.camId || '',
       camName: f.camName || '',

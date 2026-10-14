@@ -1605,14 +1605,21 @@
                 <em>点「录入」建档并自动编号，之后可以在人脸库里改名</em>
               </span>
 
-              <div class="face-grid" ref="pendingGridEl" v-if="pendingLibOpen && allPendingFaces.length">
+                <div class="face-grid" ref="pendingGridEl" v-if="pendingLibOpen && allPendingFaces.length">
                 <div class="face-card pending" v-for="pf in pagedPending" :key="pf.id">
-                  <img :src="pf.thumb" alt="待录入人脸" />
+                  <img
+                    :src="pf.thumb"
+                    alt="待录入人脸"
+                    class="pending-thumb"
+                    :class="{ clickable: pf.full }"
+                    :title="pf.full ? '点击查看捕获时的原图' : ''"
+                    @click="pf.full && openPendingShot(pf)"
+                  />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
                   <div class="face-acts">
                     <button class="mini-btn" :disabled="enrollingPending[pf.id]" @click="doAddPending(pf)">
-                      {{ enrollingPending[pf.id] ? '录入中…' : '录入' }}
+                      {{ enrollingPending[pf.id] ? '录入中' : '录入' }}
                     </button>
                     <button class="mini-btn ghost" :disabled="enrollingPending[pf.id]" @click="doIgnorePending(pf)">忽略</button>
                   </div>
@@ -3503,6 +3510,20 @@
         <input ref="fileEl" type="file" accept="application/json,.json" hidden @change="importConfig" />
       </footer>
     </aside>
+
+    <!-- 待录入：点缩略图看捕获时的整帧原图（灯箱） -->
+    <transition name="lb-fade">
+      <div class="pending-shot-mask" v-if="pendingShot" @click.self="closePendingShot">
+        <div class="pending-shot-box">
+          <button class="pending-shot-close" @click="closePendingShot" title="关闭（Esc）">×</button>
+          <img class="pending-shot-img" :src="pendingShot.full || pendingShot.thumb" alt="捕获时的原图" />
+          <div class="pending-shot-cap">
+            <span>{{ pendingShot.camName || '未知通道' }}</span>
+            <span v-if="pendingShot.at"> · {{ fmtPendingAt(pendingShot.at) }}</span>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
@@ -3563,6 +3584,7 @@ import {
   normalizeWeComWebhook,
   sendWeCom
 } from '../composables/useWeCom'
+import { parseMobiles } from '../composables/useAlertPush'
 import { estimateUsage, formatBytes } from '../composables/useEventStore'
 import { EVENT_DEFAULTS, EVENT_GROUPS } from '../composables/useAlarmText'
 import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
@@ -4867,6 +4889,25 @@ const faceRenameText = ref('')
  *  按 id 记录而不是全局一个开关：一张在录不影响其它卡片继续点。 */
 const enrollingPending = reactive({})
 
+/* ---------- 待录入：点击缩略图看捕获时的整帧原图 ----------
+ * 缩略图只是人脸裁剪，看不出"这人是在什么画面里被抓到的"。
+ * 点缩略图打开一个轻量灯箱，显示 capture 时存的整帧（pf.full），
+ * 没存到整帧（老数据 / 极早期）就退回缩略图。 */
+const pendingShot = ref(null) // 当前查看的待录入对象（null = 灯箱关）
+function openPendingShot(pf) {
+  if (!pf || !pf.full) return
+  pendingShot.value = pf
+}
+function closePendingShot() {
+  pendingShot.value = null
+}
+function onPendingShotKey(e) {
+  if (e && e.key === 'Escape') closePendingShot()
+}
+// 灯箱靠窗口级 Esc 关闭（div 上 @keydown 没焦点不会触发）
+onMounted(() => window.addEventListener('keydown', onPendingShotKey))
+onUnmounted(() => window.removeEventListener('keydown', onPendingShotKey))
+
 async function doAddPending(pf) {
   // 已经在录这张了：连点直接拦掉（addFace 是 runExclusive，再点会排队，
   // 等上一张建完再建一张 → 自动编号出「人物2」，纯属重复建档）。
@@ -5542,12 +5583,24 @@ async function testPush() {
       kbps: 2860
     }
     const msg = buildAlarmMessage(sample, { ...dt.value, titlePrefix: `【测试】${dt.value.titlePrefix || ''}` }, '')
+    // 钉钉 @指定人：必须把 @手机号 字面写进正文，机器人才能真正通知到人
+    const atMobiles = parseMobiles(dt.value.atMobiles)
+    const atAll = !!dt.value.atAll
+    let body = msg
+    if (atMobiles.length) {
+      const tokens = atMobiles.map((m) => `@${m}`).join(' ')
+      body = { ...msg, text: `${msg.text || ''}\n${tokens}` }
+    }
     await sendDingTalk(
       { webhook: dt.value.webhook, secret: dt.value.secret, useProxy: dt.value.useProxy },
-      { ...msg, msgType: dt.value.msgType, atAll: false, atMobiles: [] }
+      { ...body, msgType: dt.value.msgType, atAll, atMobiles }
     )
     testState.kind = 'ok'
-    testState.text = '发送成功，请查看钉钉群'
+    testState.text = atAll
+      ? '发送成功（已@所有人），请查看钉钉群'
+      : atMobiles.length
+        ? `发送成功（已@ ${atMobiles.length} 个手机号），请查看钉钉群`
+        : '发送成功，请查看钉钉群'
   } catch (e) {
     testState.kind = 'fail'
     testState.text = (e && e.message) || '发送失败'
@@ -5564,21 +5617,24 @@ async function testDingCritical() {
     const c = (dt.value && dt.value.critical) || {}
     if (!String(c.webhook || '').trim()) throw new Error('还没有填写关键事件机器人的 Webhook')
     const msgType = c.msgType || 'markdown'
+    // 钉钉 @指定人：必须把 @手机号 字面写进正文，机器人才能真正通知到人
+    const atMobiles = parseMobiles(c.atMobiles)
+    const atAll = !!c.atAll
+    let bodyText =
+      msgType === 'text'
+        ? `【测试】关键事件独立机器人连通性测试：配置正常，关键事件会推送到本群。`
+        : `**【测试】关键事件独立机器人**\n> 配置正常，关键事件（静默 / 人脸命中 / 满库）会推送到本群。`
+    if (atMobiles.length) bodyText = `${bodyText}\n${atMobiles.map((m) => `@${m}`).join(' ')}`
     await sendDingTalk(
       { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy !== false, proxyBase: c.proxyBase || '' },
-      {
-        title: `【测试】${c.titlePrefix || ''}`,
-        text:
-          msgType === 'text'
-            ? `【测试】关键事件独立机器人连通性测试：配置正常，关键事件会推送到本群。`
-            : `**【测试】关键事件独立机器人**\n> 配置正常，关键事件（静默 / 人脸命中 / 满库）会推送到本群。`,
-        msgType,
-        atAll: false,
-        atMobiles: []
-      }
+      { title: `【测试】${c.titlePrefix || ''}`, text: bodyText, msgType, atAll, atMobiles }
     )
     dtCritState.kind = 'ok'
-    dtCritState.text = '发送成功，请查看关键事件所在的那个钉钉群'
+    dtCritState.text = atAll
+      ? '发送成功（已@所有人），请到关键事件所在的那个钉钉群确认'
+      : atMobiles.length
+        ? `发送成功（已@ ${atMobiles.length} 个手机号），请到关键事件所在的那个钉钉群确认`
+        : '发送成功，请查看关键事件所在的那个钉钉群'
   } catch (e) {
     dtCritState.kind = 'fail'
     dtCritState.text = (e && e.message) || '发送失败'
@@ -5653,17 +5709,26 @@ async function testWecom() {
   wcState.kind = 'loading'
   wcState.text = '正在发送测试消息…'
   try {
+    // 企业微信 markdown 不支持 @：配置了 @ 时自动改用 text 消息，保证测试真的能 @ 到人
+    const atMobiles = parseMobiles(wc.value.atMobiles)
+    const atAll = !!wc.value.atAll
+    const needAt = atAll || atMobiles.length > 0
+    const msgType = needAt ? 'text' : (wc.value.msgType || 'markdown')
+    const mdContent = '**【监控报警】企业微信推送连通性测试**\n> 配置正常，报警事件会推送到本群。'
+    const textContent = '【监控报警】企业微信推送连通性测试：配置正常，报警事件会推送到本群。'
+    const content = needAt ? textContent : mdContent
     await sendWeCom(wc.value, {
-      msgType: wc.value.msgType || 'markdown',
-      content:
-        wc.value.msgType === 'text'
-          ? '【监控报警】企业微信推送连通性测试：配置正常，报警事件会推送到本群。'
-          : '**【监控报警】企业微信推送连通性测试**\n> 配置正常，报警事件会推送到本群。',
-      atAll: false,
-      atMobiles: []
+      msgType,
+      content,
+      atAll: needAt ? atAll : false,
+      atMobiles: needAt ? atMobiles : []
     })
     wcState.kind = 'ok'
-    wcState.text = '✓ 测试消息已发送，请到企业微信群里确认'
+    wcState.text = atAll
+      ? '✓ 测试消息已发送（已@所有人），请到企业微信群里确认'
+      : atMobiles.length
+        ? `✓ 测试消息已发送（已@ ${atMobiles.length} 个手机号），请到企业微信群里确认`
+        : '✓ 测试消息已发送，请到企业微信群里确认'
   } catch (e) {
     wcState.kind = 'fail'
     wcState.text = (e && e.message) || '发送失败'
@@ -5679,21 +5744,24 @@ async function testWecomCritical() {
   try {
     const c = (wc.value && wc.value.critical) || {}
     if (!String(c.webhook || '').trim()) throw new Error('还没有填写关键事件机器人的 Webhook')
-    const msgType = c.msgType || 'markdown'
+    // 企业微信 markdown 不支持 @：配置了 @ 时自动改用 text 消息，保证测试真的能 @ 到人
+    const atMobiles = parseMobiles(c.atMobiles)
+    const atAll = !!c.atAll
+    const needAt = atAll || atMobiles.length > 0
+    const msgType = needAt ? 'text' : (c.msgType || 'markdown')
+    const mdContent = '**【测试】关键事件独立机器人**\n> 配置正常，关键事件（静默 / 人脸命中 / 满库）会推送到本群。'
+    const textContent = '【测试】关键事件独立机器人连通性测试：配置正常，关键事件会推送到本群。'
+    const content = needAt ? textContent : mdContent
     await sendWeCom(
       { webhook: c.webhook, proxyBase: c.proxyBase || '' },
-      {
-        msgType,
-        content:
-          msgType === 'text'
-            ? '【测试】关键事件独立机器人连通性测试：配置正常，关键事件会推送到本群。'
-            : '**【测试】关键事件独立机器人**\n> 配置正常，关键事件（静默 / 人脸命中 / 满库）会推送到本群。',
-        atAll: false,
-        atMobiles: []
-      }
+      { msgType, content, atAll: needAt ? atAll : false, atMobiles: needAt ? atMobiles : [] }
     )
     wcCritState.kind = 'ok'
-    wcCritState.text = '✓ 测试消息已发送，请到关键事件所在的那个企业微信群确认'
+    wcCritState.text = atAll
+      ? '✓ 测试消息已发送（已@所有人），请到关键事件所在的那个企业微信群确认'
+      : atMobiles.length
+        ? `✓ 测试消息已发送（已@ ${atMobiles.length} 个手机号），请到关键事件所在的那个企业微信群确认`
+        : '✓ 测试消息已发送，请到关键事件所在的那个企业微信群确认'
   } catch (e) {
     wcCritState.kind = 'fail'
     wcCritState.text = (e && e.message) || '发送失败'
@@ -7015,6 +7083,87 @@ function loadHidden() {
 
 .face-acts .mini-btn {
   flex: 1;
+}
+
+/* 待录入卡片里的两个按钮（录入 / 忽略）挤在 88px 卡片里：
+ * 「录入」变「录入中…」后文字变长，若不放开 min-width 会被 nowrap 撑开、
+ * 把「忽略」挤出卡片边框。这里只针对「待录入卡片」的子按钮放开收缩 +
+ * 超出省略，既能并排又能保证不溢出（全宽的操作行不受影响）。 */
+.face-card.pending .face-acts .mini-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 待录入缩略图可点击看原图（只有存到整帧时才给 pointer + 提示） */
+.pending-thumb.clickable {
+  cursor: zoom-in;
+}
+.pending-thumb.clickable:hover {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -2px;
+}
+
+/* 看原图灯箱：遮罩 + 居中图片 + 右上关闭 + 底部说明 */
+.pending-shot-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(4, 8, 14, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.pending-shot-box {
+  position: relative;
+  max-width: min(92vw, 1100px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.pending-shot-img {
+  max-width: 100%;
+  max-height: 82vh;
+  border-radius: 10px;
+  background: #0a0f18;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.pending-shot-cap {
+  font-size: 12px;
+  color: var(--text-soft);
+  text-align: center;
+  word-break: break-all;
+}
+.pending-shot-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: #16202e;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.pending-shot-close:hover {
+  background: #223044;
+}
+.lb-fade-enter-active,
+.lb-fade-leave-active {
+  transition: opacity 0.16s ease;
+}
+.lb-fade-enter-from,
+.lb-fade-leave-to {
+  opacity: 0;
 }
 
 /* 上传照片录入：隐藏的原生 file input + 反馈状态条 */

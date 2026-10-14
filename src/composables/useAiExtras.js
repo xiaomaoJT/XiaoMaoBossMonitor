@@ -22,6 +22,7 @@ import {
   detectPose,
   faceEmbedding,
   faceThumb,
+  frameShotWithFace,
   loadModel,
   mapCropBack,
   isSlotReady
@@ -337,6 +338,7 @@ export function useAiExtras(options) {
           pushPendingFace({
             vector: vec,
             thumb,
+            full: frameShotWithFace(frame.canvas, face),
             at: now,
             camId: cam.id,
             camName: cam.name,
@@ -465,23 +467,24 @@ export function useAiExtras(options) {
               const vec = aligned ? await faceEmbedding(aligned) : null
               if (vec) {
                 const hit = await matchFace(vec, fc.threshold)
-                out.faceThumb = faceThumb(canvas, face, FACE_SHOT_SIZE)
-                if (hit && !hit.miss) {
-                  out.faceName = hit.face.name
-                  out.faceScore = hit.score
-                } else {
-                  out.faceScore = hit ? hit.score : 0
-                  if (fc.collectUnknown && out.faceThumb) {
-                    pushPendingFace({
-                      vector: vec,
-                      thumb: out.faceThumb,
-                      at: now,
-                      camId: cam.id,
-                      camName: cam.name,
-                      max: fc.fullAt
-                    })
-                  }
+              out.faceThumb = faceThumb(canvas, face, FACE_SHOT_SIZE)
+              if (hit && !hit.miss) {
+                out.faceName = hit.face.name
+                out.faceScore = hit.score
+              } else {
+                out.faceScore = hit ? hit.score : 0
+                if (fc.collectUnknown && out.faceThumb) {
+                  pushPendingFace({
+                    vector: vec,
+                    thumb: out.faceThumb,
+                    full: frameShotWithFace(canvas, face),
+                    at: now,
+                    camId: cam.id,
+                    camName: cam.name,
+                    max: fc.fullAt
+                  })
                 }
+              }
               }
             }
           }

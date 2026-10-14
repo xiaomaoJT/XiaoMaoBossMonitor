@@ -1438,9 +1438,16 @@ export function useAlertPush(options, hooks = {}) {
     const msg = merged
       ? buildMergedMessage(records, c)
       : buildAlarmMessage(rec, c, shot.kind === 'image' ? shot.url : '', link, quotaNote('ding'))
+    // 钉钉 @指定人：必须把 @手机号 字面写进正文，机器人才能真正通知到人（与关键事件推送同一套逻辑）
+    const atMobiles = parseMobiles(c.atMobiles)
+    let body = msg
+    if (atMobiles.length) {
+      const tokens = atMobiles.map((m) => `@${m}`).join(' ')
+      body = { ...msg, text: `${msg.text || ''}\n${tokens}` }
+    }
     await sendDingTalk(
       { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy },
-      { ...msg, msgType: c.msgType, atAll: c.atAll, atMobiles: parseMobiles(c.atMobiles) }
+      { ...body, msgType: c.msgType, atAll: c.atAll, atMobiles }
     )
     return { shotUrl: shot.url, warn: shot.warn }
   }
@@ -1889,9 +1896,13 @@ export function useAlertPush(options, hooks = {}) {
         try {
           if (id === 'ding') {
             const c = readCfg('ding')
+            const atMobiles = atAll ? [] : parseMobiles(c.atMobiles)
+            // 钉钉 @指定人：必须把 @手机号 字面写进正文，机器人才能真正通知到人
+            let dingText = text
+            if (atMobiles.length) dingText = `${text || ''}\n${atMobiles.map((m) => `@${m}`).join(' ')}`
             await sendDingTalk(
               { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy },
-              { title, text, msgType: c.msgType, atAll, atMobiles: atAll ? [] : parseMobiles(c.atMobiles) }
+              { title, text: dingText, msgType: c.msgType, atAll, atMobiles }
             )
           } else if (id === 'wecom') {
             const c = readCfg('wecom')
@@ -2098,12 +2109,15 @@ export function useAlertPush(options, hooks = {}) {
 
     const atMobiles = parseMobiles(crit.atMobiles)
     const atAll = !!crit.atAll
-    // 企微 markdown 不支持 @，需要 @ 时改用 text 消息
+    // 企微 markdown 不支持 @，需要 @ 时自动改用 text 消息（这样 @ 才真正生效）
     const needAt = atAll || atMobiles.length > 0
+    // payload.html 是 Telegram 的 HTML（含 <b>/<font> 等标签）：tgHtmlToMd 先把它们换成
+    // markdown 的 **，plainFromMarkdown 再去掉 **。切到 text 模式的正文必须是「纯文本」，
+    // 否则企业微信里会原样显示出 <b> 这类标签。
     const md = payload.html ? tgHtmlToMd(payload.html) : String(payload.text || payload.title || '')
-    const plain = payload.text || plainFromMarkdown(payload.html || '') || md
+    const plain = payload.text || plainFromMarkdown(md) || md
     const msgType = needAt ? 'text' : crit.msgType || 'markdown'
-    let content = needAt ? plain : md
+    let content = needAt ? stripHtmlTags(plain) : md
 
     // litterbox 模式：先把截图传上图床，再把链接附到正文里（text 模式下 link 语法不生效，直接给 URL）
     if (payload.image && crit.screenshotMode === 'litterbox') {
@@ -2241,9 +2255,13 @@ export function useAlertPush(options, hooks = {}) {
               if (up.kind === 'image' && up.url) lines.push('', `![人脸特写](${up.url})`)
               else lines.push('', '> 钉钉机器人无法直接发本地图片，人脸特写已随报警发往 Telegram')
               if (tgMsgUrl) lines.push('', `[在 Telegram 查看人脸特写](${tgMsgUrl})`)
+              // 钉钉 @指定人：必须把 @手机号 字面写进正文，机器人才能真正通知到人
+              const atMobiles = parseMobiles(c.atMobiles)
+              let dingText = lines.join('\n')
+              if (atMobiles.length) dingText = `${dingText}\n${atMobiles.map((m) => `@${m}`).join(' ')}`
               await sendDingTalk(
                 { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy },
-                { title, text: lines.join('\n'), msgType: c.msgType, atAll: false, atMobiles: parseMobiles(c.atMobiles) }
+                { title, text: dingText, msgType: c.msgType, atAll: false, atMobiles }
               )
             } else {
               const c = readCfg('wecom')
@@ -2528,6 +2546,17 @@ function plainFromMarkdown(md) {
     .replace(/^>\s?/gm, '')
     .replace(/^\s*[-*]\s+/gm, '· ')
     .trim()
+}
+
+/**
+ * 去掉所有 HTML 标签。
+ * 关键事件正文可能夹带 Telegram 的 <b>/<i>/<font> 等标签；一旦企业微信因为要 @ 人
+ * 而自动切到 text 模式，这些标签会原样显示出来，必须清掉。
+ * （tgHtmlToMd 已经把 <b> 换成 ** 并兜底剥过一次标签，这里再剥一遍是为了挡住
+ *  任何「直接传了 payload.text 且里面带了标签」的边缘情况。）
+ */
+function stripHtmlTags(s) {
+  return String(s || '').replace(/<[^>]+>/g, '')
 }
 
 export function parseMobiles(text) {
