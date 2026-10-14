@@ -1691,6 +1691,26 @@
                   />
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
+                  <!-- 录入时手动归入：选已知的人（同名归到他那一堆）或自定义名字；留空=自动编号，保持旧行为 -->
+                  <div class="face-assign" v-if="faceNameOptions.length">
+                    <select
+                      class="field mini"
+                      v-model="pendingAssign[pf.id]"
+                      :disabled="enrollingPending[pf.id]"
+                      title="录入时归入：选一个已知的人，或自定义名字"
+                    >
+                      <option value="">新建（自动编号）</option>
+                      <option v-for="nm in faceNameOptions" :key="nm" :value="nm">归入：{{ nm }}</option>
+                      <option value="__custom__">归入：自定义…</option>
+                    </select>
+                    <input
+                      v-if="pendingAssign[pf.id] === '__custom__'"
+                      class="field mini"
+                      v-model.trim="pendingCustom[pf.id]"
+                      placeholder="自定义名字"
+                      :disabled="enrollingPending[pf.id]"
+                    />
+                  </div>
                   <div class="face-acts">
                     <button class="mini-btn" :disabled="enrollingPending[pf.id]" @click="doAddPending(pf)">
                       {{ enrollingPending[pf.id] ? '录入中' : '录入' }}
@@ -1844,6 +1864,34 @@
                     <img v-if="it.thumb" :src="it.thumb" alt="样本" />
                     <span class="fgp-sim" :title="i === 0 ? '代表样本（最早录入的那张）' : '与代表样本的相似度'">{{ i === 0 ? '代表' : simPct(it.sim) }}</span>
                     <span class="fgp-name" :title="it.name">{{ it.name }}</span>
+                    <!-- 手动归入：把这一条样本单独改名到某个人（修自动归类误并的问题） -->
+                    <div class="fgp-assign">
+                      <select
+                        class="field mini"
+                        v-model="sampleAssign[it.id]"
+                        :disabled="assigningSample[it.id]"
+                        @change="onSampleAssign(it)"
+                        title="把这一条样本手动归入某个人"
+                      >
+                        <option value="">归入…</option>
+                        <option v-for="nm in faceNameOptions" :key="nm" :value="nm">归入：{{ nm }}</option>
+                        <option value="__custom__">归入：自定义…</option>
+                      </select>
+                      <input
+                        v-if="sampleAssign[it.id] === '__custom__'"
+                        class="field mini"
+                        v-model.trim="sampleCustom[it.id]"
+                        placeholder="自定义名字"
+                        :disabled="assigningSample[it.id]"
+                        @keyup.enter="commitSampleAssign(it)"
+                      />
+                      <button
+                        v-if="sampleAssign[it.id] === '__custom__'"
+                        class="mini-btn"
+                        :disabled="assigningSample[it.id]"
+                        @click="commitSampleAssign(it)"
+                      >{{ assigningSample[it.id] ? '归入中' : '确定' }}</button>
+                    </div>
                     <button class="mini-btn danger" :disabled="deletingSample[it.id]" @click="doDeleteSample(it)">
                       {{ deletingSample[it.id] ? '删除中' : '删除' }}
                     </button>
@@ -3816,6 +3864,7 @@ import {
   rawFaceRows,
   refreshFaces,
   removePendingFace,
+  renameFace,
   renameFaces
 } from '../composables/useFaceLib'
 import { runtimeInfo, runtimeLine } from '../composables/useDeviceInfo'
@@ -5212,6 +5261,72 @@ const enrollingPending = reactive({})
  *  删除中显「删除中」、隐藏「改名」，防止连点 / 误操作）。 */
 const deletingFace = reactive({})
 
+/* ---------- 手动归入：待录入卡片录入时归入某人 / 改名 ----------
+ * 用户诉求：录入待录入人脸时，不只"永远建一条新的人脸 N"，还要能
+ *   - 归入一个已知的人（同名 → 归到他那一堆样本里）
+ *   - 自定义一个名字（而不是让系统自动编号「人脸 N」）
+ * 做法：每张待录入卡片挂一个「归入」下拉，选中值记到 pendingAssign[pf.id]，
+ * 点「录入」时把这个名字传给 addFace（留空 = 自动编号，保持旧行为）。 */
+const pendingAssign = reactive({}) // pf.id -> ''（新建）| 已知名字 | '__custom__'
+const pendingCustom = reactive({}) // pf.id -> 自定义名字文本
+/** 当前人脸库里已有的名字集合：下拉「归入某人」的选项来源。
+ * 用 faceLib（与卡片分组同一份数据），去重后列出。 */
+const faceNameOptions = computed(() => {
+  const s = new Set()
+  for (const f of faceLib.value || []) if (f && f.name) s.add(f.name)
+  return [...s]
+})
+/** 把下拉 + 自定义框解析成最终传给 addFace 的名字：'' = 自动编号 */
+function pendingAssignName(pf) {
+  const a = pendingAssign[pf.id]
+  if (a === '__custom__') return (pendingCustom[pf.id] || '').trim()
+  return a || ''
+}
+/** 卡片被录入 / 忽略后，清掉它占用的归入状态，别留 stale key */
+function clearPendingAssign(pf) {
+  delete pendingAssign[pf.id]
+  delete pendingCustom[pf.id]
+}
+
+/* ---------- 手动归入：已录入样本归入某人 ----------
+ * 用户诉求：人脸库里已建档的样本，也能手动归入某个已知的人（修自动归类误并的问题）。
+ * 做法：展开某「人」看全部角度时，每条样本加一个「归入」下拉，
+ * 选好（或自定义）后调 renameFace 把这一条单独改名到目标人。 */
+const sampleAssign = reactive({}) // it.id -> '' | 已知名字 | '__custom__'
+const sampleCustom = reactive({}) // it.id -> 自定义名字文本
+const assigningSample = reactive({}) // it.id -> bool（改名进行中）
+/** 下拉选了已知名字就直接归入；选「自定义」则等用户填完点「确定」 */
+function onSampleAssign(it) {
+  const v = sampleAssign[it.id]
+  if (v && v !== '__custom__') commitSampleAssign(it)
+}
+async function commitSampleAssign(it) {
+  if (!it || assigningSample[it.id]) return
+  const v = sampleAssign[it.id]
+  const name = v === '__custom__' ? (sampleCustom[it.id] || '').trim() : v
+  if (!name) return
+  assigningSample[it.id] = true
+  try {
+    const r = await renameFace(it.id, name)
+    if (!r.ok) {
+      alertDialog({ title: '归入失败', message: r.reason || '归入失败', variant: 'danger' })
+      return
+    }
+    // 改名成功：这条样本离开了当前组（或换到别的人），selectedGroup 会因
+    // faceGroups 重算而自动更新；清掉本行归入状态，别留"选了旧名字"的假象。
+    sampleAssign[it.id] = ''
+    sampleCustom[it.id] = ''
+  } catch (e) {
+    alertDialog({
+      title: '归入失败',
+      message: '改名时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      variant: 'danger'
+    })
+  } finally {
+    delete assigningSample[it.id]
+  }
+}
+
 /* ---------- 待录入：点击缩略图看捕获时的整帧原图 ----------
  * 缩略图只是人脸裁剪，看不出"这人是在什么画面里被抓到的"。
  * 点缩略图打开一个轻量灯箱，显示 capture 时存的整帧（pf.full），
@@ -5237,15 +5352,20 @@ async function doAddPending(pf) {
   if (enrollingPending[pf.id]) return
   enrollingPending[pf.id] = true
   try {
-    const res = await addFace(pf.vector, pf.thumb, '', Number(opts.face.libMax) || 50)
+    // 把卡片上的「归入」选择解析成名字：留空=自动编号（旧行为），否则归入某人/自定义名。
+    const name = pendingAssignName(pf)
+    const res = await addFace(pf.vector, pf.thumb, name, Number(opts.face.libMax) || 50)
     if (!res.ok) {
       alertDialog({ title: '录入失败', message: res.reason || '录入失败', variant: 'danger' })
       return
     }
-    // 录入成功：前端队列移除；后端队列要回服务端删掉，否则刷新又冒出来。
-    // 人脸库同步后端不用手动触发 —— App.vue 里盯着 faceList 变化会自动补发一份配置。
-    if (pf.fromBackend) await dropBackendPendingFace(opts.backend.url, pf.backendId)
+    // 优先录入、其余写入暂缓：addFace 落库成功后**立刻本地乐观移除卡片**，
+    // 后端队列的删除放后台异步跑（dropBackendPendingFace 内部先同步剔掉本地镜像再 fetch 服务端，
+    // 这里**不 await** 它），界面不再被网络超时拖在「录入中」。
+    clearPendingAssign(pf)
+    if (pf.fromBackend) dropBackendPendingFace(opts.backend.url, pf.backendId) // 故意不 await
     else removePendingFace(pf.id)
+    delete enrollingPending[pf.id] // 落库即解锁，不等网络
   } catch (e) {
     /*
      * 必须接住异常：写入会超时报错（本地库卡死 / 被别的标签页占住），
@@ -5333,6 +5453,7 @@ async function onEnrollFile(e) {
 function doIgnorePending(pf) {
   if (pf.fromBackend) dropBackendPendingFace(opts.backend.url, pf.backendId)
   else removePendingFace(pf.id)
+  clearPendingAssign(pf)
 }
 
 /** 一键忽略所有待录入人脸（前端内存队列 + 后端 SQLite 队列都清掉） */
@@ -7641,6 +7762,22 @@ function loadHidden() {
   white-space: nowrap;
 }
 
+/* 待录入卡片上的「录入时归入」控件：卡片只有 88px 宽，控件必须铺满内部宽度，
+ * 不能沿用 .field.mini 默认 118px（否则会撑破卡片边框）。 */
+.face-assign {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.face-assign .field.mini {
+  width: 100%;
+  height: 26px;
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
 /* ---------------- 同一人归类（多角度样本）----------------
  * 库里按「人」显示：一「人」一张卡片。卡片上要多带两个信息 ——
  *   ① 这个人的**几个角度**（右下角数字角标）
@@ -7830,6 +7967,25 @@ function loadHidden() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 样本面板里「手动归入」控件：fgp-item 也是窄列（约 76px），控件铺满列宽，
+ * 选「自定义」时再露出输入框与「确定」按钮，全部纵向堆叠不溢出。 */
+.fgp-assign {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.fgp-assign .field.mini {
+  width: 100%;
+  height: 26px;
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+.fgp-assign .mini-btn {
+  width: 100%;
 }
 
 /* 待录入缩略图可点击看原图（只有存到整帧时才给 pointer + 提示） */
