@@ -557,6 +557,8 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   const durMin = Math.max(1, Math.round((endMs - startMs) / 60000))
   const durText = durMin >= 60 ? `${(durMin / 60).toFixed(durMin % 60 ? 1 : 0)} 小时` : `${durMin} 分钟`
   const knownNames = [...knownSet]
+  // 日常汇总里有多少条报警并入了「完整人形补图」（由 pushExtraShot 在 digest 激活时打标）
+  const personImgN = list.filter((r) => r.personShot).length
 
   const camLines = camNames.length
     ? camNames
@@ -659,6 +661,10 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     '**📋 按类型**',
     typeLines,
     '',
+    // 日常汇总：本批里并入了「完整人形补图」的，点一句（原图已在事件面板，不在聊天里重发）
+    ...(isDigest && personImgN
+      ? ['- 含完整人形补图 **' + personImgN + '** 张（原图见事件面板）', '']
+      : []),
     // hideEventDetail（/collect）：人脸命中已逐条 + 分通道/分类型统计够了，通用前 20 条省掉
     ...(hideEventDetail
       ? []

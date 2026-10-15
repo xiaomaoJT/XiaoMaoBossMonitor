@@ -409,7 +409,9 @@ export function useAlertPush(options, hooks = {}) {
       counts: record.counts,
       zoneName: record.zoneName,
       dwellMs: record.dwellMs,
-      text: record.text
+      text: record.text,
+      // 报警后补发的「完整人形」原图是否并入了本批（由 pushExtraShot 在 digest 激活时打标）
+      personShot: !!record.personShot
     }
   }
 
@@ -2807,7 +2809,39 @@ export function useAlertPush(options, hooks = {}) {
     }).map((d) => d.id)
     if (!ids.length) return { ok: false, sent: [], reason: '没有渠道接收补图' }
 
-    ids.forEach((id) => {
+    /*
+     * 日常事件静默（cam.digest）也要拦这一刀 —— 这是之前漏掉的一层：
+     * 静默窗口靠 isSilentSuppressed 拦了，但 digest 激活时这条补图仍会实时推，
+     * 于是出现「开了日常静默、人形补图还在实时刷」。
+     * 与 handleAlarm 同一判据：digest 激活 且 该渠道在 digest.channels 里 且 非人脸命中。
+     * 命中在库人脸（关键事件，实时单发）时补图也跟着实时，保持一致。
+     */
+    const dCam = camById(record.id)
+    const dState = dCam ? digestStateOf(dCam, now) : { active: false, channels: [] }
+    const liveIds = []
+    const digestIds = []
+    for (const id of ids) {
+      if (dState.active && dState.channels.includes(id) && !isFaceHit(record)) {
+        digestIds.push(id)
+      } else {
+        liveIds.push(id)
+      }
+    }
+
+    // 被日常静默吸收的渠道：把补图并入手该路正在攒的日常汇总（不实时推）。
+    // 若报警已随上一轮汇总发出（缓冲里找不到这条），补图随事件面板保留、不再实时追发。
+    if (digestIds.length) {
+      const st = digestSlot(record.id)
+      const entry = st.buf.find((b) => b.key === record.key)
+      if (entry) {
+        entry.personShot = true
+        if (!st.since) st.since = now
+        armCamDigest(record.id, now)
+      }
+    }
+
+    // 仅实时渠道计入每秒/每分钟限流配额；被 digest 吸收的走汇总路径，不占实时额度
+    liveIds.forEach((id) => {
       const st = chState[id]
       st.windowTs.push(now)
       st.lastGlobalAt = now
@@ -2825,7 +2859,7 @@ export function useAlertPush(options, hooks = {}) {
     const faceThumb = record.faceThumb ? '' : (meta && meta.faceThumb) || ''
 
     // TG 先发：其余渠道要复用它那条消息的链接
-    if (ids.includes('tg')) {
+    if (liveIds.includes('tg')) {
       try {
         const t = readCfg('tg')
         const { message } = await sendTelegramAlarm(t, {
@@ -2850,7 +2884,7 @@ export function useAlertPush(options, hooks = {}) {
     }
 
     const others = await Promise.all(
-      ids
+      liveIds
         .filter((id) => id !== 'tg')
         .map(async (id) => {
           const name = CHANNEL_DEFS.find((d) => d.id === id).name

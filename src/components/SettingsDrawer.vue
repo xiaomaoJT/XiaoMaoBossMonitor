@@ -97,6 +97,19 @@
               title="一键开启 / 关闭所有通道的日常事件静默"
             ></span>
           </div>
+          <div class="cs-row">
+            <span class="cs-label">汇总间隔</span>
+            <select
+              class="field mini"
+              :value="clampDigestMinutes(opts.digestIntervalMinutes)"
+              @change="setMasterDigestInterval($event.target.value)"
+            >
+              <option v-for="m in DIGEST_INTERVAL_CHOICES" :key="'mdi-' + m" :value="m">
+                {{ digestIntervalLabel(m) }}
+              </option>
+            </select>
+            <span class="cs-state">总开关开启时，所有通道按此间隔汇总（每路仍可单独微调）</span>
+          </div>
           <p class="hint">
             总开关一键开启后，所有通道都按各自的「日常事件静默」把非关键事件摊平成定期播报
             （默认每 30 分钟汇总一次、推送到已配置的渠道）。设备离线/上线与定时巡检也一并收入汇总，不再实时打扰。
@@ -6603,14 +6616,25 @@ const someDigestOn = computed(() =>
   cams.value.some((c) => !!(c.digest && c.digest.enabled === true))
 )
 
+/** 总开关旁的「汇总间隔」选择器：改全局默认，下次开启总开关时套用到所有通道 */
+function setMasterDigestInterval(v) {
+  opts.digestIntervalMinutes = clampDigestMinutes(v)
+}
+
 /** 一键开启 / 关闭所有通道的日常事件静默（保留各通道独立的渠道与间隔设置） */
 function toggleAllCamDigest() {
   const turnOn = !allDigestOn.value
+  // 开启时把全局汇总间隔套用到所有通道，做到「一处设间隔、全部对齐」；
+  // 各路之后仍可在各自卡片单独微调。
+  const masterInterval = clampDigestMinutes(opts.digestIntervalMinutes)
   cams.value.forEach((cam) => {
     const d = ensureCamDigest(cam)
     d.enabled = turnOn
-    // 开启时若这一路没选渠道，补上默认渠道，否则开了也不生效（camDigestState 要求 channels 非空）
-    if (turnOn && !d.channels.length) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
+    if (turnOn) {
+      d.intervalMinutes = masterInterval
+      // 开启时若这一路没选渠道，补上默认渠道，否则开了也不生效（camDigestState 要求 channels 非空）
+      if (!d.channels.length) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
+    }
   })
 }
 
