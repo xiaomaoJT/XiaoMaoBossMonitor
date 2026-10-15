@@ -231,30 +231,6 @@
                 >
                   {{ e.label }}
                 </button>
-                <!--
-                  人脸命中：与上面三项不同的**推送收窄**开关（缺省关）。
-                  开启后这一路只有命中已录入人脸时才推，故依赖「人脸」；
-                  「人脸」又依赖「人形识别」，所以不可用时置灰。
-                -->
-                <button
-                  class="tag mini hit"
-                  :class="{ on: camHitOn(cam) }"
-                  :disabled="!cam.ai || !camExtOn(cam, 'face')"
-                  :title="camHitTitle(cam)"
-                  @click="toggleCamHit(cam)"
-                >
-                  <svg viewBox="0 0 24 24" width="12" height="12">
-                    <path
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.7"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M9.2 12.2l2 2 3.6-4.2"
-                    />
-                  </svg>
-                  人脸命中
-                </button>
                 <span class="tag-text" v-if="cam.roi">已设置检测区域</span>
                 <button class="tag ghost" v-if="cam.roi" @click="cam.roi = null">清除区域</button>
               </div>
@@ -3118,7 +3094,7 @@
               <div class="cmd-list">
                 <div class="cmd" v-for="c in TG_COMMANDS" :key="c.cmd">
                   <code>{{ c.usage }}</code>
-                  <span>{{ c.desc }}</span>
+                  <span>{{ c.desc }}<template v-if="c.detail">：{{ c.detail }}</template></span>
                 </div>
               </div>
             </template>
@@ -3885,7 +3861,7 @@ import { parseMobiles } from '../composables/useAlertPush'
 import { estimateUsage, formatBytes } from '../composables/useEventStore'
 import { EVENT_DEFAULTS, EVENT_GROUPS } from '../composables/useAlarmText'
 import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
-import { camExtOn, camHitOn } from '../composables/useAiExtras'
+import { camExtOn } from '../composables/useAiExtras'
 import {
   DEFAULT_FACE_THRESHOLD,
   addFace,
@@ -5066,38 +5042,12 @@ function toggleCamExt(cam, key) {
     face: cur.face !== false,
     pose: cur.pose !== false,
     zone: cur.zone !== false,
-    // 保留「人脸命中」：它不走这个函数（缺省关，判据与上面三条相反），别在这儿弄丢
+    // 保留历史 aiExt.hit 字段（旧存档可能有），它现在是无害的残留，不再参与推送判定
     hit: cur.hit === true,
     [key]: cur[key] === false
   }
 }
 
-/**
- * 人脸命中（通道级推送收窄）。缺省「关」，点击才是开 —— 与上面三条「缺省参与」相反。
- * 开之前这一路必须有人脸可识别（否则"命中"永远不发生、结果一条都不推），
- * 所以顺手把这一路的人形 + 人脸补齐。
- */
-function toggleCamHit(cam) {
-  if (!cam.ai) return
-  const cur = cam.aiExt || {}
-  const next = cur.hit !== true
-  cam.aiExt = {
-    face: cur.face !== false,
-    pose: cur.pose !== false,
-    zone: cur.zone !== false,
-    hit: next
-  }
-  if (next && cam.aiExt.face === false) cam.aiExt.face = true
-}
-
-function camHitTitle(cam) {
-  if (!cam.ai) return '先开启这一路的「人形识别」——人脸命中建立在人形 + 人脸识别之上'
-  if (!camExtOn(cam, 'face')) return '先开启这一路的「人脸」——没有人脸识别就没有「命中」'
-  if (!camHitOn(cam)) {
-    return '开启后这一路只在「命中已录入人脸」时推送；画面变动 / 人形 / 姿态 / 区域 / 计数都不再单独推'
-  }
-  return '已开启：仅推送人脸命中事件。点击关闭，恢复为按上面勾选的各类事件正常推送'
-}
 
 /* ==================== 推送渠道联动 ==================== */
 /*
@@ -5167,10 +5117,10 @@ function toggleEvent(channelKey, evKey) {
  * 钉钉、企微 critical.events）严格一一对应。
  */
 const CRIT_EVENTS = [
-  { key: 'silence', label: '静默结束', desc: '静默时段结束时推一条汇总' },
-  { key: 'summary', label: '静默汇总', desc: '静默期间收存了多少事件的汇总' },
-  { key: 'face', label: '人脸命中', desc: '识别到已录入的人脸时推送' },
-  { key: 'pending', label: '待录入满库', desc: '待录入人脸库达到预警 / 满库线时推送' }
+  { key: 'silence', label: '静默开始/结束', desc: '免打扰时段开始与结束的状态提醒（各一条）' },
+  { key: 'summary', label: '静默汇总', desc: '免打扰结束时，把本时段收存的报警汇总成一条' },
+  { key: 'face', label: '在库人脸命中', desc: '识别到已录入（在库）的人脸时，带图单独提醒' },
+  { key: 'pending', label: '待录入满库', desc: '待录入人脸库达到预警 / 满库线时提醒处理' }
 ]
 
 /** 某渠道的「关键事件」子开关是否开启（缺省即开，与执行层同一语义 `!== false`） */
@@ -6616,25 +6566,26 @@ const someDigestOn = computed(() =>
   cams.value.some((c) => !!(c.digest && c.digest.enabled === true))
 )
 
-/** 总开关旁的「汇总间隔」选择器：改全局默认，下次开启总开关时套用到所有通道 */
+/** 总开关旁的「汇总间隔」选择器：把已开启的通道对齐到该间隔；关闭的通道保留各自缓存的间隔 */
 function setMasterDigestInterval(v) {
-  opts.digestIntervalMinutes = clampDigestMinutes(v)
+  const iv = clampDigestMinutes(v)
+  opts.digestIntervalMinutes = iv
+  // 仅对齐当前已开启的通道；关闭的通道不动，使其缓存的间隔在再次开启时回显原值
+  cams.value.forEach((cam) => {
+    const d = ensureCamDigest(cam)
+    if (d.enabled) d.intervalMinutes = iv
+  })
 }
 
 /** 一键开启 / 关闭所有通道的日常事件静默（保留各通道独立的渠道与间隔设置） */
 function toggleAllCamDigest() {
   const turnOn = !allDigestOn.value
-  // 开启时把全局汇总间隔套用到所有通道，做到「一处设间隔、全部对齐」；
-  // 各路之后仍可在各自卡片单独微调。
-  const masterInterval = clampDigestMinutes(opts.digestIntervalMinutes)
+  // 保留各通道已配置的间隔，不强行套用总开关间隔（关闭再开应回显原值）；
+  // 仅当开启时该路没选渠道才补默认渠道（camDigestState 要求 channels 非空，否则开了也不生效）
   cams.value.forEach((cam) => {
     const d = ensureCamDigest(cam)
     d.enabled = turnOn
-    if (turnOn) {
-      d.intervalMinutes = masterInterval
-      // 开启时若这一路没选渠道，补上默认渠道，否则开了也不生效（camDigestState 要求 channels 非空）
-      if (!d.channels.length) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
-    }
+    if (turnOn && !d.channels.length) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
   })
 }
 
@@ -6795,9 +6746,9 @@ async function testTelegram() {
 
 /** 四类关键事件。key 与 useTelegram.directPushEventOn 的 kind 一一对应 */
 const DIRECT_EVENT_OPTS = [
-  { id: 'silence', label: '静默提醒', desc: '免打扰开始 / 结束的提醒' },
-  { id: 'summary', label: '静默汇总', desc: '静默结束时的那条汇总（含人脸命中明细）' },
-  { id: 'face', label: '人脸命中', desc: '识别到人脸库里的人时，带图单独提醒' },
+  { id: 'silence', label: '静默开始/结束', desc: '免打扰时段开始与结束的状态提醒（各一条）' },
+  { id: 'summary', label: '静默汇总', desc: '免打扰结束时，把本时段收存的报警汇总成一条' },
+  { id: 'face', label: '在库人脸命中', desc: '识别到人脸库里的人时，带图单独提醒' },
   { id: 'pending', label: '待录入满库', desc: '未建档人脸攒满收集上限时，提醒及时处理（每个填满周期只提醒一次）' }
 ]
 
@@ -6922,16 +6873,18 @@ const TG_COMMANDS = [
     usage: '/csilent <通道> <小时数|HH:MM|off> [渠道]',
     desc: '通道静默：只让某一路监控在指定时段不推送。如 /csilent 门口 2（2 小时）、/csilent 门口 08:00（到 08:00）、/csilent off 门口（恢复）'
   },
-  { cmd: 'cams', usage: '/cams', desc: '通道状态一览：每路是否在线出帧、是否正处在通道静默（含到几点、静默哪些渠道）' },
+  { cmd: 'cams', usage: '/cams', desc: '通道状态一览：每路在线/出帧、通道静默与日常静默', detail: '逐路显示是否在线出帧、当前画面人数、是否正处在通道静默（含到几点、静默哪些渠道），以及日常事件静默（按间隔汇总）是否开启、间隔与渠道。' },
   {
     cmd: 'digest',
-    usage: '/digest <on|off>',
-    desc: '日常事件静默总开关：一键开启 / 关闭所有通道的「按间隔汇总」（非关键事件与设备离线/上线、定时巡检都不再实时推，而是定期汇总）'
+    usage: '/digest <on|off> [间隔]',
+    desc: '日常事件静默总开关：一键开/关全部通道的按间隔汇总',
+    detail: '开启后所有通道的非关键事件不再实时推，而是按各自设置的间隔摊平成定期汇总；设备离线/上线与定时巡检也一并收入。可追加间隔，如 /digest on 30（分钟）、/digest on 2h（2 小时）。关掉后各通道恢复实时推送。各通道独立开关见 /cdigest。'
   },
   {
     cmd: 'cdigest',
-    usage: '/cdigest <通道> <on|off>',
-    desc: '只开 / 关指定那一路的日常事件静默（其余通道不受影响）。通道用名字、id（cam-1）或序号（1）'
+    usage: '/cdigest <通道> <on|off> [间隔]',
+    desc: '开/关指定通道的日常事件静默（其余不受影响）',
+    detail: '只开或关某一路的日常事件静默，与总开关是同一份配置的两个入口。通道可用名称（门口）、id（cam-1）或序号（1）。可追加间隔，如 /cdigest 门口 on 30。'
   },
   /*
    * 这里**不再**有 `check` 条目：`/check duty` 已合并进 `/duty`（服务端只认

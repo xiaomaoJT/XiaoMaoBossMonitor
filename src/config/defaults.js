@@ -143,19 +143,18 @@ function makeCamera(preset) {
      *    全局开着 + 这里不是 false → 这一路才跑。
      *    所以把不看人脸的通道关掉，就能把算力集中在真正要看的几路上。
      *   face 人脸识别 / pose 人形姿态 / zone 区域规则（进出 · 徘徊 · 计数）
-     *   hit  人脸命中：**推送收窄**模式，语义与上面三项**相反**（缺省关，见下）
+     *   hit  人脸命中：历史残留字段，已不再参与推送收窄（见下）
      */
     aiExt: {
       face: preset.face !== false,
       pose: preset.pose !== false,
       zone: preset.zone !== false,
       /**
-       * 人脸命中：这一路**只有命中已录入人脸（在库的人）时才推送**。
+       * 人脸命中（aiExt.hit）：历史残留字段。
        *
-       * ⚠️ 缺省是**false（关）**，与 face / pose / zone 的「缺省即参与」相反 ——
-       *    它是限制型开关，打开会把这一路的画面变动 / 人形 / 姿态 / 区域推送
-       *    全部收窄掉。默认打开等于悄悄改掉所有人的推送行为，所以必须显式开。
-       *    判定见 features.camHitOn；强依赖：人形识别 → 人脸识别 → 全局人脸总闸。
+       * ⚠️ 已废弃，不再参与任何推送收窄。人脸识别的"识别到人脸就推"由 face 事件类型
+       *    （各渠道 events.face）承载；"命中在库人脸"走独立的关键事件（pushDirectToUsers）。
+       *    这里只是把旧存档里的 hit 字段原样保留，避免迁移时丢失；新配置不依赖它。
        */
       hit: preset.hit === true
     },
@@ -393,7 +392,7 @@ export const HIDDEN_OPTIONS = {
     /** 识别到已录入的人 → 记事件并推送 */
     eventOnKnown: true,
     /** 检测到未录入的人脸 → 也记事件（默认关，避免刷屏） */
-    eventOnUnknown: false,
+    eventOnUnknown: true,
     /** 把没录入的人脸暂存起来，方便在设置里一键录入 */
     collectUnknown: true,
     /** 画面上画人脸框 */
@@ -980,9 +979,11 @@ export const HIDDEN_OPTIONS = {
       /**
        * 哪几类关键事件要单独提醒。
        * 判据统一是「!== false」，即缺省视为开 —— 与渠道事件的勾选语义一致，
-       * 老配置里没有这个字段时也能按默认的三类生效。
+       * 老配置里没有这个字段时也能按默认的四类生效。
+       * ⚠️ 必须与钉钉 / 企微 `critical.events` 的四个键（silence/summary/face/pending）
+       *    严格一致，否则三端"关键事件"会对不齐（曾漏掉 pending）。
        */
-      events: { silence: true, summary: true, face: true },
+      events: { silence: true, summary: true, face: true, pending: true },
       /**
        * 静默时段也允许推送（缺省 / 显式 true = 允许）。语义与钉钉 / 企微
        * critical.throughSilence **完全一致**（见那边的说明），缺省同样为开。
@@ -1481,7 +1482,7 @@ export function normalizeCameraChannels(cam) {
     face: ext.face !== false,
     pose: ext.pose !== false,
     zone: ext.zone !== false,
-    // 人脸命中是「推送收窄」开关，缺省**关**（老存档没有 → false，行为与升级前一致）
+    // 历史残留字段 aiExt.hit：原样保留（已不参与推送收窄），避免旧存档迁移丢失
     hit: ext.hit === true
   }
   return cam

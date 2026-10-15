@@ -31,7 +31,6 @@ import { normalizeWeCom, sendWeCom, sendWeComAlarm, sendWeComImage } from './use
 import { recordPush } from './usePushStats.js'
 import { uploadToLitterbox } from './useImageHost.js'
 import { EVENT_GROUPS, TYPE_GROUP, featureText, normalizeEvents } from './useAlarmText.js'
-import { camHitOn } from '../config/features.js'
 import { runtimeLine } from './useDeviceInfo.js'
 import {
   BRAND,
@@ -628,6 +627,20 @@ export function useAlertPush(options, hooks = {}) {
             : `静默结束提醒已推送（${sent.join(' + ')}）`
         )
       }
+      /*
+       * 关键事件单独提醒（静默结束状态）。
+       * 与下面的「静默汇总」是**两类**、由用户分开勾选（silence / summary）：
+       *   · silence：只告知"免打扰时段结束了、实时推送已恢复"，不带事件明细；
+       *   · summary：本时段收存事件的明细汇总（含人脸命中分区）。
+       * ⚠️ 以前只在**开始**时发 silence、结束时不发，导致"结束提醒"三端都收不到
+       *    （用户以为 summary 会顺带覆盖"已结束"，其实那是另一类）。
+       *    开始那条在 pushStartNotice 里发，结束这条在这里补上，silence 才真正"开始+结束"。
+       */
+      pushDirectToUsers('silence', {
+        title: '🔔 免打扰时段已结束',
+        text: '🔔 免打扰时段已结束，实时逐条推送已恢复。',
+        html: '🔔 <b>免打扰时段已结束</b>，实时逐条推送已恢复。'
+      }).catch(() => {})
       /*
        * 关键事件单独提醒（静默汇总）。
        * 放在这里而不是 pushSilentSummary 内部：一个是"渠道分发"，
@@ -1610,20 +1623,14 @@ export function useAlertPush(options, hooks = {}) {
       }
     }
     /*
-     * 人脸命中模式（通道级，见 features.camHitOn）：
-     *   这一路被配成「只有命中已录入人脸（在库的人）才推送」时，其余**报警类**事件
-     *   一律不推 —— 画面变动 / 人形 / 姿态 / 区域 / 计数都在收窄范围内。
-     *
-     * ⚠️ 只收窄报警事件（TYPE_GROUP 里有的类型），**不拦系统事件**：
-     *   掉线 / 上线（offline / online）不属于"画面变动"，通道静默或命中模式下
-     *   仍应把断线告诉用户，否则机器失联了却悄无声息。
-     * ⚠️ 通道配置从 camerasOf() 取（前端 cameras ref / 后端 config.cameras），
-     *   用 record.id 定位；找不到就不过滤，与旧行为一致。
+     * 画面变动 / 人形 / 人脸 / 姿态 / 区域 / 计数 都是**同一层次的事件类型**，
+     * 各有各的开关（见下方各渠道 events.<类型>），互不收窄：
+     *   开启「人形」→ 识别到人形就推；开启「人脸」→ 识别到有人脸才推；两者都开 → 都推。
+     * 「人脸」事件本身已经表达"识别到人脸（不论已录入 / 未录入）就推"的语义，
+     * 由 face 事件类型 + 各渠道 events.face 承载；而"在库人脸命中"（命中底库、走
+     * pushDirectToUsers 的关键事件）是另一条独立链路，两件事不在这里混为一谈。
+     * 因此这里不再对任一类报警事件做收窄，统一交给下方按类型逐一切断。
      */
-    const camCfg = (camerasOf() || []).find((x) => x && x.id === record.id)
-    if (camCfg && camHitOn(camCfg) && TYPE_GROUP[record.type] && !(record.type === 'face' && record.faceName)) {
-      return { ok: false, off: true, reason: '该通道仅推送「人脸命中」事件' }
-    }
     const evt = normalizeEvents(c.events)
     const group = TYPE_GROUP[record.type] || record.type
     if (evt[group] === false) {
@@ -2031,6 +2038,16 @@ export function useAlertPush(options, hooks = {}) {
     let queue = decisions.filter((d) => d.overflow && readCfg(d.id).overflowMode === 'merge')
 
     /*
+     * 已录入人脸（在库命中）：只走关键的「在库人脸命中」急推（见下方 pushDirectToUsers），
+     * 不发普通 face 事件、也不进静默 / 日常汇总 —— 否则同一条既进汇总又急推，重复且违背
+     * "关键事件不吸收"的设计。陌生人脸（无 faceName）仍走普通 face 事件正常推送 / 汇总。
+     */
+    if (isFaceHit(record)) {
+      send = []
+      queue = []
+    }
+
+    /*
      * 静默收存。两个来源**取并集**：
      *   · 全局静默（options.silent）—— 覆盖全通道，被选中的渠道在时段内不实时推；
      *   · 通道静默（cam.silent）—— 只覆盖这一路，对指定的那几个渠道不实时推。
@@ -2062,32 +2079,34 @@ export function useAlertPush(options, hooks = {}) {
      * 曾经写过 `byCam` 里排除 byGlobal 的写法，那是彻底的死代码：
      * 它只影响这个集合，看起来却像在实现"汇总归整体"，很能误导人。
      */
-    const suppressIds = [...byGlobal, ...byCam]
     let buffered = false
-    if (suppressIds.length) {
-      send = send.filter((id) => !suppressIds.includes(id))
-      queue = queue.filter((id) => !suppressIds.includes(id))
-      /*
-       * 归属「汇总归整体」：只要这条事件**有渠道被整体静默覆盖**，就整条进整体汇总，
-       * 通道汇总里不再出现它（否则同一条会在两个汇总里各出现一次）。
-       * 两个汇总的归属判据就这一处，别改成两个缓冲都写。
-       */
-      if (byGlobal.length) {
-        if (!silentSeen.has(record.key)) {
-          silentSeen.add(record.key)
-          silentBuffer.push(silentSnapshot(record))
+    if (!isFaceHit(record)) {
+      const suppressIds = [...byGlobal, ...byCam]
+      if (suppressIds.length) {
+        send = send.filter((id) => !suppressIds.includes(id))
+        queue = queue.filter((id) => !suppressIds.includes(id))
+        /*
+         * 归属「汇总归整体」：只要这条事件**有渠道被整体静默覆盖**，就整条进整体汇总，
+         * 通道汇总里不再出现它（否则同一条会在两个汇总里各出现一次）。
+         * 两个汇总的归属判据就这一处，别改成两个缓冲都写。
+         */
+        if (byGlobal.length) {
+          if (!silentSeen.has(record.key)) {
+            silentSeen.add(record.key)
+            silentBuffer.push(silentSnapshot(record))
+          }
+          scheduleSilentFlush()
+        } else {
+          // 只被通道静默 → 进这一路自己的汇总
+          const st = camSlot(record.id)
+          if (!st.seen.has(record.key)) {
+            st.seen.add(record.key)
+            st.buf.push(silentSnapshot(record))
+          }
+          scheduleCamFlush(record.id, now)
         }
-        scheduleSilentFlush()
-      } else {
-        // 只被通道静默 → 进这一路自己的汇总
-        const st = camSlot(record.id)
-        if (!st.seen.has(record.key)) {
-          st.seen.add(record.key)
-          st.buf.push(silentSnapshot(record))
-        }
-        scheduleCamFlush(record.id, now)
+        buffered = true
       }
-      buffered = true
     }
 
     // 完全被静默收存（没有任何渠道在本条事件上实时发送 / 排队）→ 标记「静默待推送」

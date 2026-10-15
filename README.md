@@ -972,30 +972,35 @@ html[data-theme='liquid'] .event-panel :is(.btn, .field, .sf-ctl, .switch, .tag,
 
 > 验证：专项探针 **22/22**（登录无勾选框 / legacy localStorage 会话被清 / sessionStorage 会话可用 / 拉取后 `hiddenIds` 生效且只有 3 路画面 / `.tag` 不换行溢出 / 人脸 4 行分页·翻页·回退）。回退验证 9 条红且全部可归因（去掉后端回读 hiddenIds → A/F 组红；分页绑定改回全量 → D 组红；去掉 nowrap → E 组红；恢复读 localStorage 会话 → C 组红）。生产 `server/config.json` 与 `server/data/` 全程未被触碰。
 
-### 5.24 「人脸命中」监听类型与事件依赖链
+### 5.24 人脸识别事件模型：face 事件类型 + 在库人脸命中关键事件（互不混淆）
 
-通道级新增第 6 个监听类型 **人脸命中**（`cam.aiExt.hit`）：开启后这一路**只有命中已录入人脸（在库的人）时才推送**，画面变动 / 人形 / 姿态 / 区域 / 计数都不再单独推。它是一次**推送收窄**，不是"多开一项能力"。
+两套「人脸」相关概念，别搞混：
 
-**六个监听类型的强依赖关系**（这是设计的核心，不是巧合）：
+1. **face 事件类型（识别到人脸就推）** —— 与人形、画面变动、姿态、区域、计数**同属一个层次**：都是「一种事件」，由各自独立的开关决定推不推，互不收窄。
+   - 开启通道 `events.face`（依赖 `cam.ai` 人形检测 + `cam.aiExt.face`）后，**识别到人脸才发**（区别于人形——人形只要检测到人就发）；同帧既有人形又有人脸，两者各自触发一条。
+   - `options.face.eventOnUnknown` 控制**陌生人脸**是否也生成事件：默认 `true`（陌生人也要推）；设 `false` 则只有「已知/在库」角度的识别才发 face 事件，陌生人脸静默。
+   - 它**不收窄**任何人形 / 画面变动 / 姿态 / 区域的推送——各类型开关各管各的。
 
-| 监听类型 | 配置字段 | 依赖 |
+2. **在库人脸命中（关键事件，单发、穿静默）** —— `record.type==='face' && record.faceName`（即 `isFaceHit(record)`）表示识别出的**是已录入的人**。走 `pushDirectToUsers` 独立紧急通道，静默时段也推、三端 `critical.throughSilence` 缺省 `true`。这是另一条路，与 face 事件类型的「识别到人脸就推」是**并列**而非包含关系。
+
+**配置字段对照（已废弃的 `hit` 收窄开关不再参与）**：
+
+| 概念 | 配置字段 | 作用 |
 | --- | --- | --- |
-| 画面变动 | `cam.motion` | 无（纯本地帧差） |
-| 人形识别 | `cam.ai` | 无（YOLO 检测人形） |
-| 人脸 | `cam.aiExt.face` | **人形识别** —— 只在检出人形的帧上跑 |
-| 姿态 | `cam.aiExt.pose` | **人形识别** |
-| 区域 | `cam.aiExt.zone` | **人形识别**（+ 真圈了区域才算在跑） |
-| **人脸命中** | `cam.aiExt.hit` | **人形 → 人脸 → 全局人脸总闸**（缺一不可） |
+| 人脸识别能力 | `cam.aiExt.face` | 这一路要不要跑人脸识别（依赖 `cam.ai` 人形检测） |
+| face 事件开关 | 通道 `events.face` | 识别到人脸是否推送一条 face 事件 |
+| 陌生人脸也推 | `options.face.eventOnUnknown` | `true`：陌生人脸也生成 face 事件；`false`：仅已知人脸角度 |
+| 在库命中关键事件 | `record.faceName` 非空 | 命中已录入人脸，触发独立紧急推送（穿静默） |
+| 历史残留 | `cam.aiExt.hit` | **已废弃**：原「人脸命中」收窄开关，现不再参与任何推送判定；旧存档原样保留、无害 |
 
-三条取舍：
+**设计取舍（取代旧的 `camHitOn` 收窄）**：
 
-- **缺省关闭，且与 `face / pose / zone` 的「缺省即参与」相反。** 那三项是"分流"（缺省参与、可关掉省算力），`hit` 是"收窄"（缺省关、开了就限制推送）。沿用同一个 `!== false` 判据会把所有人的推送行为悄悄改掉，所以判定单独写成 `camHitOn(cam) === (ext.hit === true)`。
-- **只收窄报警类事件，不拦系统事件。** 掉线 / 上线（`offline` / `online`）不属于"画面变动"，命中模式下仍要通知 —— 否则机器失联却悄无声息。
-- **判定只有一份。** `features.js` 的 `camHitOn` 是唯一判据：UI（`SettingsDrawer`、`CameraTile` 的画面菜单）、推送调度（`useAlertPush.checkChannel`）、后端（经 `compat.mjs` 复用同一份）都读它，不会出现"界面开了、实际没生效"。
+- **六个监听类型（画面变动 / 人形 / 人脸 / 姿态 / 区域 / 计数）是同级事件，互不收窄。** 旧的 `camHitOn(cam) = (aiExt.hit === true)` 一旦开启就把人形 / 陌生人脸等报警事件全部拦掉、只留「在库命中」——这正是「免打扰时段汇总显示 0 条」的根因（事件在进入缓冲判定前就被 `checkChannel` 判 off）。现已删除该收窄分支：各类型只受自身开关 `events.<type>` 约束。
+- **在库人脸不再走普通推送 / 静默缓冲，避免与关键事件双推。** `handleAlarm` 中，若 `isFaceHit(record)` 为真，则 `send`/`queue`/全局静默缓冲/通道静默缓冲全部跳过，只在关键通道单发；陌生人脸 / 人形等正常进 `send` 与缓冲，于是汇总里能正确计入。
+- **判定只有一份。** `isFaceHit(record)`（`defaults.js`）是唯一「是不是在库命中」判据，被关键推送与日常汇总排除共用；`features.js` 的 `camHitOn` 已删除，UI 与推送不再有第二套口径。
+- **`cam.aiExt.hit` 保留为无害残留。** 迁移时原样带入、不丢弃，避免旧存档丢字段；它既不出现在 `EXT_FEATURES`（前端不再渲染「人脸命中」chip），也不再进入 `checkChannel` / 关键推送的任何分支。
 
-UI 上 `hit` 依赖「人脸」开着才可点（否则置灰并提示去哪开）；勾选时自动补齐这一路的人形 + 人脸，避免"开了命中却永远不命中、于是一条都不推"的死角。
-
-> 验证：数据层单测 **26/26**（缺省语义 / 依赖链 / 老存档兼容）、推送层集成测试 **6/6**（命中模式收窄 + 命中事件照推 + 关闭后的正面基线 + 掉线不受影响）、UI 探针 **8/8**（渲染 / 依赖置灰 / 即时预览 / 落盘 / 重载持久化）。回退验证三组各自精准变红：`camHitOn` 恒 false → 单测 26→20、推送 6→3；去掉 `checkChannel` 的过滤 → 推送 6→3（而单测仍 26/26，证明两层测试互不掩盖）；去掉 UI 的 `:disabled` → 仅"依赖置灰"1 条红。
+> 验证：路由仿真 `/tmp/route-sim.mjs` 对实机配置（cam-1/4/6 均 `aiExt.hit:true`、`options.silent` 含 `12:00-13:30`）复现旧行为——旧 `camHitOn` 把 person / 陌生人脸 `checkChannel` 判 `off(命中模式收窄)`，导致静默窗口 `silentBuffer` 收不到事件、`buildSilentEndMessages` 报「本时段报警 0 条」；新逻辑对 person / 陌生人脸 / 在库人脸均 `PASS`，`handleAlarm` 把在库人脸导向关键通道、其余进缓冲，汇总计数恢复正常。`node --check` 通过；`env -u NODE_OPTIONS npm run build` 通过（dist 重建）。
 
 ### 5.25 超时与掐断的报错文案：别让 `signal is aborted without reason` 上屏
 

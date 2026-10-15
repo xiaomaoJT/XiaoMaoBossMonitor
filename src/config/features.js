@@ -26,25 +26,6 @@ export function camExtOn(cam, key) {
 }
 
 /**
- * 通道级「人脸命中」模式开关。
- *
- * ⚠️ 与上面 `camExtOn` 的「缺省即参与」语义**相反**：这里缺省是**关**。
- *    因为它是**收窄推送**的限制型开关 —— 一旦为真，这一路**只有命中已录入人脸
- *    （在库人脸）的变动才会推送**，画面变动 / 人形 / 姿态 / 区域都不再单独推。
- *    默认打开会悄悄改变所有人现有的推送行为，所以只有显式设为 true 才算开。
- *
- * 依赖链（强依赖，缺一不可）：人形识别 `cam.ai` → 人脸识别 `cam.aiExt.face`
- *    → 全局人脸总闸 `options.face.enabled` → 底库非空 → 才可能"命中"。
- * 判定「这一路是否真的处于命中模式」用 EXT_FEATURES 里那一条的 `on`（含全部前置）。
- *
- * @param {object} cam 通道配置
- */
-export function camHitOn(cam) {
-  const ext = (cam && cam.aiExt) || {}
-  return ext.hit === true
-}
-
-/**
  * on(cam, options) 的语义是「这一刻它真的在跑」：
  * 通道开着人形识别 + 通道级没关 + 全局总闸开着
  * （区域/计数还要求前置条件成立，例如真圈过区域）。
@@ -55,21 +36,6 @@ export const EXT_FEATURES = [
     label: '人脸识别',
     short: '人脸',
     on: (cam, o) => !!(cam && cam.ai) && camExtOn(cam, 'face') && !!(o.face && o.face.enabled)
-  },
-  {
-    key: 'hit',
-    label: '人脸命中',
-    short: '人脸命中',
-    /*
-     * 只有「人在库」才算命中，所以它必须建立在前面的链路上：
-     *   人形识别开 → 这一路的人脸识别开 → 全局人脸总闸开 → 才可能命中。
-     * 三者任一不成立，「人脸命中」都不算在跑（画面上就不该亮这个芯片）。
-     */
-    on: (cam, o) =>
-      !!(cam && cam.ai) &&
-      camExtOn(cam, 'face') &&
-      camHitOn(cam) &&
-      !!(o.face && o.face.enabled)
   },
   {
     key: 'pose',
