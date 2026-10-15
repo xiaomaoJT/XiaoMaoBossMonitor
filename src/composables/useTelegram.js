@@ -213,6 +213,64 @@ export async function sendTelegramText(cfg, html, opts = {}) {
   return parse(res)
 }
 
+/* ==================== 长文本分条 ==================== */
+
+/** 单条消息字符上限（Telegram 硬限 4096，留出转义与余量） */
+export const TG_MSG_CHARS = 3500
+/** 分条之间的间隔：Telegram 对同一会话的连续发送有限流，轰过去容易 429 */
+const TG_CHUNK_GAP_MS = 300
+
+/**
+ * 按行把一段文本切成 ≤ limit 的多条。
+ * 与 server/duty-check.mjs 的 chunkByLines 同构（同一事实只有一份实现的精神：
+ * 那边跑在后端、这边跑在前端，行为必须一致，否则同一份汇总两边切法不同）。
+ * 单行超长时按字符硬切（汇总里几乎不会出现，兜底而已）。
+ */
+export function chunkTelegramText(text, limit = TG_MSG_CHARS) {
+  const src = String(text == null ? '' : text)
+  if (src.length <= limit) return [src]
+  const out = []
+  let buf = ''
+  for (const line of src.split('\n')) {
+    if (buf && buf.length + 1 + line.length > limit) {
+      out.push(buf)
+      buf = ''
+    }
+    if (line.length > limit) {
+      if (buf) {
+        out.push(buf)
+        buf = ''
+      }
+      let s = line
+      while (s.length > limit) {
+        out.push(s.slice(0, limit))
+        s = s.slice(limit)
+      }
+      buf = s
+      continue
+    }
+    buf = buf ? `${buf}\n${line}` : line
+  }
+  if (buf) out.push(buf)
+  return out
+}
+
+/**
+ * 分条发送一段可能超长的纯文本（Telegram 单条 4096 上限）。
+ * 串行发送并留间隔，避免触发 TG 限流；返回实际分了几条。
+ *
+ * 用途：静默结束汇总 / 日常汇总这类"长了才有意义"的正文 —— 人脸命中逐条明细
+ * 会让汇总轻易越过单条上限，硬截断等于把用户最想看的那段切掉。
+ */
+export async function sendTelegramLongText(cfg, html, opts = {}) {
+  const parts = chunkTelegramText(html)
+  for (let i = 0; i < parts.length; i += 1) {
+    await sendTelegramText(cfg, parts[i], opts)
+    if (i < parts.length - 1) await new Promise((r) => setTimeout(r, TG_CHUNK_GAP_MS))
+  }
+  return parts.length
+}
+
 /**
  * 发送图片（直接上传文件，不需要公网地址）
  * @param {string} dataUrl  data:image/jpeg;base64,...

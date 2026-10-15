@@ -424,13 +424,16 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   const isDigest = ctx.variant === 'digest'
   /*
    * 展示层两个开关（只影响"怎么摆"，不影响任何统计口径 —— 数字与分区始终共用）：
-   *   faceHitDetail   —— 人脸命中**逐条**列（时间·通道·是谁），默认按人聚合。
-   *                       /collect 要"每次命中记录明细"时开；
-   *   hideEventDetail —— 省掉「事件明细（前 N 条）」。/collect 有逐条命中 + 分通道/分类型
-   *                       统计就够了，通用前 20 条是冗余（用户明确要求可不展示）。
+   *   faceHitDetail   —— 人脸命中**逐条**列（时间·通道·是谁）。默认**开**：
+   *                       「按人聚合」回答"谁来了几次"，「逐条明细」回答"每次几点"，
+   *                       两类信息互补，用户明确要求汇总里两样都要（可传 false 关掉）。
+   *   hideEventDetail —— 省掉「事件明细（前 N 条）」。除 /collect 这类手动回查外的
+   *                       **推送类**汇总（静默结束 / 日常汇总 / 通道静默汇总）一律
+   *                       不摆通用明细：人脸命中已单独分区逐条列，其余事件看
+   *                       「按通道 / 按类型」统计就够了（用户：其他明细可简化或取消）。
    */
-  const faceHitDetail = ctx.faceHitDetail === true
-  const hideEventDetail = ctx.hideEventDetail === true
+  const faceHitDetail = ctx.faceHitDetail !== false
+  const hideEventDetail = ctx.hideEventDetail === true || !isRange
   const scopeName = String(ctx.scopeName || '').trim()
   const scopeSuffix = scopeName ? ` · ${scopeName}` : ''
   const titleName = isRange
@@ -642,13 +645,16 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     '',
     // 「人脸命中」单独成区：静默期间最该被一眼看到的就是这条（谁来过），
     // 埋在下面的事件明细里等于没有。没有命中就整块不出现。
+    // 区里两样都给：先"共 N 次命中 · M 人"总账 + 按人计数，再逐条明细
+    // （每次几点、哪路、是谁、相似度）—— 统计次数与命中明细缺一不可。
     ...(faceHits.length || strangerFaces
       ? [
-          faceHitDetail ? '**🚨 人脸命中（在库）· 逐条**' : '**🚨 人脸命中（在库）**',
+          '**🚨 人脸命中（在库）**',
           ...(faceHits.length
             ? [
                 `- 共 **${hitTotal}** 次命中 · ${faceHits.length} 人`,
-                faceHitDetail ? perHitLines : hitLines
+                ...hitLines.split('\n'),
+                ...(faceHitDetail && perHitLines ? ['', '**命中明细（逐条）**', perHitLines] : [])
               ]
             : ['- 本时段无在库人员命中']),
           ...(strangerFaces ? [`- 另有 ${strangerFaces} 次未识别的人脸（陌生人，不计入命中）`] : []),
@@ -665,7 +671,9 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     ...(isDigest && personImgN
       ? ['- 含完整人形补图 **' + personImgN + '** 张（原图见事件面板）', '']
       : []),
-    // hideEventDetail（/collect）：人脸命中已逐条 + 分通道/分类型统计够了，通用前 20 条省掉
+    // 通用「事件明细（前 N 条）」只在 /collect 这类手动回查（range）里摆：
+    // 推送类汇总（静默结束 / 日常汇总 / 通道静默汇总）有人脸命中逐条分区 +
+    // 按通道/按类型统计就够了，通用明细属噪音，整块省掉。
     ...(hideEventDetail
       ? []
       : [

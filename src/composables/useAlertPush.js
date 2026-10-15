@@ -51,6 +51,7 @@ import {
   directPushRecipients,
   normalizeTelegram,
   sendTelegramAlarm,
+  sendTelegramLongText,
   sendTelegramText,
   telegramGroupLink,
   telegramMessageLink
@@ -520,7 +521,11 @@ export function useAlertPush(options, hooks = {}) {
     const sent = []
     if (ids.includes('tg')) {
       try {
-        await sendTelegramText(readCfg('tg'), summary.plain || summary.html || '')
+        /*
+         * 分条发送：汇总带人脸命中逐条明细后很容易越过 TG 单条 4096 上限，
+         * 硬发会被 API 打回（整条丢失），硬截断又会把最该看的明细切掉。
+         */
+        await sendTelegramLongText(readCfg('tg'), summary.plain || summary.html || '')
         recordPush('tg', true)
         sent.push('TG')
       } catch (e) {
@@ -2449,16 +2454,20 @@ export function useAlertPush(options, hooks = {}) {
     const to = directPushRecipients(tg)
     if (!to.length) return { ok: false, sent: 0, reason: '' }
 
-    // 文本消息上限 4096，留出转义与余量；图片说明上限 1024
-    const body = String(payload.html || plainFromMarkdown(payload.text || payload.title || '')).slice(0, 3500)
-    const caption = String(payload.caption || body).slice(0, 1024)
+    /*
+     * 文本消息上限 4096，留出转义与余量；图片说明上限 1024。
+     * 文本类（尤其「静默汇总」这种带逐条命中明细的长正文）走分条发送，
+     * 不再硬截断 —— 截断会把用户最想看的人脸命中明细切掉。
+     */
+    const fullBody = String(payload.html || plainFromMarkdown(payload.text || payload.title || ''))
+    const caption = String(payload.caption || fullBody).slice(0, 1024)
     let sent = 0
     const fails = []
     for (const chatId of to) {
       const cfg = { ...tg, chatId }
       try {
         if (payload.image) await sendTelegramAlarm(cfg, { image: payload.image, caption, mode: tg.sendMode })
-        else await sendTelegramText(cfg, body)
+        else await sendTelegramLongText(cfg, fullBody)
         sent += 1
       } catch (e) {
         /*
