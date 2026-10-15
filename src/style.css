@@ -320,6 +320,16 @@ textarea {
   background: var(--accent);
 }
 
+/* 总开关中间态：部分通道已开启（并非全部） */
+.switch.mid {
+  background: color-mix(in srgb, var(--warn, #e0a400) 40%, transparent);
+}
+
+.switch.mid::after {
+  left: 12px;
+  background: var(--warn, #e0a400);
+}
+
 /* ---------- 自定义摆放时禁用选中，避免拖动时选到文字 ---------- */
 body.free-dragging,
 body.free-dragging * {

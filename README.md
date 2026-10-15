@@ -1681,7 +1681,7 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 #### 三条铁律
 
 1. **只在非静默时段工作（让位）**。此刻只要有任一静默窗口生效（全局免打扰 ∨ 这一路的通道静默），日常静默就**不吸收新事件** —— 否则同一条事件会同时进"静默汇总"和"日常汇总"两份。已经收进 digest 缓冲的那批**不丢**：窗口期间不发，窗口一结束由 30 秒心跳补发。
-2. **不吸收关键事件**。判据是 `isFaceHit`（在库的人脸命中，`!!rec.faceName`），与推送收窄 / TG 直推 / `/hits` / 统计四处**共用同一份**。掉线 / 上线等系统事件根本不走报警通道（走 `sendDirect`），天然不受影响。
+2. **不吸收关键事件**。判据是 `isFaceHit`（在库的人脸命中，`!!rec.faceName`），与推送收窄 / TG 直推 / `/hits` / 统计四处**共用同一份**。待录入满库（`pushDirectToUsers`）也从来不走 digest。但**系统通知（设备离线/上线、定时巡检）不是关键事件** —— 它们走 `sendDirect`，会被**另一套「系统日常汇总」**收掉（见下条）。关键事件（人脸命中 / 满库 / 静默提醒 / 静默汇总）无论何时都照推，不受系统汇总影响。
 3. **没有事件就不发**。与通道静默一致：为"这段时间什么都没发生"补一条通知，等于把刚省下的打扰又还回去。
 
 #### 判定只有一处：`defaults.camDigestState`
@@ -1689,6 +1689,19 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 引擎（`useAlertPush.digestStateOf`）与展示层（`/cams`、设置页 `camDigestInfo`）都调它，只是各自把"此刻有没有静默窗口"喂进去。返回里 `active` 与 `pausedBySilent` 是**两个不同的"没生效"**：前者是"压根没开 / 一个渠道都没勾"，后者是"配了、也让路给静默窗口了" —— 设置页文案必须能区分，否则用户会以为配置丢了。各写一份判定的典型症状是「界面说在汇总、实际没汇总」。
 
 **配置挂在 `cam.digest`**（与 `cam.silent` 同理）：随通道生灭。另开一张 `_camDigest: { 'cam-1': … }` 就得自己维护增删改名，迟早留下僵尸配置。
+
+#### 系统通知（设备离线/上线、定时巡检）也收入「系统日常汇总」
+
+日常事件静默原本只收"报警类事件"。现在把**系统通知**也并入：设备离线/上线（`sendDirect` 的 `kind:'status'`）和**定时**巡检（`kind:'patrol'` 且 `digestable:true`）不再实时推，而是攒进一条独立的 `digestSystemBuf`，在**首个活跃 digest 通道**的间隔到点时作为「系统日常汇总」一次性发出。它与 per-cam 报警汇总**平行、各发各的**（一个事件报警走 digest，一个系统通知走 system digest，互不串）。
+
+- **手动 `/patrol` 永远实时推**：`digestable:false` 的不吸收，即便 digest 开着也立即发。待录入满库（`pushDirectToUsers`）根本不走 `sendDirect`，关键事件单发不受影响。
+- **判定复用同一份 `camDigestState`**：此刻**没有任何通道**处于日常静默生效态 → 系统通知**回退实时推**（不会憋死在缓冲里，缓冲里若有残留也逐条 `sendDirect({skipDigest:true})` 补发）；一旦有活跃通道就让位给 digest。
+- **吸收与实时发送共用同一份渠道收口**：先按 `restrictIds` 收口，再按各渠道 `statusAlerts` / `patrol` 开关过滤。用户关掉了该类通知（比如三端都把 `statusAlerts.enabled` 设 false）→ **既不吸收也不实时发**，与原有行为一致 —— 否则 digest 会把用户明确关掉的通知又偷偷发出来。
+- **排版复用 `buildSystemDigestSummary`**（`useDingTalk.js`），与报警汇总共用 `buildSilentSummary` 同一套间隔文案（`digestIntervalLabel`）；正文分「🔧 设备状态变动」「🧭 定时巡检」两段，头部写 `digestIntervalLabel(ctx.intervalMinutes)`。
+- **`stopAll()` 一并清系统缓冲**：`digestSystemTimer` 拆掉、`digestSystemBuf` 清空、`digestSystemSeen` 清、`digestSystemSince` 归零。
+- **远程开关**：`/digest`（总开关，一键开/关所有通道）、`/cdigest <通道> <on|off>`（单路）；两者都走配置落盘 + bump `configRev`，前端/其他端**自动拉取生效**（`App.vue` 的 `alignWithBackend` 在 `syncRev > localRev` 时 `pullFromBackend({reason:'silent'})`，无轮询死循环）。设置页监控通道 tab 顶部也有「日常事件静默（总开关）」一键接管所有通道（保留各通道独立的渠道与间隔）。
+- **后端复用前端 `useAlertPush.sendDirect`**（headless-monitor.mjs 顶部"复用前端 useAlertPush 全套"）：改前端一处、前后端两种模式同时覆盖，不必各写一份。
+- **一致性探针断言**：用户关掉 `statusAlerts`/`patrol` 时，系统通知既不进缓冲也不实时发，且不会误排系统汇总定时器。
 
 #### 几个"看着能跑、其实会错"的细节
 
@@ -1712,6 +1725,7 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 > `engine.mjs` **74/74**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`：负向基线"关了就立即推"、开启后不推且排程、**触发排程回调真的发出汇总**、去重、没有事件不发、人脸命中不受影响、陌生人进缓冲、全局/本路静默都让位、渠道勾选只静默勾中的那几端、零渠道不生效、`throughSilence` 缺省/显式关/按端各自生效/`camId` 生效、通道被删清缓冲、`stopAll` 后连已排的定时器回调也不补发）；
 > `summary.mjs` **26/26**（`buildSilentSummary({variant:'digest'})`：标题与引言，且把 digest / cam / silent **三个变体的正文逐字节比对必须相同** —— 只允许措辞不同，统计口径一个字都不许差；间隔文案与 `digestIntervalLabel` 同源）；
 > `ui-probe.mjs` **69/69**（真 `dist/` + 真 localStorage，断言优先看实拍几何与文案）：[A] 老存档（`cam` 上没 `digest` 字段）照样渲染且默认「未开启」、[B] 开关/下拉/渠道与实时文案、[C] 改间隔文案立刻跟随、[D] 只勾一部分 / 全取消时说"暂不生效"、[E] 保存后 `cam.digest` 落盘、[F] 三处 `throughSilence` 默认开、[F1] TG 那处随整块收起、[F2] 关一处不波及另两处且落盘、[G] 新增一路自带 `digest`、[H] 免打扰覆盖此刻时界面自己说「静默时段中 · 暂不汇总」。
+> 系统通知吸收（新增）：`/tmp/digest-system-probe/engine.mjs` **24/24**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`）：[1] digest 关 → status / 定时 patrol 立即实时推（6 条 = 2 通知 × 3 端）、返回非 absorbed；[2] digest 开 → status / 定时 patrol 进系统缓冲、0 实时推、排 300000ms 定时器，手动 patrol 仍实时；[3] 无活跃 digest 通道 → status 回退实时推；[4] 到点触发系统汇总、正文含「系统日常汇总」+ 状态变动 + 巡检、三端各 1；[5] 同 key 状态去重；[6] 无系统通知不排定时器；[7] 一致性：用户关掉 `statusAlerts`/`patrol` → 既不吸收也不实时发、不排定时器。
 > 回归：`critical-probe` 30/30、`parity-commands` 25/25、`face-group unit` 50/50、`pending-full` 39/39 + frontend-wiring 33/33、`collect` 24/24 + summary-detail 21/21、`search` 46/46、`temp-silent` 7/7。
 > 回退验证（每个变异只改一处生产代码、跑完**逐字节**还原并核对）：
 

@@ -1304,12 +1304,12 @@ async function alignWithBackend() {
 
   if (localRev.value > 0 && syncRev.value > localRev.value) {
     /*
-     * 后端比本机新 —— 说明**别的设备**改过后端。
-     * 这里刻意不静默覆盖本机：本机可能也有还没推上去的改动，
-     * 直接以后端为准会把它悄悄抹掉；反过来直接推翻后端则会抹掉别人刚做的修改。
-     * 所以只把事实摆出来（设置页的「配置同步」区），由用户点一下决定。
+     * 后端比本机新 —— 说明**别的设备**（或远程指令 /digest、/cdigest）改过后端。
+     * 采用「自动拉取并生效」：静默拉取并采用远端配置，无需用户手动确认。
+     * 采用后 markSynced + markPushSynced 把本机指纹对齐，不会造成轮询死循环。
+     * （本机若有未推上去的改动，被远端这次更新按"以后端为准"覆盖，是自动同步的取舍。）
      */
-    console.warn(`⚠️  后端配置（rev ${syncRev.value}）比本机（rev ${localRev.value}）新，请在设置页选择以哪边为准`)
+    await pullFromBackend({ confirm: false, reason: 'silent' })
     return
   }
 

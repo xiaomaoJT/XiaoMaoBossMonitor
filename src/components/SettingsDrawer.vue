@@ -57,6 +57,19 @@
             <em v-else-if="t.key === 'status'" :class="statusBadgeOn ? 'ok' : 'muted'">
               {{ statusBadgeOn ? 'on' : 'off' }}
             </em>
+            <!--
+              检测识别 / 后端检测两页也上 on/off 徽标：
+              前者读本机「开启实时分析」（opts.analysisEnabled），后者读常驻服务开关
+              （opts.backend.enabled）—— 这是**两件事**（本机跑 vs 服务端跑），
+              必须各读各的，绝不共用同一个判据，否则会出现「本机页说 on、后端页也说 on」
+              却只有一个在真正检测的假象。
+            -->
+            <em v-else-if="t.key === 'detect'" :class="opts.analysisEnabled ? 'ok' : 'muted'">
+              {{ opts.analysisEnabled ? 'on' : 'off' }}
+            </em>
+            <em v-else-if="t.key === 'backend'" :class="opts.backend && opts.backend.enabled ? 'ok' : 'muted'">
+              {{ opts.backend && opts.backend.enabled ? 'on' : 'off' }}
+            </em>
           </button>
         </nav>
 
@@ -73,6 +86,21 @@
             「检测识别」页开过对应总开关才会真正生效，把不看的通道关掉最省算力。
             每路下方可以单独设置「这一路推送到哪些渠道」（钉钉 / 企业微信 / Telegram），
             关掉总开关则三个渠道都不推。渠道本身的凭据与频率限制在对应的推送标签页里配置。
+          </p>
+
+          <div class="block-head digest-all-head">
+            <h3>日常事件静默（总开关）</h3>
+            <span
+              class="switch"
+              :class="{ on: allDigestOn, mid: someDigestOn && !allDigestOn }"
+              @click="toggleAllCamDigest"
+              title="一键开启 / 关闭所有通道的日常事件静默"
+            ></span>
+          </div>
+          <p class="hint">
+            总开关一键开启后，所有通道都按各自的「日常事件静默」把非关键事件摊平成定期播报
+            （默认每 30 分钟汇总一次、推送到已配置的渠道）。设备离线/上线与定时巡检也一并收入汇总，不再实时打扰。
+            各通道卡片下方仍可单独微调开关、渠道与间隔；关闭总开关会把每一路的开关一并关掉。
           </p>
 
           <div class="cam-list" v-if="cams.length">
@@ -1975,11 +2003,46 @@
             </div>
           </template>
 
-          <!-- ---------- 后端检测服务（headless） ---------- -->
+          <!-- ---------- 推送信息（消息页脚：这一行会写进每条推送） ---------- -->
           <div class="sub-title">
-            后端检测服务
-            <em>人形 / 人脸 / 姿态监听与推送整体搬到常驻设备，本机页面关了也在盯</em>
+            推送信息
+            <em>每条消息都会带上这一行，方便分辨是哪个端发出来的</em>
           </div>
+          <div class="opt">
+            <span>
+              <strong>运行设备</strong>
+              <em>自动识别，无需配置</em>
+            </span>
+            <!--
+              item 107：原来是原生 title 气泡 —— 延迟一秒、样式不可控、长文案
+              会被挤成窄高的一竖条。改成跟随鼠标的浮层，并把完整设备信息摊成多行。
+            -->
+            <InfoTip multiline :text="runtimeTipText">
+              <template #trigger>
+                <span class="state-chip">{{ runtimeLine(BRAND) }}</span>
+              </template>
+            </InfoTip>
+          </div>
+        </section>
+
+        <!--
+          ==================== 后端检测（headless 常驻服务） ====================
+          从「检测识别」里拆出来单独一页：本机算法与「把算法搬到服务端」是同一件事的
+          两种跑法，混在一页里，用户分不清「我关的是本机分析、还是后端服务」。
+
+          ⚠️ 两个开关的语义必须各说各的：
+            · 检测识别页的「开启实时分析」= 浏览器自己跑不跑（本页关掉页面就没了）
+            · 本页的「启用后端检测」  = 常驻服务跑不跑（关掉本机页面也在盯）
+        -->
+        <section class="block" v-show="tab === 'backend'">
+          <div class="block-head">
+            <h3>后端检测服务</h3>
+            <span class="state-chip" :class="backendState">{{ backendStateText }}</span>
+          </div>
+          <p class="hint">
+            人形 / 人脸 / 姿态监听与推送整体搬到常驻设备，本机页面关了也在盯。
+            开启后本机 AI 检测全部停掉（省算力、不发烫），检测与推送都交给后端服务。
+          </p>
           <label class="opt">
             <span>
               <strong>启用后端检测</strong>
@@ -1988,7 +2051,6 @@
                 关掉本机页面，服务端照旧检测、照旧往钉钉 / 企微 / Telegram 推送。
                 当前配置（流地址 / 区域 / 推送凭据 / 人脸库）会自动同步过去，
                 <b>不需要手改 server/config.json</b>。
-                <b class="state-chip" :class="backendState">{{ backendStateText }}</b>
               </em>
             </span>
             <span class="switch" :class="{ on: opts.backend && opts.backend.enabled }" @click="toggleBackend"></span>
@@ -2159,27 +2221,6 @@
               </div>
             </div>
           </template>
-
-          <!-- ---------- 推送与设备 ---------- -->
-          <div class="sub-title">
-            推送信息
-            <em>每条消息都会带上这一行，方便分辨是哪个端发出来的</em>
-          </div>
-          <div class="opt">
-            <span>
-              <strong>运行设备</strong>
-              <em>自动识别，无需配置</em>
-            </span>
-            <!--
-              item 107：原来是原生 title 气泡 —— 延迟一秒、样式不可控、长文案
-              会被挤成窄高的一竖条。改成跟随鼠标的浮层，并把完整设备信息摊成多行。
-            -->
-            <InfoTip multiline :text="runtimeTipText">
-              <template #trigger>
-                <span class="state-chip">{{ runtimeLine(BRAND) }}</span>
-              </template>
-            </InfoTip>
-          </div>
         </section>
 
         <!-- ==================== 推送模板（三端统一配置 + 实时预览） ==================== -->
@@ -3847,11 +3888,13 @@ import {
   faceRowsVersion,
   faces as faceLib,
   groupFaces,
+  GROUP_SIM_KEY,
   loadBackendPendingFaces,
   mergeFaces,
   pendingFaces,
   pendingLibOpen,
   rawFaceRows,
+  readGroupSim,
   refreshFaces,
   removePendingFace,
   renameFace,
@@ -4102,6 +4145,15 @@ const CAM_CHANNELS = [
   { key: 'tg', label: 'Telegram' }
 ]
 
+/*
+ * 页签顺序 = 使用动线，刻意按「先画面/性能 → 再看报警链路 → 再钻进检测细节 → 收尾维护」排：
+ *   ① 监控通道 / 播放性能           —— 最常动的两页（加通道、调解码），必须最先够到
+ *   ② 报警提醒 / 状态巡检           —— 「什么时候响、怎么响」，接着就是它
+ *   ③ 检测识别 / 后端检测           —— 「拿什么判定」；本机算法在前、搬去服务端在后，成对出现
+ *   ④ 三个推送渠道 → 推送模板       —— 「发去哪、长什么样」，渠道按 TG / 企微 / 钉钉
+ *   ⑤ 隐私遮罩 / 外观布局 / 配置方案 —— 低频外观与整体方案
+ *   ⑥ 系统维护 / 关于系统           —— 只看不改的信息收在最后，不打断前面的操作动线
+ */
 const TABS = [
   {
     key: 'cams',
@@ -4116,28 +4168,29 @@ const TABS = [
     icon: 'M7 4.8l12 7.2-12 7.2zM4 4v16'
   },
   {
-    key: 'detect',
-    label: '检测识别',
-    desc: '移动检测与人形识别参数',
-    icon: 'M4 18a9 9 0 0 1 16 0M7.5 18a5.5 5.5 0 0 1 9 0M12 18h.01'
-  },
-  {
     key: 'alert',
     label: '报警提醒',
     desc: '通知、声音、自动放大',
     icon: 'M6 9a6 6 0 1 1 12 0v4.5l1.6 2.6H4.4L6 13.5zM10 18.5a2 2 0 0 0 4 0'
   },
   {
-    key: 'templates',
-    label: '推送模板',
-    desc: '三端报警消息的自定义排版与实时预览',
-    icon: 'M4 5h16v11H8l-4 4zM8 9h8M8 12h5'
+    key: 'status',
+    label: '状态巡检',
+    desc: '通道异常推送与定时巡检报告',
+    icon: 'M3 12h4l2.5-6 4 12 2.5-6h5'
   },
   {
-    key: 'dingtalk',
-    label: '钉钉推送',
-    desc: '机器人凭据、推送内容与频率限制',
-    icon: 'M21 4L3 11l7 2.5L12.5 21z'
+    key: 'detect',
+    label: '检测识别',
+    desc: '移动检测与人形识别参数',
+    icon: 'M4 18a9 9 0 0 1 16 0M7.5 18a5.5 5.5 0 0 1 9 0M12 18h.01'
+  },
+  /* 后端检测紧跟检测识别：两者是「同一件事跑在哪」的两种选择，必须成对出现、挨着看 */
+  {
+    key: 'backend',
+    label: '后端检测',
+    desc: '常驻后端服务：本机页面关了也在检测与推送',
+    icon: 'M4 5.5h16v5H4zM4 13.5h16v5H4zM7.5 8h.01M7.5 16h.01M17 8h.01M17 16h.01'
   },
   {
     key: 'telegram',
@@ -4151,18 +4204,29 @@ const TABS = [
     desc: '企业微信群机器人：markdown + 直接发截图',
     icon: 'M4 5.5h16A1.5 1.5 0 0 1 21.5 7v8a1.5 1.5 0 0 1-1.5 1.5h-7.2L8 20.5v-4H4A1.5 1.5 0 0 1 2.5 15V7A1.5 1.5 0 0 1 4 5.5zM7.5 10h9M7.5 13h5'
   },
-  /* 状态巡检紧跟三个推送渠道：它本质上是"推送什么"的一部分 */
   {
-    key: 'status',
-    label: '状态巡检',
-    desc: '通道异常推送与定时巡检报告',
-    icon: 'M3 12h4l2.5-6 4 12 2.5-6h5'
+    key: 'dingtalk',
+    label: '钉钉推送',
+    desc: '机器人凭据、推送内容与频率限制',
+    icon: 'M21 4L3 11l7 2.5L12.5 21z'
   },
   {
-    key: 'maintain',
-    label: '系统维护',
-    desc: '流自愈（持续异常自动恢复）与定时重启系统',
-    icon: 'M12 4v3M12 17v3M4 12H1M23 12h-3M5.6 5.6 3.5 3.5M20.5 20.5l-2.1-2.1M18.4 5.6l2.1-2.1M3.5 20.5l2.1-2.1M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z'
+    key: 'templates',
+    label: '推送模板',
+    desc: '三端报警消息的自定义排版与实时预览',
+    icon: 'M4 5h16v11H8l-4 4zM8 9h8M8 12h5'
+  },
+  {
+    key: 'mask',
+    label: '隐私遮罩',
+    desc: '一键盖住大屏、解锁密码',
+    icon: 'M3 12s3.5-6 9-6c1.3 0 2.5.3 3.5.8M21 12s-3.5 6-9 6c-1.3 0-2.5-.3-3.5-.8M4 20L20 4'
+  },
+  {
+    key: 'appearance',
+    label: '外观布局',
+    desc: '画面布局 · 报警通知位置 · 界面主题',
+    icon: 'M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.4 5.4 0 0 1 12 3zM12 21a9 9 0 0 1 0-18'
   },
   {
     key: 'profiles',
@@ -4171,17 +4235,10 @@ const TABS = [
     icon: 'M5 4h9l5 5v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM14 4v5h5M8 13h8M8 17h5'
   },
   {
-    key: 'mask',
-    label: '隐私遮罩',
-    desc: '一键盖住大屏、解锁密码',
-    icon: 'M3 12s3.5-6 9-6c1.3 0 2.5.3 3.5.8M21 12s-3.5 6-9 6c-1.3 0-2.5-.3-3.5-.8M4 20L20 4'
-  },
-  /* 外观（画面布局 + 主题 + 报警通知位置）放最后：低频操作不挡在前面 */
-  {
-    key: 'appearance',
-    label: '外观',
-    desc: '画面布局 · 报警通知位置 · 界面主题',
-    icon: 'M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36A5.4 5.4 0 0 1 12 3zM12 21a9 9 0 0 1 0-18'
+    key: 'maintain',
+    label: '系统维护',
+    desc: '流自愈（持续异常自动恢复）与定时重启系统',
+    icon: 'M12 4v3M12 17v3M4 12H1M23 12h-3M5.6 5.6 3.5 3.5M20.5 20.5l-2.1-2.1M18.4 5.6l2.1-2.1M3.5 20.5l2.1-2.1M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z'
   },
   {
     /*
@@ -5180,7 +5237,6 @@ const deletingSample = reactive({})
 /** 当前点开看全部角度的那一组 */
 const selectedGroupKey = ref('')
 
-const GROUP_SIM_KEY = 'monitor-wall-face-group-sim-v1'
 /**
  * 是否按相似度把「同一个人」的多角度样本归到一张卡片。
  *
@@ -5188,15 +5244,12 @@ const GROUP_SIM_KEY = 'monitor-wall-face-group-sim-v1'
  * 但相似度是**概率**，偶尔会把两个长得像的人并到一起，所以必须留一个关掉的开关：
  * 关掉后只按「同名」这个**确定**的判据归类，立刻恢复一张一条。
  * 这个偏好存 localStorage：它属于"我想怎么看这份名单"，不该每次打开设置都被重置。
+ *
+ * GROUP_SIM_KEY / readGroupSim 从 useFaceLib 导入（单一来源）——识别路径
+ * （useAiExtras 的 matchFaceGroup）也读同一份偏好，才能保证"识别报的名字"
+ * 和"库里归类显示"用的是同一套归类判据。
  */
 const groupBySim = ref(readGroupSim())
-function readGroupSim() {
-  try {
-    return localStorage.getItem(GROUP_SIM_KEY) !== '0'
-  } catch (e) {
-    return true
-  }
-}
 function toggleGroupBySim() {
   groupBySim.value = !groupBySim.value
   try {
@@ -5259,11 +5312,13 @@ const deletingFace = reactive({})
  * 点「录入」时把这个名字传给 addFace（留空 = 自动编号，保持旧行为）。 */
 const pendingAssign = reactive({}) // pf.id -> ''（新建）| 已知名字 | '__custom__'
 const pendingCustom = reactive({}) // pf.id -> 自定义名字文本
-/** 当前人脸库里已有的名字集合：下拉「归入某人」的选项来源。
- * 用 faceLib（与卡片分组同一份数据），去重后列出。 */
+/** 当前人脸库里已有的「归类名称」集合：下拉「归入某人」的选项来源。
+ * 刻意取 faceGroups 的组名（而不是每条样本各自的 name）——库里归好类的人
+ * 只应有一个名字出现在列表里，否则下拉会出现「人脸 1」「人脸 12」这种
+ * 同一个人被拆成多个选项，与卡片显示、识别上报的归类名都不一致。 */
 const faceNameOptions = computed(() => {
   const s = new Set()
-  for (const f of faceLib.value || []) if (f && f.name) s.add(f.name)
+  for (const g of faceGroups.value || []) if (g && g.name) s.add(g.name)
   return [...s]
 })
 /** 把下拉 + 自定义框解析成最终传给 addFace 的名字：'' = 自动编号 */
@@ -6539,6 +6594,26 @@ function setCamDigestInterval(cam, v) {
   ensureCamDigest(cam).intervalMinutes = clampDigestMinutes(v)
 }
 
+/** 总开关：是否所有通道都开了日常事件静默 */
+const allDigestOn = computed(() =>
+  cams.value.length > 0 && cams.value.every((c) => !!(c.digest && c.digest.enabled === true))
+)
+/** 部分通道开了（用于总开关显示中间态） */
+const someDigestOn = computed(() =>
+  cams.value.some((c) => !!(c.digest && c.digest.enabled === true))
+)
+
+/** 一键开启 / 关闭所有通道的日常事件静默（保留各通道独立的渠道与间隔设置） */
+function toggleAllCamDigest() {
+  const turnOn = !allDigestOn.value
+  cams.value.forEach((cam) => {
+    const d = ensureCamDigest(cam)
+    d.enabled = turnOn
+    // 开启时若这一路没选渠道，补上默认渠道，否则开了也不生效（camDigestState 要求 channels 非空）
+    if (turnOn && !d.channels.length) d.channels = [...DEFAULT_CAM_DIGEST_CHANNELS]
+  })
+}
+
 /* ---------- 配置方案（多套配置保存 / 切换 / 导入导出） ---------- */
 const PROFILE_KEY = 'monitor-wall-profiles-v1'
 const profileName = ref('')
@@ -6824,6 +6899,16 @@ const TG_COMMANDS = [
     desc: '通道静默：只让某一路监控在指定时段不推送。如 /csilent 门口 2（2 小时）、/csilent 门口 08:00（到 08:00）、/csilent off 门口（恢复）'
   },
   { cmd: 'cams', usage: '/cams', desc: '通道状态一览：每路是否在线出帧、是否正处在通道静默（含到几点、静默哪些渠道）' },
+  {
+    cmd: 'digest',
+    usage: '/digest <on|off>',
+    desc: '日常事件静默总开关：一键开启 / 关闭所有通道的「按间隔汇总」（非关键事件与设备离线/上线、定时巡检都不再实时推，而是定期汇总）'
+  },
+  {
+    cmd: 'cdigest',
+    usage: '/cdigest <通道> <on|off>',
+    desc: '只开 / 关指定那一路的日常事件静默（其余通道不受影响）。通道用名字、id（cam-1）或序号（1）'
+  },
   /*
    * 这里**不再**有 `check` 条目：`/check duty` 已合并进 `/duty`（服务端只认
    * `/duty` 与免空格的 `/checkduty`），旧列表还留着它 → 用户照着设置页发

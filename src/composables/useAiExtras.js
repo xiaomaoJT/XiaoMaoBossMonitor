@@ -31,8 +31,9 @@ import {
   DEFAULT_FACE_MAX,
   DEFAULT_FACE_THRESHOLD,
   PENDING_MAX,
-  matchFace,
-  pushPendingFace
+  matchFaceGroup,
+  pushPendingFace,
+  readGroupSim
 } from './useFaceLib.js'
 
 /** COCO 17 关键点下标 */
@@ -300,16 +301,18 @@ export function useAiExtras(options) {
       // 特征到手 → 记「成功时刻」，之后整窗复用（这一刻才把人从「待重试」里放出来）
       track.faceOkAt = now
       const thumb = faceThumb(frame.canvas, face, FACE_SHOT_SIZE)
-      const hit = await matchFace(vec, fc.threshold)
+      // matchFaceGroup：把命中的样本映射到「归类名称」——库里归好类的人只报一个名字
+      const hit = await matchFaceGroup(vec, { threshold: fc.threshold, bySimilarity: readGroupSim() })
       const slot = faces.value.find(
         (f) => Math.abs((f.x + f.w / 2) - (face.x + face.w / 2)) < 0.02 &&
                Math.abs((f.y + f.h / 2) - (face.y + face.h / 2)) < 0.02
       )
 
       if (hit && !hit.miss) {
-        track.face = { id: hit.face.id, name: hit.face.name, score: hit.score }
+        const who = hit.groupName
+        track.face = { id: hit.face.id, name: who, score: hit.score }
         if (slot) {
-          slot.name = hit.face.name
+          slot.name = who
           slot.known = true
         }
         if (!fc.eventOnKnown) continue
@@ -319,13 +322,13 @@ export function useAiExtras(options) {
         emit({
           type: 'face',
           known: true,
-          faceName: hit.face.name,
+          faceName: who,
           faceScore: hit.score,
           box: face,
           thumb: thumb || '',
           trackId: track.id,
           at: now,
-          text: `识别到「${hit.face.name}」（相似度 ${(hit.score * 100).toFixed(0)}%）`,
+          text: `识别到「${who}」（相似度 ${(hit.score * 100).toFixed(0)}%）`,
           source: 'face'
         })
       } else {
@@ -466,10 +469,10 @@ export function useAiExtras(options) {
               const aligned = alignFace(canvas, face.kps)
               const vec = aligned ? await faceEmbedding(aligned) : null
               if (vec) {
-                const hit = await matchFace(vec, fc.threshold)
+                const hit = await matchFaceGroup(vec, { threshold: fc.threshold, bySimilarity: readGroupSim() })
               out.faceThumb = faceThumb(canvas, face, FACE_SHOT_SIZE)
               if (hit && !hit.miss) {
-                out.faceName = hit.face.name
+                out.faceName = hit.groupName
                 out.faceScore = hit.score
               } else {
                 out.faceScore = hit ? hit.score : 0

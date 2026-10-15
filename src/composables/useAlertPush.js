@@ -21,6 +21,7 @@ import {
   buildMergedMessage,
   buildSilentEndMessages,
   buildSilentSummary,
+  buildSystemDigestSummary,
   formatTime,
   normalizeDingTalk,
   sendDingTalk,
@@ -818,6 +819,32 @@ export function useAlertPush(options, hooks = {}) {
     return st
   }
 
+  /*
+   * 系统通知（状态异常/恢复 + 定时巡检）的日常静默缓冲。
+   * 这两类不是「某一路通道的报警事件」，而是跨通道的系统通知，因此单独成一份缓冲，
+   * 在首个活跃 digest 通道的间隔到点时，作为「系统日常汇总」一次性发出。
+   * 与 per-cam 的 digestStore 平行：per-cam 收报警事件，这一份收系统通知。
+   * 没有任何通道处于日常静默生效态时，落进缓冲的通知会回退成实时推（见 flushSystemDigest）。
+   */
+  const digestSystemBuf = []
+  const digestSystemSeen = new Set()
+  let digestSystemTimer = null
+  let digestSystemSince = 0
+
+  /** 是否有任意通道此刻处于「日常事件静默生效中」（不在静默窗口里）。系统通知吸收的总闸门。 */
+  function digestAnyActive(now = Date.now()) {
+    const list = camerasOf()
+    if (!Array.isArray(list)) return false
+    return list.some((cam) => cam && cam.id && digestStateOf(cam, now).active)
+  }
+
+  /** 第一个活跃 digest 通道：系统汇总发往它的 digest 渠道、按它的间隔。没有则返回 null。 */
+  function firstActiveDigestCam(now = Date.now()) {
+    const list = camerasOf()
+    if (!Array.isArray(list)) return null
+    return list.find((cam) => cam && cam.id && digestStateOf(cam, now).active) || null
+  }
+
   /**
    * 这一路此刻的日常静默状态 —— **唯一判定**在 `defaults.camDigestState`。
    * 这里只负责把"此刻有没有静默窗口生效"喂给它：那是本文件的运行时状态
@@ -950,6 +977,85 @@ export function useAlertPush(options, hooks = {}) {
       clearCamDigest(id)
       digestStore.delete(id)
     }
+    /*
+     * 系统通知日常静默：与 per-cam 同构，挂在同一个 30 秒心跳兜底。
+     * 单独一份缓冲要单独兜底 —— 否则只有系统通知、没有任何一路报警事件时，
+     * 没有 per-cam 定时器会去排它，缓冲就永远发不出去。
+     */
+    if (digestSystemBuf.length) {
+      if (armSystemDigest(now)) flushSystemDigest().catch(() => {})
+    }
+  }
+
+  /**
+   * 系统通知日常静默：排程到点（幂等，心跳每 30 秒都会调它）。
+   * 复用首个活跃 digest 通道的间隔；定时器到点把缓冲作为「系统日常汇总」发出。
+   * 与 armCamDigest 同构：静默窗口生效（silentActive）期间不排定时器，交给心跳重试。
+   * @returns {boolean} 此刻是否**已到点** —— true 表示调用方应当立刻 flush
+   */
+  function armSystemDigest(now = Date.now()) {
+    if (digestSystemTimer) return false
+    if (!digestSystemBuf.length) return false
+    const cam = firstActiveDigestCam(now)
+    if (!cam) return false
+    const s = digestStateOf(cam, now)
+    if (!s.active) return false // 让位给静默窗口：不排定时器，缓冲留着交给心跳
+    const due = (digestSystemSince || now) + s.intervalMs
+    if (now >= due) return true
+    digestSystemTimer = setTimeout(() => {
+      digestSystemTimer = null
+      flushSystemDigest().catch(() => {})
+    }, Math.max(1000, due - now))
+    return false
+  }
+
+  /**
+   * 系统通知日常静默收尾：把攒下的状态异常/恢复 + 定时巡检作为「系统日常汇总」发出。
+   * 与 flushCamDigest 平行：
+   *   · 没有活跃 digest 通道 → 回退实时推（别把系统通知憋死，用原始 payload 重走 sendDirect）；
+   *   · 此刻让位给静默窗口 → 缓冲留着，等心跳重试（与 per-cam 同口径）。
+   */
+  async function flushSystemDigest(opts = {}) {
+    if (!digestSystemBuf.length) return null
+    const now = Date.now()
+    const cam = firstActiveDigestCam(now)
+    const s = cam ? digestStateOf(cam, now) : { active: false }
+    if (!opts.test && !s.active) {
+      // 让位给静默窗口 / 没有活跃通道：缓冲留着，交给心跳重试（或回退实时推）
+      if (!cam) {
+        const items = digestSystemBuf.splice(0, digestSystemBuf.length)
+        digestSystemSeen.clear()
+        digestSystemSince = 0
+        for (const it of items) await sendDirect({ ...it, skipDigest: true })
+      }
+      return null
+    }
+    const ids = restrictIds(s.channels)
+    if (!ids.length) {
+      // 活跃通道的 digest 渠道为空（理论上 camDigestState 已拦，双保险）→ 回退实时推
+      if (!opts.test) {
+        const items = digestSystemBuf.splice(0, digestSystemBuf.length)
+        digestSystemSeen.clear()
+        digestSystemSince = 0
+        for (const it of items) await sendDirect({ ...it, skipDigest: true })
+      }
+      return null
+    }
+    const buf = digestSystemBuf.splice(0, digestSystemBuf.length)
+    digestSystemSeen.clear()
+    const since = digestSystemSince || now
+    digestSystemSince = 0
+    const summary = buildSystemDigestSummary(buf, {
+      startMs: since,
+      endMs: now,
+      intervalMinutes: s.intervalMinutes,
+      scopeName: (cam && cam.name) || ''
+    })
+    const sent = await pushSilentSummary(ids, summary)
+    if (!opts.test && sent.length) {
+      notify(`系统日常汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
+    }
+    return summary
   }
 
   /**
@@ -1470,7 +1576,7 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /** 单渠道预检 */
-  function checkChannel(id, record, now, ignoreQuiet = false) {
+  function checkChannel(id, record, now, ignoreQuiet = false, ignoreThrottle = false) {
     const def = CHANNEL_DEFS.find((x) => x.id === id)
     const c = def.read()
     if (!c.enabled) return { ok: false, off: true, reason: '未启用该渠道' }
@@ -1531,16 +1637,28 @@ export function useAlertPush(options, hooks = {}) {
     }
     if (!ignoreQuiet && inQuietHours(c, now)) return { ok: false, off: true, reason: '静默时段' }
 
-    const st = chState[id]
-    const gap = Math.max(3, Number(c.minIntervalSec) || 30) * 1000
-    if (now - (st.lastPushAt[record.id] || 0) < gap) return { ok: false, reason: '同通道间隔未到' }
+    /*
+     * 实时节流（同通道间隔 / 全局间隔 / 每分钟上限）。
+     * ⚠️ 缓冲判定（ignoreThrottle=true，见下面 handleAlarm 的 liveOk）要**跳过**它们：
+     *    静默期间本就不推送，lastPushAt / windowTs 冻结在"静默前最后一条"上，
+     *    拿它判会把窗口刚开启那一小段（lastPushAt + 间隔内）的报警全部漏出缓冲 ——
+     *    汇总于是少计，甚至整窗口的报警都落在那段里时显示「0 条 · 无需汇总」，
+     *    而事件面板里明明有记录（用户报的正是这个）。
+     *    缓冲的语义是"把该推的都记下来"，不是实时限流；限流只属于真实发送那条路
+     *    （decisions 仍带节流，不受影响）。
+     */
+    if (!ignoreThrottle) {
+      const st = chState[id]
+      const gap = Math.max(3, Number(c.minIntervalSec) || 30) * 1000
+      if (now - (st.lastPushAt[record.id] || 0) < gap) return { ok: false, reason: '同通道间隔未到' }
 
-    const globalGap = Math.max(0, Number(c.globalMinIntervalSec) || 0) * 1000
-    if (now - st.lastGlobalAt < globalGap) return { ok: false, reason: '全局间隔未到' }
+      const globalGap = Math.max(0, Number(c.globalMinIntervalSec) || 0) * 1000
+      if (now - st.lastGlobalAt < globalGap) return { ok: false, reason: '全局间隔未到' }
 
-    prune(st, now)
-    if (st.windowTs.length >= rateLimit(c, id)) {
-      return { ok: false, reason: `已达每分钟 ${rateLimit(c, id)} 条上限`, overflow: true }
+      prune(st, now)
+      if (st.windowTs.length >= rateLimit(c, id)) {
+        return { ok: false, reason: `已达每分钟 ${rateLimit(c, id)} 条上限`, overflow: true }
+      }
     }
     return { ok: true }
   }
@@ -1892,6 +2010,14 @@ export function useAlertPush(options, hooks = {}) {
       if (st.timer) clearTimeout(st.timer)
     })
     digestStore.clear()
+    // 系统通知日常静默同理：缓冲、定时器一并拆掉
+    if (digestSystemTimer) {
+      clearTimeout(digestSystemTimer)
+      digestSystemTimer = null
+    }
+    digestSystemBuf.length = 0
+    digestSystemSeen.clear()
+    digestSystemSince = 0
     pendingCount.value = 0
   }
 
@@ -1915,11 +2041,12 @@ export function useAlertPush(options, hooks = {}) {
     const camS = recordCamSilent(record, now)
 
     /*
-     * 这条事件「本来能推」的渠道。ignoreQuiet=true 已经排除了"这一路自己关了某渠道"
-     * "变动幅度低于阈值"等本就不推的情况 —— 用它区分"被静默"和"本来就不推"，
-     * 免得把后者也算进收存，汇总里冒出一堆根本没打算推的事件。
+     * 这条事件「本来能推」的渠道。ignoreQuiet=true 排除了"这一路自己关了某渠道"
+     * "变动幅度低于阈值"等本就不推的情况；ignoreThrottle=true 再排掉实时节流 ——
+     * 静默期间不推送，节流计数冻结在"静默前最后一条"，拿它判会把窗口刚开启那段的
+     * 报警漏出缓冲（汇总少计 / 显示 0 条）。缓冲是"该推的都记下"，不是实时限流。
      */
-    const liveOk = CHANNEL_DEFS.filter((d) => checkChannel(d.id, record, now, true).ok).map((d) => d.id)
+    const liveOk = CHANNEL_DEFS.filter((d) => checkChannel(d.id, record, now, true, true).ok).map((d) => d.id)
     const byGlobal =
       sState.active && quietChans.length ? liveOk.filter((id) => quietChans.includes(id)) : []
     const byCam =
@@ -2084,10 +2211,11 @@ export function useAlertPush(options, hooks = {}) {
    * @param {string} text 钉钉 / 企业微信用的 markdown
    * @param {string} html Telegram 用的 HTML（不传则用纯文本）
    */
-  async function sendDirect({ title, text, html, atAll = false, kind = 'status', key, onState: cb, onlyIds }) {
+  async function sendDirect({ title, text, html, atAll = false, kind = 'status', key, onState: cb, onlyIds, digestable, skipDigest }) {
     /*
-     * 渠道集先由 restrictIds 收口 —— 它同时负责「限定渠道」与
-     * 「限定到空的就退回全部已配置」这两件事，避免这里再各判一遍、两处走偏。
+     * 渠道集先由 restrictIds 收口，再按「各渠道该类通知是否开启」收口 ——
+     * 状态异常 / 定时巡检在各渠道里可以单独关掉。吸收与实时发送共用同一份判定，
+     * 避免日常静默（digest）把用户关掉的通知又悄悄发出来。
      */
     const allow = restrictIds(onlyIds)
     const ids = CHANNEL_DEFS.filter((d) => {
@@ -2103,6 +2231,40 @@ export function useAlertPush(options, hooks = {}) {
       if (kind === 'silent') return true
       return true
     }).map((d) => d.id)
+
+    /*
+     * 日常事件静默（cam.digest）—— 系统通知吸收：
+     * 状态异常/恢复（kind:'status'）与**定时**巡检（kind:'patrol' 且 digestable=true）不再实时推，
+     * 攒进 digestSystemBuf，在首个活跃 digest 通道的间隔到点时作为「系统日常汇总」一次性发出。
+     * ⚠️ 只在「有目标渠道 + 此刻有通道处于日常静默生效态」才吸收；
+     *    用户关掉了该类通知（ids 空）→ 既不吸收也不实时发，与原有行为一致，
+     *    否则 digest 会把用户明确关掉的通知又偷偷发出来。
+     * ⚠️ 手动 /patrol（digestable=false）永远实时推；待录入满库等关键事件根本不走 sendDirect，不受影响。
+     */
+    if (!skipDigest && ids.length && (kind === 'status' || (kind === 'patrol' && digestable === true))) {
+      const now = Date.now()
+      if (digestAnyActive(now)) {
+        const k = key || `${kind}-${now}`
+        if (!digestSystemSeen.has(k)) {
+          digestSystemSeen.add(k)
+          digestSystemBuf.push({
+            key: k,
+            time: now,
+            kind,
+            title: title || '',
+            text: text || '',
+            html: html || '',
+            atAll: !!atAll,
+            cb
+          })
+          if (!digestSystemSince) digestSystemSince = now
+          armSystemDigest(now)
+        }
+        if (cb) cb(key, 'silent', '日常事件静默已收存，将于汇总时刻一并推送')
+        return { ok: true, absorbed: true }
+      }
+      // 没有活跃 digest 通道 → 走下面实时推
+    }
     if (!ids.length) return { ok: false, reason: '没有渠道接收这类通知' }
 
     const mark = (ok) => {

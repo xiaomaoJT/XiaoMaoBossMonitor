@@ -611,6 +611,64 @@ export async function matchFace(vector, threshold = DEFAULT_FACE_THRESHOLD) {
 /** 归类默认阈值 = 识别默认阈值（同一份常量；实际使用时会传设置页那个值进来） */
 export const FACE_GROUP_THRESHOLD = DEFAULT_FACE_THRESHOLD
 
+/** localStorage 键：是否按相似度把「同一个人」的多角度样本归到一张卡片。
+ *  放在这里作为单一来源 —— 识别路径（useAiExtras）也要用它，
+ *  才能和用户在人脸库看到的「归类」保持一致。 */
+export const GROUP_SIM_KEY = 'monitor-wall-face-group-sim-v1'
+/**
+ * 读「是否按相似度归类」偏好。默认开 —— 同一个人只占一张卡片、只有一个名字。
+ * 偏好存 localStorage：它属于"我想怎么看这份名单"，不该每次打开设置都被重置。
+ * @returns {boolean}
+ */
+export function readGroupSim() {
+  try {
+    return localStorage.getItem(GROUP_SIM_KEY) !== '0'
+  } catch (e) {
+    return true
+  }
+}
+
+/**
+ * 在人脸库里找最像的人，并把命中的那条样本映射到它的「归类名称」。
+ *
+ * 为什么需要它：`matchFace` 返回的只是库里**某一条样本**（比如「人脸 12」），
+ * 但用户已经在设置页把同一人的多角度样本并到一张卡片（归类）了，
+ * 库里显示的是组代表样本的名字。识别路径若直接报 `hit.face.name`，
+ * 就会出现"库里叫张三、推送/画面里叫人脸 12"这种自相矛盾。
+ *
+ * 本函数沿用与界面**完全相同**的归类判据（groupFaces：同名 → 同一人；
+ * 相似度 ≥ 阈值 → 同一人），找到命中样本所在的组，回它的代表名，
+ * 于是"归了类，归类下的就判断为同一人"——无论被拍到哪个角度、命中哪条样本，
+ * 报出来的都是同一个归类名。
+ *
+ * @param {Float32Array|number[]} vector 已归一化
+ * @param {{threshold?:number, bySimilarity?:boolean}} [opts]
+ *        threshold：识别/归类阈值（默认识别默认阈值）；
+ *        bySimilarity：是否按相似度归类（与设置页「按相似度归类」开关一致）。
+ * @returns {Promise<{face:object, score:number, groupName:string}|null>}
+ *          miss 情形仍回 `{face,score,miss:true,groupName}`（groupName 回样本本名）。
+ */
+export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOLD, bySimilarity = true } = {}) {
+  if (!vector || !vector.length) return null
+  const list = await getAllFaces()
+  if (!list.length) return null
+  const q = vector instanceof Float32Array ? vector : Float32Array.from(vector)
+  let best = null
+  for (const f of list) {
+    if (!f.vector || f.vector.length !== q.length) continue
+    const s = cosine(q, f.vector)
+    if (!best || s > best.score) best = { face: f, score: s }
+  }
+  if (!best) return null
+  const hit = best.score >= threshold ? best : { face: best.face, score: best.score, miss: true }
+  // 把命中的这条样本映射到它的「归类」（组代表样本的名字），
+  // 让识别报告的名字与用户在人脸库看到的归类名一致。
+  const groups = groupFaces(list, { threshold, bySimilarity })
+  const g = groups.find((x) => x.items.some((it) => it.id === hit.face.id))
+  const groupName = g ? g.name : hit.face.name
+  return { ...hit, groupName }
+}
+
 /**
  * 把一份人脸记录归成「人」。
  *

@@ -684,6 +684,78 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
 }
 
 /**
+ * 系统通知的「日常汇总」正文：把这一间隔内收存的状态异常/恢复 + 定时巡检
+ * 摊平成一条定期播报（与 buildSilentSummary 同款排版，但输入是系统通知而非报警事件）。
+ *
+ * 与 buildSilentSummary 的分工：
+ *   · buildSilentSummary 收的是「某一路通道的报警事件」（人形/人脸/区域/移动…）；
+ *   · 这里收的是跨通道的系统通知（设备掉线/恢复、巡检报告），归不到任何一路报警。
+ *   所以单独成一份构建器，而不是硬塞进那套按通道/类型聚合的逻辑。
+ *
+ * @param {Array<object>} items digestSystemBuf 的快照（见 useAlertPush 的吸收分支）
+ * @param {object} ctx { startMs, endMs, intervalMinutes, scopeName }
+ * @returns {{ title:string, markdown:string, plain:string }}
+ */
+export function buildSystemDigestSummary(items, ctx = {}) {
+  const list = Array.isArray(items) ? items : []
+  const now = Number(ctx.endMs) || Date.now()
+  const times = list.map((i) => Number(i.time) || 0).filter(Boolean)
+  const startMs = Number(ctx.startMs) || (times.length ? Math.min(...times) : now)
+  const p2 = (n) => String(n).padStart(2, '0')
+  const clock = (ms) => {
+    const d = new Date(ms)
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  }
+  const rangeLabel = `${clock(startMs)} ~ ${clock(now)}`
+  const everyLabel = digestIntervalLabel(ctx.intervalMinutes)
+  const statusItems = list.filter((i) => i.kind === 'status')
+  const patrolItems = list.filter((i) => i.kind === 'patrol')
+  const strip = (s) => String(s || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+
+  const lines = [
+    `### 【系统日常汇总】${rangeLabel}`,
+    '',
+    `> 系统通知（状态异常/恢复、定时巡检）按 **${everyLabel}** 汇总，本批共 **${list.length}** 条。`,
+    ''
+  ]
+
+  if (statusItems.length) {
+    lines.push('**🔧 设备状态变动**')
+    statusItems.forEach((i) => {
+      lines.push(`- ${clock(i.time)} · ${strip(i.title) || '状态变动'}`)
+    })
+    lines.push('')
+  }
+  if (patrolItems.length) {
+    lines.push('**🧭 定时巡检**')
+    patrolItems.forEach((i) => {
+      lines.push(`- ${clock(i.time)} · ${strip(i.title) || '巡检报告'}`)
+      const body = strip(i.text)
+      if (body) {
+        body
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .forEach((l) => lines.push(`  - ${l}`))
+      }
+    })
+    lines.push('')
+  }
+  if (!statusItems.length && !patrolItems.length) {
+    lines.push('- 本时段无系统通知', '')
+  }
+  lines.push(`> 由 ${BRAND.fullName} 实时分析生成 · ${formatTime(now, false)}`)
+
+  const markdown = lines.join('\n')
+  const plain = markdown
+    .replace(/^###\s*/gm, '')
+    .replace(/\*\*/g, '')
+    .replace(/^[>]\s?/gm, '')
+    .trim()
+  return { title: `【系统日常汇总】${rangeLabel}`, markdown, plain }
+}
+
+/**
  * 「免打扰时段已结束」提醒（时段结束时一律发一条，与开始提醒配对）。
  *
  * 和 buildSilentSummary 的分工：
