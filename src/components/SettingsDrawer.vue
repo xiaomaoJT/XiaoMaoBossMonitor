@@ -2097,6 +2097,9 @@
                     :options="zoneOptions(node.cam)"
                     :placeholder="`第 ${ni + 1} 个节点区域`"
                   />
+                  <p class="hint tight" v-if="node.cam && !zoneOptions(node.cam).length">
+                    该摄像头还没有区域。请到对应画面的「更多操作 → 进出 / 徘徊区域」（图标 ▤）拖拽圈选，不是「圈选检测区域」（图标 ▢）。
+                  </p>
                 </div>
                 <div v-if="ni < flow.path.length - 1" class="flow-arrow">→</div>
               </template>

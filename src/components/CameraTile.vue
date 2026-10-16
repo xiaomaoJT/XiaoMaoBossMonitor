@@ -23,7 +23,7 @@
     <!-- 智能分析叠加层：检测框 / 检测区域 / 圈选交互 -->
     <canvas
       class="overlay"
-      :class="{ editing: roiEditing }"
+      :class="{ editing: roiEditing || zoneEditing }"
       ref="overlayEl"
       @pointerdown="onRoiDown"
       @pointermove="onRoiMove"
@@ -220,6 +220,13 @@
       <button class="btn small primary" @click.stop="roiEditing = false">完成</button>
     </div>
 
+    <!-- 圈选区域（进出 / 徘徊 / 人员流向）时的提示条 -->
+    <div class="roi-hint zone" v-if="zoneEditing">
+      <span>拖拽画面圈选一个区域（用于进出 / 徘徊 / 人员流向节点）</span>
+      <button class="btn small" @click.stop="pickMore('zone-clear')">清除全部区域</button>
+      <button class="btn small primary" @click.stop="zoneEditing = false">完成</button>
+    </div>
+
     <!-- 底部操作条：只放操作按钮，低频操作收进「更多」 -->
     <div class="bar bottom" v-if="status !== 'idle' || decode">
       <span class="drag-handle" title="按住拖拽可调整位置" @pointerdown.stop="armDrag">
@@ -329,12 +336,12 @@
               <em>{{ extLabel(e) }}</em>
             </button>
             <button class="mi" @click.stop="pickMore('roi')">
-              <span class="mi-ico" :class="{ on: roiEditing }">▢</span> 圈选检测区域
-              <em>{{ roiEditing ? '编辑中' : '' }}</em>
+              <span class="mi-ico" :class="{ on: roiEditing }">▢</span> 圈定检测范围（ROI）
+              <em>{{ roiEditing ? '编辑中' : '只限定检测位置，不是区域' }}</em>
             </button>
             <button class="mi" @click.stop="pickMore('zone')">
-              <span class="mi-ico" :class="{ on: zoneEditing }">▤</span> 进出 / 徘徊区域
-              <em>{{ zoneCount ? `${zoneCount} 个` : '' }}</em>
+              <span class="mi-ico" :class="{ on: zoneEditing }">▤</span> 圈选区域（进出 / 徘徊 / 人员流向）
+              <em>{{ zoneCount ? `${zoneCount} 个` : '流向节点读这里' }}</em>
             </button>
             <button v-if="zoneCount" class="mi" @click.stop="pickMore('zone-clear')">
               <span class="mi-ico">⌫</span> 清除全部区域
