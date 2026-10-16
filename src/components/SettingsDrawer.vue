@@ -70,6 +70,9 @@
             <em v-else-if="t.key === 'backend'" :class="opts.backend && opts.backend.enabled ? 'ok' : 'muted'">
               {{ opts.backend && opts.backend.enabled ? 'on' : 'off' }}
             </em>
+            <em v-else-if="t.key === 'flow'" :class="flowTabOn ? 'ok' : 'muted'">
+              {{ flowTabOn ? 'on' : 'off' }}
+            </em>
           </button>
         </nav>
 
@@ -2038,9 +2041,10 @@
             <span class="state-chip" :class="flowSummary.ok ? 'ready' : (flowSummary.enabled ? 'warn' : '')">{{ flowSummary.text }}</span>
           </div>
           <p class="hint">
-            建立在人形轨迹 / 人脸识别之上：当<b>同一个人</b>先在 A 摄像头的某个区域<b>离场</b>，
-            又在时间窗内出现在 B 摄像头的某个区域<b>入场</b>，就记一次「走向」事件，推送
-            「谁从哪去了哪」。默认靠人脸归组名判定身份（几乎零额外算力）；也可放宽到不要求人脸。
+            建立在人形轨迹 / 人脸识别之上：当<b>同一个人</b>先在某个区域<b>离场</b>，
+            又在时间窗内依次出现在后续区域的<b>入场</b>，就记一次「走向」事件，推送
+            「谁从哪去了哪」。支持多跳（A→B→C…）—— 点「加途经点」可串更长。
+            默认靠人脸归组名判定身份（几乎零额外算力）；也可放宽到不要求人脸。
             属于轻量离散相遇判定，不是实时轨迹画线。
           </p>
 
@@ -2069,39 +2073,39 @@
             </div>
 
             <div class="flow-route">
-              <div class="flow-end">
-                <div class="flow-end-label">出场（从）</div>
-                <SelectField
-                  cls="mini wide"
-                  v-model="flow.from.cam"
-                  :options="camOptions"
-                  placeholder="选择出场摄像头"
-                  @change="flow.from.zone = ''"
-                />
-                <SelectField
-                  cls="mini wide"
-                  v-model="flow.from.zone"
-                  :options="zoneOptions(flow.from.cam)"
-                  placeholder="选择出场区域"
-                />
-              </div>
-              <div class="flow-arrow">→</div>
-              <div class="flow-end">
-                <div class="flow-end-label">入场（到）</div>
-                <SelectField
-                  cls="mini wide"
-                  v-model="flow.to.cam"
-                  :options="camOptions"
-                  placeholder="选择入场摄像头"
-                  @change="flow.to.zone = ''"
-                />
-                <SelectField
-                  cls="mini wide"
-                  v-model="flow.to.zone"
-                  :options="zoneOptions(flow.to.cam)"
-                  placeholder="选择入场区域"
-                />
-              </div>
+              <template v-for="(node, ni) in flow.path" :key="ni">
+                <div class="flow-end">
+                  <div class="flow-end-label">
+                    <span>{{ ni === 0 ? '起点（从）' : (ni === flow.path.length - 1 ? '终点（到）' : '途经') }}</span>
+                    <button
+                      v-if="flow.path.length > 2"
+                      class="icon-btn danger xsm"
+                      title="删除该节点"
+                      @click="removeFlowNode(flow, ni)"
+                    >✕</button>
+                  </div>
+                  <SelectField
+                    cls="mini wide"
+                    v-model="node.cam"
+                    :options="camOptions"
+                    :placeholder="`第 ${ni + 1} 个节点摄像头`"
+                    @change="node.zone = ''"
+                  />
+                  <SelectField
+                    cls="mini wide"
+                    v-model="node.zone"
+                    :options="zoneOptions(node.cam)"
+                    :placeholder="`第 ${ni + 1} 个节点区域`"
+                  />
+                </div>
+                <div v-if="ni < flow.path.length - 1" class="flow-arrow">→</div>
+              </template>
+              <button
+                v-if="flow.path.length < FLOW_MAX_NODES"
+                class="btn small ghost"
+                title="在末尾加一个途经点（支持 A→B→C 多跳走向）"
+                @click="addFlowNode(flow)"
+              >＋ 加途经点</button>
             </div>
 
             <div class="opt col">
@@ -3939,7 +3943,8 @@ import {
   clampFlowWindowSec,
   FLOW_WINDOW_MIN,
   FLOW_WINDOW_MAX,
-  FLOW_WINDOW_DEFAULT
+  FLOW_WINDOW_DEFAULT,
+  FLOW_MAX_NODES
 } from '../config/defaults'
 import { SECRET_SCOPE } from '../config/auth'
 import { secretDigest, secretMatches } from '../composables/sha256'
@@ -4113,19 +4118,24 @@ const OPT_FLOW_WINDOW = [
   { value: 600, label: '10 分钟' }
 ]
 
-/** 摄像头下拉项（出场 / 入场共用） */
+/** 摄像头下拉项：只列「已启用」（未隐藏）的摄像头，避免选到被隐藏的通道 */
 const camOptions = computed(() =>
-  cams.value.map((c) => ({ value: c.id, label: c.name || c.id }))
+  cams.value.filter((c) => !hidden.value.includes(c.id)).map((c) => ({ value: c.id, label: c.name || c.id }))
+)
+
+/** 人员流向判定 / 区域下拉所用的摄像头清单（取 props.cameras 这个权威源，实时反映区域增删） */
+const flowCams = computed(() =>
+  Array.isArray(props.cameras) && props.cameras.length ? props.cameras : cams.value
 )
 
 /** 某摄像头下的区域下拉项；没选摄像头时给空数组（SelectField 显示占位文字） */
 function zoneOptions(camId) {
-  const cam = cams.value.find((c) => c.id === camId)
+  const cam = flowCams.value.find((c) => c.id === camId)
   if (!cam || !Array.isArray(cam.zones)) return []
   return cam.zones.map((z) => ({ value: z.id, label: z.name || z.id }))
 }
 
-/** 新增一条默认流向 */
+/** 新增一条默认流向（默认 2 节点：起点 → 终点） */
 function addFlow() {
   if (!Array.isArray(opts.flows)) opts.flows = []
   opts.flows.push(defaultFlow())
@@ -4136,22 +4146,40 @@ function removeFlow(i) {
   if (Array.isArray(opts.flows)) opts.flows.splice(i, 1)
 }
 
+/** 在 path 末尾加一个途经点（支持 A→B→C 多跳），受 FLOW_MAX_NODES 上限约束 */
+function addFlowNode(flow) {
+  if (!Array.isArray(flow.path)) flow.path = [{ cam: '', zone: '' }, { cam: '', zone: '' }]
+  if (flow.path.length >= FLOW_MAX_NODES) return
+  flow.path.push({ cam: '', zone: '' })
+}
+
+/** 删除 path 第 ni 个节点（至少保留 2 个） */
+function removeFlowNode(flow, ni) {
+  if (Array.isArray(flow.path) && flow.path.length > 2) flow.path.splice(ni, 1)
+}
+
 /** 单条流向的有效性判定（与引擎共用一份 flowValid） */
 function flowStateOf(flow) {
-  return flowValid(flow, cams.value)
+  return flowValid(flow, flowCams.value)
 }
 
 /** 顶部状态条：生效数 / 启用数，以及是否有启用但无效的 */
 const flowSummary = computed(() => {
   const list = Array.isArray(opts.flows) ? opts.flows : []
   const enabled = list.filter((f) => f.enabled)
-  const okCount = enabled.filter((f) => flowValid(f, cams.value).valid).length
+  const okCount = enabled.filter((f) => flowValid(f, flowCams.value).valid).length
   const hasBad = enabled.length > okCount
   return {
     text: `${okCount}/${enabled.length} 条生效`,
     enabled: enabled.length > 0,
     ok: okCount > 0 && !hasBad
   }
+})
+
+/** 页签 on/off 徽标：存在「已启用且有效」的流向才算 on */
+const flowTabOn = computed(() => {
+  const list = Array.isArray(opts.flows) ? opts.flows : []
+  return list.some((f) => f.enabled && flowValid(f, flowCams.value).valid)
 })
 
 const props = defineProps({

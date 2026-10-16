@@ -1226,6 +1226,7 @@ function emitExtraAlarm(evt, canvas) {
     toCamName: evt.toCamName || '',
     fromZoneName: evt.fromZoneName || '',
     toZoneName: evt.toZoneName || '',
+    flowPath: Array.isArray(evt.flowPath) ? evt.flowPath : [],
     gid: evt.gid || '',
     spanSec: typeof evt.spanSec === 'number' ? evt.spanSec : null,
     departureAt: typeof evt.departureAt === 'number' ? evt.departureAt : 0,

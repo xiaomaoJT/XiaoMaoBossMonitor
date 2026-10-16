@@ -669,23 +669,20 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     `- 峰值同时在线：${maxCur} 人`,
     '',
     // 「人脸命中」单独成区：静默期间最该被一眼看到的就是这条（谁来过），
-    // 埋在下面的事件明细里等于没有。没有命中就整块不出现。
-    // 区里两样都给：先"共 N 次命中 · M 人"总账 + 按人计数，再逐条明细
-    // （每次几点、哪路、是谁、相似度）—— 统计次数与命中明细缺一不可。
-    ...(faceHits.length || strangerFaces
+    // 埋在下面的事件明细里等于没有。**无论是否有命中都始终显示这一区** ——
+    // 用户明确要求：哪怕是 0 次命中也要把这一区摆出来（"有没有库里的人来过"一眼可辨），
+    // 不像其它统计那样"没数据就整块省掉"。区里两样都给：先"共 N 次命中 · M 人"
+    // 总账 + 按人计数，再逐条明细（每次几点、哪路、是谁、相似度）。
+    '**🚨 人脸命中（在库）**',
+    ...(faceHits.length
       ? [
-          '**🚨 人脸命中（在库）**',
-          ...(faceHits.length
-            ? [
-                `- 共 **${hitTotal}** 次命中 · ${faceHits.length} 人`,
-                ...hitLines.split('\n'),
-                ...(faceHitDetail && perHitLines ? ['', '**命中明细（逐条）**', perHitLines] : [])
-              ]
-            : ['- 本时段无在库人员命中']),
-          ...(strangerFaces ? [`- 另有 ${strangerFaces} 次未识别的人脸（陌生人，不计入命中）`] : []),
-          ''
+          `- 共 **${hitTotal}** 次命中 · ${faceHits.length} 人`,
+          ...hitLines.split('\n'),
+          ...(faceHitDetail && perHitLines ? ['', '**命中明细（逐条）**', perHitLines] : [])
         ]
-      : []),
+      : ['- 本时段无在库人员命中']),
+    ...(strangerFaces ? [`- 另有 ${strangerFaces} 次未识别的人脸（陌生人，不计入命中）`] : []),
+    '',
     '**📋 按通道**',
     camLines,
     '',

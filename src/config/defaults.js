@@ -70,7 +70,7 @@ export const DIGEST_INTERVAL_DEFAULT = 30
  * 不是合法性判据 —— 真正落地的合法性判据在 digestIntervalMs() 的夹紧里，
  * 所以用户导入一份手改的配置写了 7 分钟也能正常工作，不会变成"配置有值但不生效"。
  */
-export const DIGEST_INTERVAL_CHOICES = [1, 3, 5, 10, 15, 30, 60, 120, 240]
+export const DIGEST_INTERVAL_CHOICES = [1, 3, 5, 10, 15, 30, 60, 120, 180, 240]
 
 /**
  * 一路通道「日常事件静默」的默认值（新建通道 / 载入内置配置都用它）。
@@ -1981,6 +1981,8 @@ export const FLOW_WINDOW_MIN = 1
 export const FLOW_WINDOW_MAX = 600
 /** 默认时间窗（秒） */
 export const FLOW_WINDOW_DEFAULT = 120
+/** 单条走向最多支持几个节点（即 A→B→C… 串长上限） */
+export const FLOW_MAX_NODES = 8
 
 /**
  * 把时间窗夹到 [FLOW_WINDOW_MIN, FLOW_WINDOW_MAX]。
@@ -1998,29 +2000,40 @@ export function clampFlowWindowSec(v) {
 }
 
 /** 生成一条走向规则的默认（空）配置 */
+/**
+ * 生成一条走向规则的默认（空）配置。
+ * path 是**有序节点数组**：[起点, 途经…, 终点]，至少 2 个节点；
+ * 支持 A→B→C 这种多跳（串长）走向。旧格式（from/to）会自动迁移成 path。
+ */
 export function defaultFlow(over = {}) {
   const id = over.id || `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+  let path
+  if (Array.isArray(over.path) && over.path.length >= 2) {
+    path = over.path.map((n) => ({
+      cam: (n && n.cam) || '',
+      zone: (n && n.zone) || ''
+    }))
+  } else if (over.from && over.to) {
+    // 旧格式兼容：from/to → path[起点, 终点]
+    path = [
+      { cam: (over.from && over.from.cam) || '', zone: (over.from && over.from.zone) || '' },
+      { cam: (over.to && over.to.cam) || '', zone: (over.to && over.to.zone) || '' }
+    ]
+  } else {
+    path = [
+      { cam: '', zone: '' },
+      { cam: '', zone: '' }
+    ]
+  }
   return {
     id,
-    enabled: false,
-    name: '',
-    from: { cam: '', zone: '' },
-    to: { cam: '', zone: '' },
-    windowSec: FLOW_WINDOW_DEFAULT,
-    requireFace: true,
-    push: true,
-    asCritical: false,
-    ...over,
-    // 嵌套对象单独合并，避免 over.from / over.to 浅覆盖把默认值冲掉
-    from: {
-      cam: (over.from && over.from.cam) || '',
-      zone: (over.from && over.from.zone) || ''
-    },
-    to: {
-      cam: (over.to && over.to.cam) || '',
-      zone: (over.to && over.to.zone) || ''
-    },
-    windowSec: clampFlowWindowSec(over.windowSec)
+    enabled: !!over.enabled,
+    name: over.name || '',
+    path,
+    windowSec: clampFlowWindowSec(over.windowSec),
+    requireFace: over.requireFace !== false,
+    push: over.push !== false,
+    asCritical: !!over.asCritical
   }
 }
 
@@ -2032,12 +2045,27 @@ export function normalizeFlow(flow) {
   }
   if (typeof flow.enabled !== 'boolean') flow.enabled = false
   if (typeof flow.name !== 'string') flow.name = ''
-  flow.from = flow.from && typeof flow.from === 'object' ? flow.from : {}
-  if (typeof flow.from.cam !== 'string') flow.from.cam = ''
-  if (typeof flow.from.zone !== 'string') flow.from.zone = ''
-  flow.to = flow.to && typeof flow.to === 'object' ? flow.to : {}
-  if (typeof flow.to.cam !== 'string') flow.to.cam = ''
-  if (typeof flow.to.zone !== 'string') flow.to.zone = ''
+  // 旧格式 from/to → path（保证向后兼容已保存的配置）
+  if (!Array.isArray(flow.path) || flow.path.length < 2) {
+    if (flow.from && flow.to) {
+      flow.path = [
+        { cam: (flow.from && flow.from.cam) || '', zone: (flow.from && flow.from.zone) || '' },
+        { cam: (flow.to && flow.to.cam) || '', zone: (flow.to && flow.to.zone) || '' }
+      ]
+    } else {
+      flow.path = [
+        { cam: '', zone: '' },
+        { cam: '', zone: '' }
+      ]
+    }
+  }
+  flow.path = flow.path.map((n) => ({
+    cam: (n && n.cam) || '',
+    zone: (n && n.zone) || ''
+  }))
+  // 旧字段清理，避免下游误用 from/to
+  delete flow.from
+  delete flow.to
   flow.windowSec = clampFlowWindowSec(flow.windowSec)
   if (typeof flow.requireFace !== 'boolean') flow.requireFace = true
   if (typeof flow.push !== 'boolean') flow.push = true
@@ -2056,11 +2084,10 @@ export function normalizeFlows(opts) {
 /**
  * 走向规则此刻是否**有效可派发**（全项目唯一判定，UI 与引擎共用）。
  * 仅校验配置完整性 + 通道 / 区域存在性，不关心运行时缓冲状态。
+ * path 支持多跳：每个节点都要有摄像头 + 在该摄像头绘制的区域，且相邻节点不能相同。
  *
  * @returns {{
- *   enabled:boolean, valid:boolean, errors:string[],
- *   fromCam:object|undefined, toCam:object|undefined,
- *   fromZone:object|undefined, toZone:object|undefined
+ *   enabled:boolean, valid:boolean, errors:string[], nodeErrors:string[], pathCount:number
  * }}
  */
 export function flowValid(flow, cameras) {
@@ -2068,23 +2095,48 @@ export function flowValid(flow, cameras) {
   const camOf = (id) => list.find((c) => c && c.id === id)
   const zoneOf = (cam, zid) =>
     cam && Array.isArray(cam.zones) ? cam.zones.find((z) => z && z.id === zid) : undefined
-  const fCam = camOf(flow && flow.from && flow.from.cam)
-  const tCam = camOf(flow && flow.to && flow.to.cam)
-  const fZone = zoneOf(fCam, flow && flow.from && flow.from.zone)
-  const tZone = zoneOf(tCam, flow && flow.to && flow.to.zone)
   const errors = []
   if (!flow || !flow.enabled) {
-    return { enabled: false, valid: false, errors, fromCam: fCam, toCam: tCam, fromZone: fZone, toZone: tZone }
+    return {
+      enabled: false,
+      valid: false,
+      errors,
+      nodeErrors: [],
+      pathCount: Array.isArray(flow && flow.path) ? flow.path.length : 0
+    }
   }
-  if (!fCam) errors.push('出场摄像头不存在')
-  else if (!fZone) errors.push('出场区域未在该摄像头绘制')
-  if (!tCam) errors.push('入场摄像头不存在')
-  else if (!tZone) errors.push('入场区域未在该摄像头绘制')
-  if (
-    flow.from && flow.to && flow.from.cam && flow.from.cam === flow.to.cam &&
-    flow.from.zone && flow.from.zone === flow.to.zone
-  ) {
-    errors.push('出场与入场不能是同一区域')
+  const path = Array.isArray(flow.path) ? flow.path : []
+  if (path.length < 2) {
+    errors.push('至少需要 2 个节点（起点与终点）')
+    return { enabled: true, valid: false, errors, nodeErrors: [], pathCount: path.length }
   }
-  return { enabled: true, valid: errors.length === 0, errors, fromCam: fCam, toCam: tCam, fromZone: fZone, toZone: tZone }
+  const nodeErrors = []
+  for (let i = 0; i < path.length; i++) {
+    const node = path[i]
+    const cam = camOf(node.cam)
+    if (!cam) {
+      errors.push(`第 ${i + 1} 个节点：摄像头不存在`)
+      nodeErrors.push('摄像头不存在')
+      continue
+    }
+    if (!zoneOf(cam, node.zone)) {
+      errors.push(`第 ${i + 1} 个节点：区域未在该摄像头绘制`)
+      nodeErrors.push('区域未绘制')
+      continue
+    }
+    nodeErrors.push('')
+  }
+  // 相邻节点不能完全相同（否则「从 A 走到 A」没有意义，也配不出有效走向）
+  for (let i = 1; i < path.length; i++) {
+    if (path[i].cam === path[i - 1].cam && path[i].zone === path[i - 1].zone) {
+      errors.push(`第 ${i} 与第 ${i + 1} 个节点不能相同`)
+    }
+  }
+  return {
+    enabled: true,
+    valid: errors.length === 0,
+    errors,
+    nodeErrors,
+    pathCount: path.length
+  }
 }

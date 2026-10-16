@@ -2,19 +2,19 @@
  * 人员走向（跨摄像头）匹配引擎 —— 纯逻辑单例。
  *
  * 设计要点（见可行性计划 §5 / §7）：
- *   · 每个摄像头一个 useAiExtras 实例，departure（A 路退出）与 arrival（B 路进入）
- *     分属不同实例，必须用**模块级单例**共享 pendingDepartures，否则无法配对。
- *   · 默认人脸档几乎零额外推理：只消费已算好的 embedding 归组名（gid）做哈希配对。
+ *   · 每个摄像头一个 useAiExtras 实例，出场（A 路退出）与入场（B 路进入）
+ *     分属不同实例，必须用**模块级单例**共享进行中的链路，否则无法配对。
+ *   · 默认人脸档几乎零额外推理：只消费已算好的人脸 identity（gid）做哈希配对。
  *   · 内存受 TTL + LRU 硬上限约束（ENGINE_MAX），惰性淘汰，防膨胀。
- *   · 配对成功即一次性消费 departure（防重复推送）；方向单向（出场必须早于入场）；
- *   · 空值拦截：拿不到身份（gid / reidKey）且 requireFace → 直接丢弃，绝不拿「无名氏」凑配对。
+ *   · 方向单向（出场必须早于入场）；空值拦截：拿不到身份且 requireFace → 丢弃。
+ *   · **多跳（A→B→C…）**：path 是有序节点数组，逐跳推进状态机；任一跳超时或错序即断链。
  *
- * ⚠️ 本模块**不碰任何图像 / 推送 / 渲染**——只做「两路本地进出事件按身份 + 时间窗串起来」。
+ * ⚠️ 本模块**不碰任何图像 / 推送 / 渲染**——只做「多路本地进出事件按身份 + 时间窗串起来」。
  *    截图由调用方在 record 时传入 `shot`（字符串），引擎只存不取。
  */
 import { flowValid, clampFlowWindowSec } from '../config/defaults.js'
 
-/** pending departures 硬上限（与 useAlertPush 的 BUFFER_CAP 同源思路） */
+/** 进行中的链路硬上限（与 useAlertPush 的 BUFFER_CAP 同源思路） */
 export const FLOW_ENGINE_MAX = 2000
 
 /**
@@ -22,8 +22,15 @@ export const FLOW_ENGINE_MAX = 2000
  * 真实运行请用 getFlowEngine() 拿全局单例。
  */
 export function createFlowEngine() {
-  /** key = gid（人脸档，groupName）或 `reid:<量化键>`（降级档） */
-  const pending = new Map() // key -> departure[]
+  /**
+   * 进行中的链路：progKey(flowId|身份key) -> state
+   *   head      当前已抵达的节点下标（settled）；-1 表示尚未开始
+   *   open      在途：已离场上一个节点、正等待抵达下一个；{ from, at, shot } 或 null
+   *   startedAt 这一程的起点出场时刻（用于算总间隔）
+   *   lastAt    最近一次活动时刻（LRU 淘汰用）
+   *   expireAt  该链路整体过期时刻（TTL + 断链宽限）
+   */
+  const progress = new Map()
   let seq = 0
 
   const state = {
@@ -37,17 +44,29 @@ export function createFlowEngine() {
     state.cameras = Array.isArray(cameras) ? cameras : []
   }
 
-  /** 找出「出场」命中该 (cam, zone) 且**有效**（启用 + 区域已画）的 flow */
+  /** 找出「出场」命中该 (cam, zone) 的所有 (flow, 段下标)，要求 flow 有效 */
   function departFlowsFor(camId, zoneId) {
-    return state.flows.filter(
-      (f) => flowValid(f, state.cameras).valid && f.from.cam === camId && f.from.zone === zoneId
-    )
+    const out = []
+    for (const f of state.flows) {
+      if (!flowValid(f, state.cameras).valid) continue
+      const path = Array.isArray(f.path) ? f.path : []
+      for (let i = 0; i < path.length - 1; i++) {
+        if (path[i].cam === camId && path[i].zone === zoneId) out.push({ flow: f, segIdx: i })
+      }
+    }
+    return out
   }
-  /** 找出「入场」命中该 (cam, zone) 且**有效**的 flow */
+  /** 找出「入场」命中该 (cam, zone) 的所有 (flow, 段下标)，要求 flow 有效 */
   function arriveFlowsFor(camId, zoneId) {
-    return state.flows.filter(
-      (f) => flowValid(f, state.cameras).valid && f.to.cam === camId && f.to.zone === zoneId
-    )
+    const out = []
+    for (const f of state.flows) {
+      if (!flowValid(f, state.cameras).valid) continue
+      const path = Array.isArray(f.path) ? f.path : []
+      for (let i = 0; i < path.length - 1; i++) {
+        if (path[i + 1].cam === camId && path[i + 1].zone === zoneId) out.push({ flow: f, segIdx: i })
+      }
+    }
+    return out
   }
 
   /** 某条 flow 的匹配 key：人脸档用 gid，降级档用 reidKey（前缀区分，避免两类 key 串台） */
@@ -55,110 +74,107 @@ export function createFlowEngine() {
     if (flow.requireFace) return p.gid || null
     return p.gid || (p.reidKey ? `reid:${p.reidKey}` : null)
   }
+  function progKey(flowId, key) {
+    return `${flowId}|${key}`
+  }
 
-  /** 惰性淘汰过期项 + LRU 硬上限 */
+  /** 惰性淘汰过期链路 + LRU 硬上限 */
   function evictExpired(now) {
-    for (const [key, arr] of pending) {
-      const kept = arr.filter((d) => d.expireAt > now)
-      if (kept.length) pending.set(key, kept)
-      else pending.delete(key)
+    for (const [pk, st] of progress) {
+      if (st.expireAt > now) continue
+      progress.delete(pk)
     }
-    if (pending.size > FLOW_ENGINE_MAX) {
-      const all = []
-      for (const arr of pending.values()) for (const d of arr) all.push(d)
-      all.sort((a, b) => a.at - b.at)
-      const dropSet = new Set(all.slice(0, all.length - FLOW_ENGINE_MAX))
-      for (const [key, arr] of pending) {
-        const kept = arr.filter((d) => !dropSet.has(d))
-        if (kept.length) pending.set(key, kept)
-        else pending.delete(key)
-      }
+    if (progress.size > FLOW_ENGINE_MAX) {
+      const all = [...progress.entries()].sort((a, b) => a[1].lastAt - b[1].lastAt)
+      const drop = all.slice(0, all.length - FLOW_ENGINE_MAX)
+      for (const [pk] of drop) progress.delete(pk)
     }
   }
 
   /**
-   * 记录一次「出场」事件。
-   * @param {object} p { cam, zone, gid?, reidKey?, name?, faceName?, at?, shot?, box?, flowId? }
-   *   - 传 flowId 则只针对该 flow；否则按 (cam, zone) 自动匹配所有启用的 from flow。
-   * @returns {{ok:boolean, reason?:string, records?:Array}}
+   * 记录一次「出场」事件（离场上一个节点）。
+   * @param {object} p { cam, zone, gid?, reidKey?, name?, faceName?, at?, shot?, box? }
+   * @returns {{ok:boolean, reason?:string}}
    */
   function recordDeparture(p) {
     if (!p || !p.cam || !p.zone) return { ok: false, reason: 'bad-args' }
     const now = typeof p.at === 'number' && Number.isFinite(p.at) ? p.at : Date.now()
     evictExpired(now)
-    const flows = p.flowId
-      ? state.flows.filter((f) => f.id === p.flowId)
-      : departFlowsFor(p.cam, p.zone)
-    if (!flows.length) return { ok: false, reason: 'no-flow' }
-    const recs = []
-    for (const f of flows) {
-      const key = keyFor(f, p)
+    const hits = departFlowsFor(p.cam, p.zone)
+    if (!hits.length) return { ok: false, reason: 'no-flow' }
+    let n = 0
+    for (const { flow, segIdx } of hits) {
+      const key = keyFor(flow, p)
       if (!key) continue // 空值拦截：这条 flow 拿不到身份 → 跳过
-      const expireAt = now + clampFlowWindowSec(f.windowSec) * 1000
-      const rec = {
-        id: ++seq,
-        flowId: f.id,
-        key,
-        cam: p.cam,
-        zone: p.zone,
-        gid: f.requireFace ? p.gid || null : null,
-        reidKey: f.requireFace ? null : p.reidKey || null,
-        name: p.name || null,
-        faceName: p.faceName || null,
-        at: now,
-        expireAt,
-        shot: p.shot || null,
-        box: p.box || null
+      const pk = progKey(flow.id, key)
+      let st = progress.get(pk)
+      if (!st) {
+        st = { flowId: flow.id, key, head: -1, open: null, startedAt: null, lastAt: now, expireAt: 0 }
+        progress.set(pk, st)
       }
-      if (!pending.has(key)) pending.set(key, [])
-      pending.get(key).push(rec)
-      recs.push(rec)
+      if (segIdx === 0) {
+        // 起点：开新一程（允许从任意阶段重新开始，重置起点时刻）
+        st.head = 0
+        st.startedAt = now
+      } else {
+        // 途经 / 终点前的出场：必须恰好站在该节点上（上一跳已完成）才能继续
+        if (st.head !== segIdx) continue
+      }
+      st.open = { from: segIdx, at: now, shot: p.shot || null }
+      st.lastAt = now
+      st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000
+      n++
     }
-    if (!recs.length) return { ok: false, reason: 'no-gid' }
-    return { ok: true, records: recs }
+    if (!n) return { ok: false, reason: 'no-gid' }
+    return { ok: true }
   }
 
   /**
-   * 记录一次「入场」事件，并尝试与已记录的出场配对。
+   * 记录一次「入场」事件，并尝试推进 / 完成链路。
    * @param {object} p 同 recordDeparture（至少含 cam / zone / gid / at）
    * @returns {{ok:boolean, reason?:string, matches?:Array}}
    *   matches[].flow         命中的 flow 配置
-   *   matches[].departure    配对的出场记录
-   *   matches[].spanSec      出场到入场的间隔（秒）
+   *   matches[].startedAt    这一程起点出场时刻
+   *   matches[].arrivedAt    终点入场时刻
+   *   matches[].spanSec      整程间隔（秒）
+   *   matches[].shot         终点入场截图
    */
   function recordArrival(p) {
     if (!p || !p.cam || !p.zone) return { ok: false, reason: 'bad-args' }
     const now = typeof p.at === 'number' && Number.isFinite(p.at) ? p.at : Date.now()
     evictExpired(now)
-    const flows = p.flowId
-      ? state.flows.filter((f) => f.id === p.flowId)
-      : arriveFlowsFor(p.cam, p.zone)
-    if (!flows.length) return { ok: false, reason: 'no-flow' }
+    const hits = arriveFlowsFor(p.cam, p.zone)
+    if (!hits.length) return { ok: false, reason: 'no-flow' }
     const matches = []
-    for (const f of flows) {
-      const key = keyFor(f, p)
+    for (const { flow, segIdx } of hits) {
+      const key = keyFor(flow, p)
       if (!key) continue
-      const arr = pending.get(key)
-      if (!arr || !arr.length) continue
-      // 找该 flow 下、方向单向（出场 < 入场）、未过期的**最近**一次出场
-      let best = null
-      for (const d of arr) {
-        if (d.flowId !== f.id) continue
-        if (d.at >= now) continue // 方向单向：出场必须在入场之前
-        if (d.expireAt <= now) continue // 已过期：窗口内没走到，作废
-        if (best === null || d.at > best.at) best = d
+      const pk = progKey(flow.id, key)
+      const st = progress.get(pk)
+      if (!st || !st.open) continue
+      if (st.open.from !== segIdx) continue // 不是正在等的这一跳
+      if (now - st.open.at > clampFlowWindowSec(flow.windowSec) * 1000) {
+        // 这一跳超时：链路在半路断掉，清掉在途，保留 head 等可能补救（短暂宽限后整体淘汰）
+        st.open = null
+        st.lastAt = now
+        st.expireAt = now + 1000
+        continue
       }
-      if (best) matches.push({ flow: f, departure: best, spanSec: Math.round((now - best.at) / 1000) })
+      // 成功完成这一跳
+      st.head = segIdx + 1
+      st.open = null
+      st.lastAt = now
+      const lastIdx = (Array.isArray(flow.path) ? flow.path.length : 0) - 1
+      if (st.head >= lastIdx) {
+        // 走完全程
+        const spanSec = st.startedAt != null ? Math.round((now - st.startedAt) / 1000) : 0
+        matches.push({ flow, startedAt: st.startedAt, arrivedAt: now, spanSec, shot: p.shot || null })
+        progress.delete(pk)
+      } else {
+        st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000
+      }
     }
     if (!matches.length) return { ok: false, reason: 'no-match' }
-    // 配对成功 → 一次性消费（避免同一出场被重复推送）
-    for (const m of matches) {
-      const arr = pending.get(m.departure.key)
-      if (!arr) continue
-      const idx = arr.indexOf(m.departure)
-      if (idx >= 0) arr.splice(idx, 1)
-      if (!arr.length) pending.delete(m.departure.key)
-    }
     return { ok: true, matches }
   }
 
@@ -167,15 +183,9 @@ export function createFlowEngine() {
     evictExpired(now)
   }
 
-  /** 调试 / UI 用：当前缓冲概览 */
+  /** 调试 / UI 用：当前链路概览 */
   function snapshot() {
-    let count = 0
-    const byKey = {}
-    for (const [key, arr] of pending) {
-      count += arr.length
-      byKey[key] = arr.length
-    }
-    return { pendingCount: count, limit: FLOW_ENGINE_MAX, keys: byKey }
+    return { pendingCount: progress.size, limit: FLOW_ENGINE_MAX }
   }
 
   /** 取当前通道列表（集成层用它解析出场 / 入场摄像头的展示名） */
@@ -185,7 +195,7 @@ export function createFlowEngine() {
 
   /** 清空缓冲（探针 / 重置用） */
   function reset() {
-    pending.clear()
+    progress.clear()
     seq = 0
   }
 
@@ -204,7 +214,7 @@ export function createFlowEngine() {
 /* ---------------- 模块级单例（跨摄像头实例共享） ---------------- */
 let _engine = null
 
-/** 取全局单例引擎（所有摄像头共用同一份 pendingDepartures） */
+/** 取全局单例引擎（所有摄像头共用同一份进行中链路） */
 export function getFlowEngine() {
   if (!_engine) _engine = createFlowEngine()
   return _engine

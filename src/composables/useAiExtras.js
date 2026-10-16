@@ -83,44 +83,51 @@ function safeThumb(canvas, box) {
 }
 
 /**
- * 把一次走向配对结果转成「flow 事件」并上抛（复用现有 emit('alarm') 管道，
+ * 把一次走向配对结果（可能多跳）转成「flow 事件」并上抛（复用现有 emit('alarm') 管道，
  * 推送 / 事件面板 / 通知卡片零改造即可接收）。展示名从引擎持有的通道列表里解析。
+ * ctx 携带本帧的身份（gid / person）与截图，保证多跳结束后仍能拿到「是谁」。
  */
 function emitFlowEvent(engine, m, ctx, emit) {
   const f = m.flow
-  const dep = m.departure
   const cams = engine.getCameras() || []
   const camOf = (id) => cams.find((c) => c && c.id === id)
-  const fromCam = camOf(f.from.cam)
-  const toCam = camOf(f.to.cam)
   const zoneNameOf = (cam, zid) =>
     cam && Array.isArray(cam.zones) ? (cam.zones.find((z) => z && z.id === zid) || {}).name || zid : zid
-  const fromCamName = (fromCam && fromCam.name) || f.from.cam
-  const toCamName = (toCam && toCam.name) || f.to.cam
-  const fromZoneName = zoneNameOf(fromCam, f.from.zone)
-  const toZoneName = zoneNameOf(toCam, f.to.zone)
-  const person = (dep.name && dep.name !== 'unknown:') || dep.faceName || ''
+  const route = (Array.isArray(f.path) ? f.path : []).map((node) => {
+    const cam = camOf(node.cam)
+    return {
+      camId: node.cam,
+      camName: (cam && cam.name) || node.cam,
+      zoneId: node.zone,
+      zoneName: zoneNameOf(cam, node.zone)
+    }
+  })
+  const first = route[0] || { camName: '', zoneName: '' }
+  const last = route[route.length - 1] || first
+  const person = (ctx.person && ctx.person !== 'unknown:') || ''
   const who = person || '未知人员'
-  const text = `🚶 ${who} 从 ${fromCamName}·${fromZoneName} 走向 ${toCamName}·${toZoneName}（间隔 ${m.spanSec} 秒）`
+  const routeText = route.map((r) => `${r.camName}·${r.zoneName}`).join(' → ')
+  const text = `🚶 ${who} 从 ${routeText}（间隔 ${m.spanSec} 秒）`
   emit({
     type: 'flow',
     source: 'flow',
     flowId: f.id,
-    flowName: f.name || `${fromCamName}→${toCamName}`,
-    fromCam: f.from.cam,
-    fromZone: f.from.zone,
-    toCam: f.to.cam,
-    toZone: f.to.zone,
-    fromCamName,
-    toCamName,
-    fromZoneName,
-    toZoneName,
-    gid: dep.gid,
+    flowName: f.name || routeText,
+    fromCam: first.camName,
+    fromZone: first.zoneName,
+    toCam: last.camName,
+    toZone: last.zoneName,
+    fromCamName: first.camName,
+    toCamName: last.camName,
+    fromZoneName: first.zoneName,
+    toZoneName: last.zoneName,
+    flowPath: route.map((r) => ({ camName: r.camName, zoneName: r.zoneName })),
+    gid: ctx.gid || '',
     name: who,
     faceName: person,
     spanSec: m.spanSec,
-    departureAt: dep.at,
-    departureShot: dep.shot || '',
+    departureAt: m.startedAt || 0,
+    departureShot: '',
     shot: ctx.shot || '',
     box: null,
     at: ctx.at,
@@ -310,12 +317,12 @@ export function useAiExtras(options) {
           // 出场：记一条 departure（窗口内等待对应入场配对）
           engine.recordDeparture({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, box: evt.box })
         } else {
-          // 入场：尝试与已有 departure 配对，成功则上抛 flow 事件
+          // 入场：尝试推进 / 完成链路，成功走完一路则上抛 flow 事件
           const r = engine.recordArrival({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, box: evt.box })
           if (r.ok) {
             for (const m of r.matches) {
               if (m.flow.push === false) continue // 用户关了这条 flow 的推送 → 只记录不发送
-              emitFlowEvent(engine, m, { at, shot }, emit)
+              emitFlowEvent(engine, m, { at, shot, gid, person: gid }, emit)
             }
           }
         }

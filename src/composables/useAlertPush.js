@@ -1200,11 +1200,16 @@ export function useAlertPush(options, hooks = {}) {
     })
     const ids = restrictIds([...chanSet])
     if (!ids.length) return null
+    // 合并汇总覆盖了「所有已开启通道」：标题里点明聚合了几路（而不是含糊的「未命名」）。
+    // 取本批缓冲里实际出现过的通道名去重计数 —— 与概览「覆盖通道（N 路）」口径一致。
+    const mergedScopeNames = [...new Set(buf.map((r) => r.name).filter(Boolean))]
+    const mergedScopeName = mergedScopeNames.length ? `${mergedScopeNames.length}路` : ''
     const summary = buildSilentSummary(buf, silentCfg(), {
       startMs: buf.reduce((m, r) => Math.min(m, r.time || since), since),
       endMs: now,
       variant: 'digest',
-      intervalMinutes: mergedIntervalMs(now) / 60000
+      intervalMinutes: mergedIntervalMs(now) / 60000,
+      scopeName: mergedScopeName
     })
     const dropped = takeDropped(digestMerged.buf)
     const toSend = addDroppedNote(summary, dropped)
