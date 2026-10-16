@@ -1211,7 +1211,26 @@ function emitExtraAlarm(evt, canvas) {
     dwellMs: evt.dwellMs || 0,
     info: info ? { width: info.width, height: info.height, encType: info.encType } : null,
     fps: stats.value ? stats.value.fps : null,
-    kbps: kbps.value || null
+    kbps: kbps.value || null,
+    // 人员走向（跨摄像头）事件透传字段 —— 推送路由（useAlertPush.handleAlarm）
+    // 与事件面板都靠 source/flowName/各路名称/asCritical 判定与展示，必须经此透传，
+    // 否则走到 handleAlarm 时 source 丢失、isFlowEvent 失效、走向事件被当普通事件吞掉。
+    source: evt.source || '',
+    flowId: evt.flowId || '',
+    flowName: evt.flowName || '',
+    fromCam: evt.fromCam || '',
+    fromZone: evt.fromZone || '',
+    toCam: evt.toCam || '',
+    toZone: evt.toZone || '',
+    fromCamName: evt.fromCamName || '',
+    toCamName: evt.toCamName || '',
+    fromZoneName: evt.fromZoneName || '',
+    toZoneName: evt.toZoneName || '',
+    gid: evt.gid || '',
+    spanSec: typeof evt.spanSec === 'number' ? evt.spanSec : null,
+    departureAt: typeof evt.departureAt === 'number' ? evt.departureAt : 0,
+    departureShot: evt.departureShot || '',
+    asCritical: !!evt.asCritical
   })
 
   // 计数是周期性统计，不需要补拍；其余场景补一张完整人形（能看清是谁）

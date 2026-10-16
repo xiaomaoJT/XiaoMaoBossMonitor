@@ -1099,7 +1099,15 @@ export const HIDDEN_OPTIONS = {
       /** 截图模式：image=直接发 base64 截图（推荐）/ litterbox=上传图床后在文字里附链接 / none=不带图 */
       screenshotMode: 'image'
     }
-  }
+  },
+
+  /* ---------------- 人员走向（跨摄像头） ----------------
+   * 把两个摄像头的「出口区 / 入口区」绑成一条「走廊」，检测同一个人在时间窗内
+   * 从 A 走向 B（离散相遇 + 身份关联，非实时轨迹画线、非跨摄像头连续追踪）。
+   * 默认空 = 不启用任何走向（用户需在「人员流向」tab 里手动添加）。
+   * 配置语义见 useFlowMatch.js；UI 在设置页「人员流向」tab。
+   */
+  flows: []
 }
 
 /**
@@ -1427,6 +1435,36 @@ export function channelUsable(options, id) {
  */
 export function isFaceHit(rec) {
   return !!(rec && rec.faceName)
+}
+
+/**
+ * 人员走向（跨摄像头）事件判定。
+ * ----------------------------------------------------------------------------
+ * 与 isFaceHit 同理：事件「是不是一条走向事件」必须由这一份纯函数判定，
+ * 推送路由层（useAlertPush.handleAlarm）与事件面板/卡片展示层共用，
+ * 否则会出现「面板显示了走向、TG 却没推」或反过来「推了但面板没归到走向类」。
+ *
+ * 走向事件由 useAiExtras 经 emit('alarm') 复用现有报警管道，
+ * 在 record 上打 source:'flow' 标识，零改推送/面板/卡片的渲染分支
+ * （它们按 type/faceName 等既有字段工作，走向事件没有 faceName、type==='flow'）。
+ *
+ * @param {object} rec 事件记录
+ */
+export function isFlowEvent(rec) {
+  return !!(rec && rec.source === 'flow')
+}
+
+/**
+ * 走向事件是否按「关键事件」实时急推（类比在库人脸命中，不被静默/日常汇总吸收）。
+ * ----------------------------------------------------------------------------
+ * 唯一判据 = source==='flow' 且 record.asCritical 为真。
+ * asCritical 由配置 flow.asCritical 经 useAiExtras.emitFlowEvent 透传：
+ *   真 → 一旦匹配到走向，立刻实时单发（关键事件），静默时段也推（见 criticalSilentBlocked）；
+ *   假 → 完全按普通事件走：实时发送 + 静默/日常汇总吸收。
+ * 默认缺省为 true（计划 §8：走向本身是用户最关心的"人去了哪"，优先实时知会）。
+ */
+export function isFlowCritical(rec) {
+  return isFlowEvent(rec) && !!(rec && rec.asCritical)
 }
 
 /**
@@ -1930,3 +1968,123 @@ export function silentOverlapSegments(silentCfg, startMs, endMs) {
 
 /** 新建摄像头时使用的默认地址模板 */
 export const URL_TEMPLATE = `${BASE}01${TAIL}`
+
+/* ============================================================================
+ * 人员走向（跨摄像头）配置层
+ * ----------------------------------------------------------------------------
+ * 单一判据集中在 defaults.js，展示层（设置页「人员流向」tab）与执行层
+ * （useFlowMatch.js 匹配引擎）共用，避免「界面说能推、实际一条推不出去」的假绿。
+ * ========================================================================== */
+
+/** 时间窗（秒）下限 / 上限：上限 600s 防「两小时前的出场」和「现在的入场」被强行配对 */
+export const FLOW_WINDOW_MIN = 1
+export const FLOW_WINDOW_MAX = 600
+/** 默认时间窗（秒） */
+export const FLOW_WINDOW_DEFAULT = 120
+
+/**
+ * 把时间窗夹到 [FLOW_WINDOW_MIN, FLOW_WINDOW_MAX]。
+ * 「没配」与「配成 0」分开：null/undefined/''/[]/{} 视为没配落回默认；
+ * 显式 0 或负数按规则夹到下限 1（与 clampDigestMinutes 同思路）。
+ */
+export function clampFlowWindowSec(v) {
+  if (v === null || v === undefined || typeof v === 'object' || typeof v === 'boolean') {
+    return FLOW_WINDOW_DEFAULT
+  }
+  if (typeof v === 'string' && !v.trim()) return FLOW_WINDOW_DEFAULT
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n)) return FLOW_WINDOW_DEFAULT
+  return Math.min(FLOW_WINDOW_MAX, Math.max(FLOW_WINDOW_MIN, n))
+}
+
+/** 生成一条走向规则的默认（空）配置 */
+export function defaultFlow(over = {}) {
+  const id = over.id || `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+  return {
+    id,
+    enabled: false,
+    name: '',
+    from: { cam: '', zone: '' },
+    to: { cam: '', zone: '' },
+    windowSec: FLOW_WINDOW_DEFAULT,
+    requireFace: true,
+    push: true,
+    asCritical: false,
+    ...over,
+    // 嵌套对象单独合并，避免 over.from / over.to 浅覆盖把默认值冲掉
+    from: {
+      cam: (over.from && over.from.cam) || '',
+      zone: (over.from && over.from.zone) || ''
+    },
+    to: {
+      cam: (over.to && over.to.cam) || '',
+      zone: (over.to && over.to.zone) || ''
+    },
+    windowSec: clampFlowWindowSec(over.windowSec)
+  }
+}
+
+/** 归一化单条走向规则（就地改，只在载入 / 保存路径调用） */
+export function normalizeFlow(flow) {
+  if (!flow || typeof flow !== 'object') return flow
+  if (typeof flow.id !== 'string' || !flow.id) {
+    flow.id = `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+  }
+  if (typeof flow.enabled !== 'boolean') flow.enabled = false
+  if (typeof flow.name !== 'string') flow.name = ''
+  flow.from = flow.from && typeof flow.from === 'object' ? flow.from : {}
+  if (typeof flow.from.cam !== 'string') flow.from.cam = ''
+  if (typeof flow.from.zone !== 'string') flow.from.zone = ''
+  flow.to = flow.to && typeof flow.to === 'object' ? flow.to : {}
+  if (typeof flow.to.cam !== 'string') flow.to.cam = ''
+  if (typeof flow.to.zone !== 'string') flow.to.zone = ''
+  flow.windowSec = clampFlowWindowSec(flow.windowSec)
+  if (typeof flow.requireFace !== 'boolean') flow.requireFace = true
+  if (typeof flow.push !== 'boolean') flow.push = true
+  if (typeof flow.asCritical !== 'boolean') flow.asCritical = false
+  return flow
+}
+
+/** 归一化整个 flows 数组（就地改） */
+export function normalizeFlows(opts) {
+  if (!opts || typeof opts !== 'object') return opts
+  if (!Array.isArray(opts.flows)) opts.flows = []
+  opts.flows = opts.flows.filter((f) => f && typeof f === 'object').map(normalizeFlow)
+  return opts
+}
+
+/**
+ * 走向规则此刻是否**有效可派发**（全项目唯一判定，UI 与引擎共用）。
+ * 仅校验配置完整性 + 通道 / 区域存在性，不关心运行时缓冲状态。
+ *
+ * @returns {{
+ *   enabled:boolean, valid:boolean, errors:string[],
+ *   fromCam:object|undefined, toCam:object|undefined,
+ *   fromZone:object|undefined, toZone:object|undefined
+ * }}
+ */
+export function flowValid(flow, cameras) {
+  const list = Array.isArray(cameras) ? cameras : []
+  const camOf = (id) => list.find((c) => c && c.id === id)
+  const zoneOf = (cam, zid) =>
+    cam && Array.isArray(cam.zones) ? cam.zones.find((z) => z && z.id === zid) : undefined
+  const fCam = camOf(flow && flow.from && flow.from.cam)
+  const tCam = camOf(flow && flow.to && flow.to.cam)
+  const fZone = zoneOf(fCam, flow && flow.from && flow.from.zone)
+  const tZone = zoneOf(tCam, flow && flow.to && flow.to.zone)
+  const errors = []
+  if (!flow || !flow.enabled) {
+    return { enabled: false, valid: false, errors, fromCam: fCam, toCam: tCam, fromZone: fZone, toZone: tZone }
+  }
+  if (!fCam) errors.push('出场摄像头不存在')
+  else if (!fZone) errors.push('出场区域未在该摄像头绘制')
+  if (!tCam) errors.push('入场摄像头不存在')
+  else if (!tZone) errors.push('入场区域未在该摄像头绘制')
+  if (
+    flow.from && flow.to && flow.from.cam && flow.from.cam === flow.to.cam &&
+    flow.from.zone && flow.from.zone === flow.to.zone
+  ) {
+    errors.push('出场与入场不能是同一区域')
+  }
+  return { enabled: true, valid: errors.length === 0, errors, fromCam: fCam, toCam: tCam, fromZone: fZone, toZone: tZone }
+}

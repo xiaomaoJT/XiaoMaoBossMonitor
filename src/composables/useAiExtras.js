@@ -35,6 +35,7 @@ import {
   pushPendingFace,
   readGroupSim
 } from './useFaceLib.js'
+import { getFlowEngine } from './useFlowMatch.js'
 
 /** COCO 17 关键点下标 */
 const KP = {
@@ -71,6 +72,62 @@ export const ACTION_LABEL = {
  * 96 在手机上点开就是马赛克，所以这里统一用 256（JPEG 约 15~25KB，可忽略不计）。
  */
 const FACE_SHOT_SIZE = 256
+
+/** 安全截取人形缩略图（区域事件框），失败返回空串（不影响走向匹配，只是没图） */
+function safeThumb(canvas, box) {
+  try {
+    return faceThumb(canvas, box, FACE_SHOT_SIZE) || ''
+  } catch (e) {
+    return ''
+  }
+}
+
+/**
+ * 把一次走向配对结果转成「flow 事件」并上抛（复用现有 emit('alarm') 管道，
+ * 推送 / 事件面板 / 通知卡片零改造即可接收）。展示名从引擎持有的通道列表里解析。
+ */
+function emitFlowEvent(engine, m, ctx, emit) {
+  const f = m.flow
+  const dep = m.departure
+  const cams = engine.getCameras() || []
+  const camOf = (id) => cams.find((c) => c && c.id === id)
+  const fromCam = camOf(f.from.cam)
+  const toCam = camOf(f.to.cam)
+  const zoneNameOf = (cam, zid) =>
+    cam && Array.isArray(cam.zones) ? (cam.zones.find((z) => z && z.id === zid) || {}).name || zid : zid
+  const fromCamName = (fromCam && fromCam.name) || f.from.cam
+  const toCamName = (toCam && toCam.name) || f.to.cam
+  const fromZoneName = zoneNameOf(fromCam, f.from.zone)
+  const toZoneName = zoneNameOf(toCam, f.to.zone)
+  const person = (dep.name && dep.name !== 'unknown:') || dep.faceName || ''
+  const who = person || '未知人员'
+  const text = `🚶 ${who} 从 ${fromCamName}·${fromZoneName} 走向 ${toCamName}·${toZoneName}（间隔 ${m.spanSec} 秒）`
+  emit({
+    type: 'flow',
+    source: 'flow',
+    flowId: f.id,
+    flowName: f.name || `${fromCamName}→${toCamName}`,
+    fromCam: f.from.cam,
+    fromZone: f.from.zone,
+    toCam: f.to.cam,
+    toZone: f.to.zone,
+    fromCamName,
+    toCamName,
+    fromZoneName,
+    toZoneName,
+    gid: dep.gid,
+    name: who,
+    faceName: person,
+    spanSec: m.spanSec,
+    departureAt: dep.at,
+    departureShot: dep.shot || '',
+    shot: ctx.shot || '',
+    box: null,
+    at: ctx.at,
+    text,
+    asCritical: f.asCritical === true
+  })
+}
 
 /**
  * 四项附加分析能力的权威定义放在 src/config/features.js —— 那里零依赖，
@@ -173,12 +230,13 @@ export function useAiExtras(options) {
     counts.value = { ...tracker.stats }
     status.value = { ...status.value, tracks: live.length }
 
-    /* ---------- 2. 区域事件 ---------- */
+    /* ---------- 2. 区域事件（同时收集，供走向匹配复用） ---------- */
+    const zoneEvents = []
     for (const evt of res.events) {
       if (evt.kind === 'loiter' && zc.loiterAlarm === false) continue
       if (evt.kind === 'enter' && zc.enterAlarm === false) continue
       if (evt.kind === 'exit' && zc.exitAlarm === false) continue
-      emit({
+      const out = {
         type: evt.kind === 'loiter' ? 'loiter' : evt.kind === 'enter' ? 'enter' : 'exit',
         zoneName: evt.zoneName,
         zoneId: evt.zoneId,
@@ -188,50 +246,81 @@ export function useAiExtras(options) {
         dwellMs: evt.dwellMs || 0,
         text: zoneText(evt),
         source: 'zone'
-      })
+      }
+      zoneEvents.push(out)
+      emit(out)
     }
 
     if (!live.length) {
-      // 画面里没人：人脸/姿态没有意义，顺手清掉上一帧的残留框
+      // 画面里没人：人脸/姿态没有意义，顺手清掉上一帧的残留框。
+      // 但区域事件（离场）可能仍在，仍要跑走向匹配（见下方 2.5），故不提前 return。
       faces.value = []
       poses.value = []
       status.value = { ...status.value, face: '', pose: '' }
-      maybeCountPush(now, emit, cam)
-      return
+    } else {
+      /* ---------- 3. 人脸识别（全局开着 且 这一路参与 才跑） ---------- */
+      const fc = faceConf()
+      if (fc.enabled && camExtOn(cam, 'face')) {
+        try {
+          await loadModel('face', undefined, fc.detSize).catch(() => {})
+          if (isSlotReady('face')) {
+            const dets = await detectFaces(frame.canvas, fc.score, fc.detSize)
+            faces.value = dets.map((d) => ({ ...d, name: '', known: false }))
+            await runFaces(frame, dets, live, now, fc, cam, emit)
+            status.value = { ...status.value, face: isSlotReady('faceemb') ? 'ready' : 'detect-only' }
+          }
+        } catch (e) {
+          status.value = { ...status.value, face: 'error' }
+        }
+      } else {
+        faces.value = []
+      }
+
+      /* ---------- 4. 姿态（同样受通道级开关约束） ---------- */
+      const pc = poseConf()
+      if (pc.enabled && camExtOn(cam, 'pose')) {
+        try {
+          await loadModel('pose', undefined, 640).catch(() => {})
+          if (isSlotReady('pose')) {
+            await runPoses(frame, live, now, pc, cam, emit)
+            status.value = { ...status.value, pose: 'ready' }
+          }
+        } catch (e) {
+          status.value = { ...status.value, pose: 'error' }
+        }
+      } else {
+        poses.value = []
+      }
     }
 
-    /* ---------- 3. 人脸识别（全局开着 且 这一路参与 才跑） ---------- */
-    const fc = faceConf()
-    if (fc.enabled && camExtOn(cam, 'face')) {
-      try {
-        await loadModel('face', undefined, fc.detSize).catch(() => {})
-        if (isSlotReady('face')) {
-          const dets = await detectFaces(frame.canvas, fc.score, fc.detSize)
-          faces.value = dets.map((d) => ({ ...d, name: '', known: false }))
-          await runFaces(frame, dets, live, now, fc, cam, emit)
-          status.value = { ...status.value, face: isSlotReady('faceemb') ? 'ready' : 'detect-only' }
+    /* ---------- 2.5 人员走向（跨摄像头） ----------
+     * 把本路刚发生的「走出 / 走入」区域事件，按身份（gid = 人脸归组名）+ 时间窗，
+     * 串成「从 A 走向 B」的走向事件。零额外推理：只消费已算好的人脸 identity。
+     * 身份来源：res.tracks[].face（跨帧持久，离场的那一帧也能拿到上一帧认出的脸）。
+     * 引擎是模块级单例，A 路退场记 departure、B 路入场记 arrival 共用同一份缓冲。 */
+    if (zoneEvents.length) {
+      const engine = getFlowEngine()
+      for (const evt of zoneEvents) {
+        if (evt.type !== 'exit' && evt.type !== 'enter') continue
+        const tr = res.tracks.find((t) => t.id === evt.trackId)
+        const gid = tr && tr.face && tr.face.id ? tr.face.name : null // 已知人=归组名；陌生人(face.id=0)=null
+        const shot = safeThumb(frame.canvas, evt.box)
+        const at = evt.at || now
+        if (evt.type === 'exit') {
+          // 出场：记一条 departure（窗口内等待对应入场配对）
+          engine.recordDeparture({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, box: evt.box })
+        } else {
+          // 入场：尝试与已有 departure 配对，成功则上抛 flow 事件
+          const r = engine.recordArrival({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, box: evt.box })
+          if (r.ok) {
+            for (const m of r.matches) {
+              if (m.flow.push === false) continue // 用户关了这条 flow 的推送 → 只记录不发送
+              emitFlowEvent(engine, m, { at, shot }, emit)
+            }
+          }
         }
-      } catch (e) {
-        status.value = { ...status.value, face: 'error' }
       }
-    } else {
-      faces.value = []
-    }
-
-    /* ---------- 4. 姿态（同样受通道级开关约束） ---------- */
-    const pc = poseConf()
-    if (pc.enabled && camExtOn(cam, 'pose')) {
-      try {
-        await loadModel('pose', undefined, 640).catch(() => {})
-        if (isSlotReady('pose')) {
-          await runPoses(frame, live, now, pc, cam, emit)
-          status.value = { ...status.value, pose: 'ready' }
-        }
-      } catch (e) {
-        status.value = { ...status.value, pose: 'error' }
-      }
-    } else {
-      poses.value = []
+      engine.tick(now)
     }
 
     /* ---------- 5. 计数推送 ---------- */

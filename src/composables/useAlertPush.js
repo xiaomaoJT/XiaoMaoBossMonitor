@@ -44,6 +44,7 @@ import {
   digestIntervalLabel,
   isWallAlignedInterval,
   isFaceHit,
+  isFlowCritical,
   matchSilentSlotAt,
   parseSilentSlots,
   slotBoundaryAt
@@ -2496,6 +2497,17 @@ export function useAlertPush(options, hooks = {}) {
     }
 
     /*
+     * 人员走向（跨摄像头）关键事件：source==='flow' 且 asCritical 为真时，
+     * 与在库人脸命中等价 —— 立刻实时单发、不被静默 / 日常汇总吸收。
+     * 判据统一走 isFlowCritical（defaults.js），与事件面板 / 卡片展示共用同一份。
+     * asCritical 缺省 true（配置项 flow.asCritical），即"人去了哪"优先实时知会。
+     */
+    if (isFlowCritical(record)) {
+      send = []
+      queue = []
+    }
+
+    /*
      * 静默收存。两个来源**取并集**：
      *   · 全局静默（options.silent）—— 覆盖全通道，被选中的渠道在时段内不实时推；
      *   · 通道静默（cam.silent）—— 只覆盖这一路，对指定的那几个渠道不实时推。
@@ -2528,7 +2540,7 @@ export function useAlertPush(options, hooks = {}) {
      * 它只影响这个集合，看起来却像在实现"汇总归整体"，很能误导人。
      */
     let buffered = false
-    if (!isFaceHit(record)) {
+    if (!isFaceHit(record) && !isFlowCritical(record)) {
       const suppressIds = [...byGlobal, ...byCam]
       if (suppressIds.length) {
         send = send.filter((id) => !suppressIds.includes(id))
@@ -2578,15 +2590,15 @@ export function useAlertPush(options, hooks = {}) {
     // 已录入人脸（在库命中）：send/queue 已在上方清空（改走关键事件急推），但仍要进日常汇总
     // 缓冲 —— 用户要在汇总里单独看在库人脸命中（是否命中 / 次数 / 明细），所以这里用
     // isFaceHit 放行，别被「没有实时渠道可摘」挡在门外（与全局免打扰汇总一致：那里也不剔人脸）。
-    if (send.length || queue.length || isFaceHit(record)) {
+    if (send.length || queue.length || isFaceHit(record) || isFlowCritical(record)) {
       const dCam = camById(record.id)
       const dState = dCam ? digestStateOf(dCam, now) : { active: false }
       if (dState.active) {
         const hitSend = send.filter((id) => dState.channels.includes(id))
         const hitQueue = queue.filter((id) => dState.channels.includes(id))
-        // 在库人脸：即便 hitSend/hitQueue 为空（实时渠道已在上游清空），也要落缓冲，
+        // 在库人脸 / 走向关键事件：即便 hitSend/hitQueue 为空（实时渠道已在上游清空），也要落缓冲，
         // 否则同一条既进了关键事件急推、又漏掉日常汇总的命中统计，与"汇总单独强调命中"矛盾。
-        if (hitSend.length || hitQueue.length || isFaceHit(record)) {
+        if (hitSend.length || hitQueue.length || isFaceHit(record) || isFlowCritical(record)) {
           /*
            * 无论是否「在库人脸命中」，都收进日常汇总缓冲 —— 用户要的正是
            * "汇总里单独强调是否命中在库人脸、命中次数、命中明细"，所以这条事件
@@ -2599,9 +2611,9 @@ export function useAlertPush(options, hooks = {}) {
           // 否则"某路只勾了部分渠道"时会漏成实时、与合并汇总重复。
           // 非合并模式保持原语义：只摘本路 digest.channels。
           const dchans = digestMasterOn(now) ? mergedDigestChannels(now) : dState.channels
-          // 仅对**非在库人脸**事件从实时 send/queue 里摘（避免与日常汇总双发）；
-          // 在库人脸仍按关键事件单独提醒，日常汇总只做"记录"，不重复抑制其实时。
-          if (!isFaceHit(record)) {
+          // 仅对**非在库人脸 / 非走向关键**事件从实时 send/queue 里摘（避免与日常汇总双发）；
+          // 在库人脸 / 走向关键仍按关键事件单独提醒，日常汇总只做"记录"，不重复抑制其实时。
+          if (!isFaceHit(record) && !isFlowCritical(record)) {
             send = send.filter((id) => !dchans.includes(id))
             queue = queue.filter((id) => !dchans.includes(id))
           }
@@ -2689,6 +2701,36 @@ export function useAlertPush(options, hooks = {}) {
             `时间：${tgEsc(formatTime(record.time))}`
           ].join('\n'),
           text: `人脸命中 · ${record.name || ''} / ${who} / ${formatTime(record.time)}`
+        },
+        // 带上通道 id：这一路自己的通道静默也要算进「此刻是不是静默时段」
+        { camId: record.id }
+      ).catch(() => {})
+    }
+
+    /*
+     * 人员走向（跨摄像头）关键事件实时急推。
+     * 与在库人脸命中同一套关键事件兜底（pushDirectToUsers）：三端各自按
+     * directPush.events['flow'] / critical.events['flow'] 判定是否接收，
+     * 缺省即开（与升级前一致）。走整帧原图（record.shot || record.thumb），
+     * 不是放大的人脸特写 —— 走向关心的是"谁从哪去了哪"，原图更能说明现场。
+     * 静默时段是否仍推，交给三端各自的 critical.throughSilence（缺省即开）。
+     */
+    if (isFlowCritical(record)) {
+      const shot = record.shot || record.thumb || ''
+      const who = record.faceName ? tgEsc(record.faceName) : tgEsc(record.name || '未知人员')
+      const route = `${tgEsc(record.fromCamName || '')}·${tgEsc(record.fromZoneName || '')} → ${tgEsc(record.toCamName || '')}·${tgEsc(record.toZoneName || '')}`
+      pushDirectToUsers(
+        'flow',
+        {
+          image: shot,
+          caption: [
+            `🚶 <b>人员走向 · ${tgEsc(record.flowName || '')}</b>`,
+            `人员：<b>${who}</b>`,
+            `路线：${route}`,
+            `间隔：${record.spanSec != null ? `${record.spanSec} 秒` : '—'}`,
+            `时间：${tgEsc(formatTime(record.time))}`
+          ].join('\n'),
+          text: `人员走向 · ${record.flowName || ''} / ${who} / ${route} / ${formatTime(record.time)}`
         },
         // 带上通道 id：这一路自己的通道静默也要算进「此刻是不是静默时段」
         { camId: record.id }

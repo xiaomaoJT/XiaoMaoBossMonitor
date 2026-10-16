@@ -250,11 +250,13 @@ import {
   normalizeCameraChannels,
   normalizeCameraDigest,
   normalizeCameraSilent,
+  normalizeFlows,
   syncChannelCameras
 } from './config/defaults'
 import { SECRET_SCOPE } from './config/auth'
 import { secretMatches } from './composables/sha256'
 import { useAlertPush } from './composables/useAlertPush'
+import { getFlowEngine } from './composables/useFlowMatch.js'
 import { clearErrorLog, dismissError, errorLog, errorLogText, fatalError } from './composables/useErrorLog'
 import { timeoutReason } from './composables/useNet.js'
 import NotifyStack from './components/NotifyStack.vue'
@@ -414,6 +416,8 @@ const options = reactive(
 normalizeDingTalk(options.dingtalk)
 // 老版本 localStorage 里没有的新增配置项，用默认值补齐（含 alert / mask / dingtalk 的嵌套字段）
 fillMissingOptions(options)
+// 人员走向规则（flows）归一化：旧存档里没有这个字段时落空数组，已有元素补齐默认值
+normalizeFlows(options)
 /*
  * 把老存档里的**明文遮罩密码**换算成摘要，并删掉明文字段（幂等）。
  *
@@ -425,6 +429,15 @@ fillMissingOptions(options)
  */
 migrateSecretFields(options)
 const hiddenIds = ref(saved && Array.isArray(saved.hiddenIds) ? saved.hiddenIds : [])
+
+// 人员走向引擎：把当前 flows + 通道列表喂给模块级单例，供各摄像头跨实例配对。
+// 配置（flows 增删改、通道区域增删）变化时实时重设，引擎据此判断哪些 flow 生效。
+getFlowEngine().setConfig(options.flows, cameras.value)
+watch(
+  [() => options.flows, cameras],
+  () => getFlowEngine().setConfig(options.flows, cameras.value),
+  { deep: true }
+)
 const layoutKey = ref((saved && saved.layoutKey) || 'auto')
 // 修复早期版本默认配置里无效的钉钉机器人 token（存在旧 token 时自动替换并落盘）
 migrateDingTalkCredentials(options.dingtalk)
@@ -1467,6 +1480,7 @@ async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
     Object.assign(options, defOpts, incoming)
     normalizeDingTalk(options.dingtalk)
     fillMissingOptions(options)
+    normalizeFlows(options)
     migrateSecretFields(options)
 
     /*

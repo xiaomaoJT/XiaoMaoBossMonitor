@@ -2031,6 +2031,118 @@
             · 检测识别页的「开启实时分析」= 浏览器自己跑不跑（本页关掉页面就没了）
             · 本页的「启用后端检测」  = 常驻服务跑不跑（关掉本机页面也在盯）
         -->
+        <!-- ==================== 人员流向（跨摄像头走向） ==================== -->
+        <section class="block" v-show="tab === 'flow'">
+          <div class="block-head">
+            <h3>人员流向（跨摄像头走向）</h3>
+            <span class="state-chip" :class="flowSummary.ok ? 'ready' : (flowSummary.enabled ? 'warn' : '')">{{ flowSummary.text }}</span>
+          </div>
+          <p class="hint">
+            建立在人形轨迹 / 人脸识别之上：当<b>同一个人</b>先在 A 摄像头的某个区域<b>离场</b>，
+            又在时间窗内出现在 B 摄像头的某个区域<b>入场</b>，就记一次「走向」事件，推送
+            「谁从哪去了哪」。默认靠人脸归组名判定身份（几乎零额外算力）；也可放宽到不要求人脸。
+            属于轻量离散相遇判定，不是实时轨迹画线。
+          </p>
+
+          <div class="flow-head">
+            <strong>已配置流向（{{ (opts.flows || []).length }} 条）</strong>
+            <button class="btn small primary" @click="addFlow">＋ 新增流向</button>
+          </div>
+
+          <p class="hint tight" v-if="!(opts.flows || []).length">
+            还没有任何流向。点「新增流向」创建第一条，例如「门口 → 走廊」「电梯厅 → 办公区」。
+          </p>
+
+          <div class="flow-card" v-for="(flow, i) in (opts.flows || [])" :key="flow.id || i">
+            <div class="flow-card-head">
+              <input
+                class="field flow-name"
+                type="text"
+                maxlength="20"
+                v-model.trim="flow.name"
+                placeholder="流向名称（如：门口→走廊）"
+              />
+              <label class="switch-wrap" title="启用该流向">
+                <span class="switch" :class="{ on: flow.enabled }" @click="flow.enabled = !flow.enabled"></span>
+              </label>
+              <button class="icon-btn danger" title="删除该流向" @click="removeFlow(i)">🗑</button>
+            </div>
+
+            <div class="flow-route">
+              <div class="flow-end">
+                <div class="flow-end-label">出场（从）</div>
+                <SelectField
+                  cls="mini wide"
+                  v-model="flow.from.cam"
+                  :options="camOptions"
+                  placeholder="选择出场摄像头"
+                  @change="flow.from.zone = ''"
+                />
+                <SelectField
+                  cls="mini wide"
+                  v-model="flow.from.zone"
+                  :options="zoneOptions(flow.from.cam)"
+                  placeholder="选择出场区域"
+                />
+              </div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-end">
+                <div class="flow-end-label">入场（到）</div>
+                <SelectField
+                  cls="mini wide"
+                  v-model="flow.to.cam"
+                  :options="camOptions"
+                  placeholder="选择入场摄像头"
+                  @change="flow.to.zone = ''"
+                />
+                <SelectField
+                  cls="mini wide"
+                  v-model="flow.to.zone"
+                  :options="zoneOptions(flow.to.cam)"
+                  placeholder="选择入场区域"
+                />
+              </div>
+            </div>
+
+            <div class="opt col">
+              <span>
+                <strong>匹配时间窗</strong>
+                <em>出场后多久内入场才算同一次走向</em>
+              </span>
+              <SelectField cls="mini" v-model.number="flow.windowSec" :options="OPT_FLOW_WINDOW" />
+            </div>
+
+            <label class="opt">
+              <span>
+                <strong>要求人脸身份</strong>
+                <em>开启：只有认出的人（或陌生人但开了采集）才匹配；关闭：仅靠轨迹也能匹配</em>
+              </span>
+              <span class="switch" :class="{ on: flow.requireFace }" @click="flow.requireFace = !flow.requireFace"></span>
+            </label>
+
+            <label class="opt">
+              <span>
+                <strong>推送该流向</strong>
+                <em>关闭则只记录不推送</em>
+              </span>
+              <span class="switch" :class="{ on: flow.push }" @click="flow.push = !flow.push"></span>
+            </label>
+
+            <label class="opt">
+              <span>
+                <strong>作为关键事件实时推送</strong>
+                <em>开启：一旦匹配立刻单发（静默时段也推）；关闭：走普通推送 / 日常汇总</em>
+              </span>
+              <span class="switch" :class="{ on: flow.asCritical }" @click="flow.asCritical = !flow.asCritical"></span>
+            </label>
+
+            <p class="flow-errors" v-if="flowStateOf(flow).errors.length">
+              <span class="flow-err" v-for="(e, k) in flowStateOf(flow).errors" :key="k">⚠ {{ e }}</span>
+            </p>
+            <p class="flow-ok" v-else-if="flow.enabled">✓ 配置有效，已生效</p>
+          </div>
+        </section>
+
         <section class="block" v-show="tab === 'backend'">
           <div class="block-head">
             <h3>后端检测服务</h3>
@@ -3821,7 +3933,13 @@ import {
   digestIntervalLabel,
   silentYieldSlots,
   HIDDEN_PASSCODE_HASH,
-  syncChannelCameras
+  syncChannelCameras,
+  defaultFlow,
+  flowValid,
+  clampFlowWindowSec,
+  FLOW_WINDOW_MIN,
+  FLOW_WINDOW_MAX,
+  FLOW_WINDOW_DEFAULT
 } from '../config/defaults'
 import { SECRET_SCOPE } from '../config/auth'
 import { secretDigest, secretMatches } from '../composables/sha256'
@@ -3985,6 +4103,56 @@ const OPT_LOITER_RADIUS = [
 ]
 
 const AI_MODELS_AS_OPTIONS = AI_MODELS.map((m) => ({ value: m.key, label: m.label }))
+
+/* ---------------- 人员流向（跨摄像头走向）配置辅助 ---------------- */
+const OPT_FLOW_WINDOW = [
+  { value: 30, label: '30 秒' },
+  { value: 60, label: '1 分钟' },
+  { value: 120, label: '2 分钟（默认）' },
+  { value: 300, label: '5 分钟' },
+  { value: 600, label: '10 分钟' }
+]
+
+/** 摄像头下拉项（出场 / 入场共用） */
+const camOptions = computed(() =>
+  cams.value.map((c) => ({ value: c.id, label: c.name || c.id }))
+)
+
+/** 某摄像头下的区域下拉项；没选摄像头时给空数组（SelectField 显示占位文字） */
+function zoneOptions(camId) {
+  const cam = cams.value.find((c) => c.id === camId)
+  if (!cam || !Array.isArray(cam.zones)) return []
+  return cam.zones.map((z) => ({ value: z.id, label: z.name || z.id }))
+}
+
+/** 新增一条默认流向 */
+function addFlow() {
+  if (!Array.isArray(opts.flows)) opts.flows = []
+  opts.flows.push(defaultFlow())
+}
+
+/** 删除第 i 条流向 */
+function removeFlow(i) {
+  if (Array.isArray(opts.flows)) opts.flows.splice(i, 1)
+}
+
+/** 单条流向的有效性判定（与引擎共用一份 flowValid） */
+function flowStateOf(flow) {
+  return flowValid(flow, cams.value)
+}
+
+/** 顶部状态条：生效数 / 启用数，以及是否有启用但无效的 */
+const flowSummary = computed(() => {
+  const list = Array.isArray(opts.flows) ? opts.flows : []
+  const enabled = list.filter((f) => f.enabled)
+  const okCount = enabled.filter((f) => flowValid(f, cams.value).valid).length
+  const hasBad = enabled.length > okCount
+  return {
+    text: `${okCount}/${enabled.length} 条生效`,
+    enabled: enabled.length > 0,
+    ok: okCount > 0 && !hasBad
+  }
+})
 
 const props = defineProps({
   cameras: { type: Array, required: true },
@@ -4182,6 +4350,13 @@ const TABS = [
     label: '检测识别',
     desc: '移动检测与人形识别参数',
     icon: 'M4 18a9 9 0 0 1 16 0M7.5 18a5.5 5.5 0 0 1 9 0M12 18h.01'
+  },
+  /* 人员流向（跨摄像头走向）紧跟检测识别：它建立在人形轨迹 / 人脸之上，依赖上面的识别能力 */
+  {
+    key: 'flow',
+    label: '人员流向',
+    desc: '跨摄像头人员走向：谁从哪路去了哪路',
+    icon: 'M4 12h12M13 7l5 5-5 5M20 6v12'
   },
   /* 后端检测紧跟检测识别：两者是「同一件事跑在哪」的两种选择，必须成对出现、挨着看 */
   {
@@ -10032,5 +10207,100 @@ function loadHidden() {
   background: rgba(127, 127, 127, 0.06);
   font-size: 12px;
   opacity: 0.75;
+}
+
+/* ---------------- 人员流向（跨摄像头走向）配置 ---------------- */
+.flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px 0 8px;
+}
+.flow-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.flow-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 12px 6px;
+  margin-bottom: 12px;
+  background: rgba(127, 127, 127, 0.04);
+}
+.flow-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.flow-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.switch-wrap {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.flow-card-head .icon-btn.danger {
+  flex: 0 0 auto;
+  font-size: 14px;
+  opacity: 0.65;
+}
+.flow-card-head .icon-btn.danger:hover {
+  opacity: 1;
+}
+.flow-route {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.flow-end {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.flow-end-label {
+  font-size: 12px;
+  color: var(--text-soft);
+  opacity: 0.8;
+}
+.flow-arrow {
+  flex: 0 0 auto;
+  font-size: 20px;
+  color: var(--accent-text-strong);
+  align-self: center;
+  padding-top: 14px;
+}
+.flow-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 8px;
+}
+.flow-err {
+  color: var(--danger, #a32d2d);
+  font-size: 12px;
+}
+.flow-ok {
+  color: var(--ok, #2e9e5b);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
+@media (max-width: 520px) {
+  .flow-route {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .flow-arrow {
+    padding-top: 0;
+    transform: rotate(90deg);
+    align-self: center;
+  }
 }
 </style>

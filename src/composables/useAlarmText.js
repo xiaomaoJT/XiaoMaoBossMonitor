@@ -16,7 +16,8 @@ export const ALARM_LABELS = {
   exit: '走出区域',
   loiter: '区域徘徊',
   pose: '人形姿态',
-  count: '人员计数'
+  count: '人员计数',
+  flow: '人员走向'
 }
 
 export function alarmLabel(type) {
@@ -172,6 +173,14 @@ export function alarmDetail(r) {
     case 'count':
       // 计数事件的正文必须带上数字本身，否则「人员计数」四个字没有任何信息量
       return r.counts ? `人员计数（${countText(r.counts)}）` : '人员计数'
+    case 'flow': {
+      // 人员走向（跨摄像头）：把「谁从哪去了哪、间隔多久」写进一行，
+      // 比 type 原值更有信息量；名字/区域缺省时退化为「未知」以免空着。
+      const who = r.faceName || r.name || '未知人员'
+      const route = `${r.fromCamName || r.fromCam || '?'}·${r.fromZoneName || r.fromZone || '?'} → ${r.toCamName || r.toCam || '?'}·${r.toZoneName || r.toZone || '?'}`
+      const span = r.spanSec != null ? `（间隔 ${r.spanSec} 秒）` : ''
+      return `人员走向（${who} 从 ${route}${span}）`
+    }
     case 'offline':
       return '通道异常'
     case 'online':
