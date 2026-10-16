@@ -1753,14 +1753,28 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 - **"此刻在不在静默时段"只算一次，三端共用**（`criticalSilentBlocked(opts)` 在 `pushDirectToUsers` 里算完再传下去）。各端自己再算一遍迟早会漂。带 `camId` 时把**这一路自己的通道静默**也算进去 —— 不带就只认全局窗口。
 - 设置页三处各加一个开关；**TG 那处整块是 `v-if="tg.directPush.enabled"`**，所以"关键事件单独提醒"没开时开关不显示（不是漏了，是整块收起）。
 
-> 验证：`/tmp/digest-probe/` 四条探针，共 **247** 条断言全绿 ——
+#### 汇总时刻对齐墙钟（整点 / 半点，#334）
+
+日常静默的"到点汇总"原本是 `due = since + intervalMs`（`since` = 本批第一条事件到来的时刻）。副作用：用户 14:07 开启、间隔 30 分钟，汇总会落在 **14:37、15:07、15:37……** 这种错位点 —— 既不整齐也不好记。
+
+改法：**间隔是 30 的整数倍（含整数小时：30 / 60 / 120 / 240 分钟）时，把"到点时刻"对齐到墙钟的 `:00` / `:30` 网格**，而非"开启时刻 + N 分钟"。非 30 整数倍的档位（1 / 3 / 5 / 10 / 15 分钟）维持原 `since + 间隔` 行为 —— 这些档位本就不指望对齐整点，对齐反而错。
+
+- **纯函数判定** `isWallAlignedInterval(min)`：`clampDigestMinutes(min)` 之后 `n >= 30 && n % 30 === 0` 才走对齐；脏值（null / 0 / 非数字）先夹紧，不会误对齐。
+- **求下一个网格边界** `nextWallBoundary(now, gridMinutes)`：以本地零点为锚，`Math.ceil(msSinceMidnight / gridMs) * gridMs` 求"≥ now 的第一个网格点"，与"开启时刻"无关、跨天自动续（14:30 之后下一个是 15:00，不会漂）。
+- **三处调度 + 一处展示共用同一口径**：`armMergedDigest`（总开关全开 → 合并汇总）、`armCamDigest`（单路）、`armSystemDigest`（系统通知吸收），以及 `handleAlarm` 里给用户看的 `bufDue`（"将于 HH:MM 推送"标签）。展示与调度同口径，界面说的和实际排的不会两套。
+- **零行为退化**：非对齐间隔完全走老路径，且对齐只在 `clampDigestMinutes` 之后判定，夹紧区间 `[1,240]` 之外的脏值永不触发对齐。
+
+> 验证：`/tmp/clock-align-probe/probe.mjs` **11/11**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout`）：[T1] 间隔 30、开启 14:07 → 落 14:30（而非 14:37）；[T2] 间隔 60 → 落 15:00；[T3] 间隔 15（非对齐）→ 落 14:22（since+15，证明老路径没退化）；[T4] 网格稳定（14:30 之后下一个是 15:00，不漂移）；[T5] per-cam 模式 30 分钟也走对齐。
+
+> 验证：`/tmp/digest-probe/` 四条探针，共 **250** 条断言全绿 ——
 > `pure.mjs` **78/78**（真实 import `defaults.js`：夹紧与文案、`digestCfgOf` **只读不 mutate**、`normalizeCameraDigest` 幂等且**保留用户刻意清空的 channels**、`camDigestState` 四种组合、`camSilentOverview` 带出 digest 三项、三处 `throughSilence` 缺省）；
-> `engine.mjs` **74/74**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`：负向基线"关了就立即推"、开启后不推且排程、**触发排程回调真的发出汇总**、去重、没有事件不发、人脸命中不受影响、陌生人进缓冲、全局/本路静默都让位、渠道勾选只静默勾中的那几端、零渠道不生效、`throughSilence` 缺省/显式关/按端各自生效/`camId` 生效、通道被删清缓冲、`stopAll` 后连已排的定时器回调也不补发）；
+> `engine.mjs` **77/77**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`：负向基线"关了就立即推"、开启后不推且排程、**触发排程回调真的发出汇总**、去重、没有事件不发、人脸命中只走关键事件急推（不经日常渠道实时推、但进日常缓冲做命中统计）、陌生人进缓冲、全局/本路静默都让位、渠道勾选只静默勾中的那几端、零渠道不生效、`throughSilence` 缺省/显式关/按端各自生效/`camId` 生效、通道被删清缓冲、`stopAll` 后连已排的定时器回调也不补发、墙钟对齐汇总）；
 > `summary.mjs` **26/26**（`buildSilentSummary({variant:'digest'})`：标题与引言，且把 digest / cam / silent **三个变体的正文逐字节比对必须相同** —— 只允许措辞不同，统计口径一个字都不许差；间隔文案与 `digestIntervalLabel` 同源）；
 > `ui-probe.mjs` **69/69**（真 `dist/` + 真 localStorage，断言优先看实拍几何与文案）：[A] 老存档（`cam` 上没 `digest` 字段）照样渲染且默认「未开启」、[B] 开关/下拉/渠道与实时文案、[C] 改间隔文案立刻跟随、[D] 只勾一部分 / 全取消时说"暂不生效"、[E] 保存后 `cam.digest` 落盘、[F] 三处 `throughSilence` 默认开、[F1] TG 那处随整块收起、[F2] 关一处不波及另两处且落盘、[G] 新增一路自带 `digest`、[H] 免打扰覆盖此刻时界面自己说「静默时段中 · 暂不汇总」。
 > 系统通知吸收（新增）：`/tmp/digest-system-probe/engine.mjs` **24/24**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`）：[1] digest 关 → status / 定时 patrol 立即实时推（6 条 = 2 通知 × 3 端）、返回非 absorbed；[2] digest 开 → status / 定时 patrol 进系统缓冲、0 实时推、排 300000ms 定时器，手动 patrol 仍实时；[3] 无活跃 digest 通道 → status 回退实时推；[4] 到点触发系统汇总、正文含「系统日常汇总」+ 状态变动 + 巡检、三端各 1；[5] 同 key 状态去重；[6] 无系统通知不排定时器；[7] 一致性：用户关掉 `statusAlerts`/`patrol` → 既不吸收也不实时发、不排定时器。
 > 回归：`critical-probe` 30/30、`parity-commands` 25/25、`face-group unit` 50/50、`pending-full` 39/39 + frontend-wiring 33/33、`collect` 24/24 + summary-detail 21/21、`search` 46/46、`temp-silent` 7/7。
 > 合并与交集（新增）：`/tmp/merged-digest-probe/probe.mjs` **16/16**（真实 `useAlertPush` + `buildSilentSummary` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`）：[A] 总开关全开 → 多通道合并为一条（只发并集渠道各 1 条、非 9 条）、在库人脸命中单独成区（共 N 次命中 · M 人 + 逐条明细 + 姓名）、feed 后即刻无合并发送（仅在库人脸命中走关键事件急推）、不到间隔不发；[B] 部分开 → 退回 per-cam 各自汇总（标题带单路后缀）；[C] 总开关 开→关 切换兜底发一条合并汇总；[D] 交集：`silentYieldSlots` 给出免打扰时段、重叠时段正文出现「与免打扰时段重叠」提示块且含区间文案、不重叠时段无提示块。
+> 墙钟对齐（新增，#334）：`/tmp/clock-align-probe/probe.mjs` **11/11**（见上方 §5.44 小节「汇总时刻对齐墙钟」）。
 > 回退验证（每个变异只改一处生产代码、跑完**逐字节**还原并核对）：
 
 | 变异 | 被谁抓住 |

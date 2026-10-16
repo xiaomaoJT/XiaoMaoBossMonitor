@@ -72,6 +72,7 @@
       预览用的是示例数据（门口 · 人形识别 87%）；实际推送时变量会换成真实内容。
       {{ active === 'tg' ? 'Telegram 支持 <b>粗体</b> <i>斜体</i> <a>链接</a> 标签。' : '加粗、引用、链接等 Markdown 语法在群里会正常渲染。' }}
     </p>
+    <p v-if="wecomNote" class="hint warn">⚠️ {{ wecomNote }}</p>
   </div>
 </template>
 
@@ -202,6 +203,18 @@ function mdToHtml(md) {
 }
 
 const previewHtml = computed(() => mdToHtml(previewText.value))
+
+/**
+ * 企业微信未单独设置模板时，实际推送复用钉钉默认模板渲染（useDingTalk 构建器共用）。
+ * 在预览 UI 上明确标注，避免用户以为"企微和钉钉长得不一样"是 bug。
+ */
+const wecomNote = computed(() => {
+  if (active.value !== 'wecom') return ''
+  const cfg = props.opts.wecom
+  const custom = cfg && cfg.template && String(cfg.template).trim()
+  if (custom) return ''
+  return '企业微信未单独设置模板，当前按钉钉默认模板渲染（如需不同样式，在上方输入框填写企业微信专用模板）。'
+})
 </script>
 
 <style scoped>
@@ -411,6 +424,14 @@ const previewHtml = computed(() => mdToHtml(previewText.value))
   font-size: 11px;
   line-height: 1.6;
   color: var(--text-dim-2);
+}
+
+.hint.warn {
+  padding: 7px 9px;
+  border-radius: 8px;
+  color: var(--warn-text, #9a6b00);
+  background: color-mix(in srgb, #f5b400 12%, transparent);
+  border: 1px solid color-mix(in srgb, #f5b400 35%, transparent);
 }
 
 @media (max-width: 640px) {

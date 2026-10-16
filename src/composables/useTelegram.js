@@ -145,10 +145,18 @@ async function parse(res) {
     throw new Error(`Telegram 返回内容无法解析（HTTP ${res.status}）`)
   }
   if (!data.ok) {
-    throw new Error(`${translateError(data.description || '未知错误')}（错误码 ${data.error_code}）`)
+    const err = new Error(`${translateError(data.description || '未知错误')}（错误码 ${data.error_code}）`)
+    // 频率限制：把 retry_after 透传给调用方，便于退避重试（见 sendTelegramText）
+    if (data.error_code === 429 && data.parameters && data.parameters.retry_after != null) {
+      err.retryAfter = Number(data.parameters.retry_after) || 1
+    }
+    throw err
   }
   return data.result
 }
+
+/** 简单的等待工具（限流退避用，不污染其它模块） */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /** 把常见报错翻译成人话 */
 function translateError(desc) {
@@ -198,19 +206,42 @@ export async function getChatInfo(cfg) {
 /** 发送纯文本（HTML 子集：<b> <i> <code> <a> <pre>） */
 export async function sendTelegramText(cfg, html, opts = {}) {
   const { token, chatId } = assertReady(cfg)
-  const res = await fetch(apiUrl(token, 'sendMessage'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: html,
-      parse_mode: 'HTML',
-      disable_notification: opts.silent !== undefined ? !!opts.silent : !!cfg.silent,
-      link_preview_options: { is_disabled: true }
-    }),
-    signal: timeoutSignal(API_TIMEOUT_MS)
-  })
-  return parse(res)
+  let lastErr
+  /*
+   * 限流退避重试：Telegram 同一会话连续发送易触发 429（见 sendTelegramLongText 的分条间隔），
+   * 一旦 429 就把整条汇总判失败、叠加 P0-2 的缓冲丢失。这里在单条层面退避重试
+   * （读返回里的 retry_after，没有就按次数兜底），把绝大多数瞬时限流就地消化掉。
+   * 网络类瞬时错误也重试一次，避免偶发抖动直接丢消息。
+   */
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await fetch(apiUrl(token, 'sendMessage'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: html,
+          parse_mode: 'HTML',
+          disable_notification: opts.silent !== undefined ? !!opts.silent : !!cfg.silent,
+          link_preview_options: { is_disabled: true }
+        }),
+        signal: timeoutSignal(API_TIMEOUT_MS)
+      })
+      return await parse(res)
+    } catch (e) {
+      lastErr = e
+      if (e && e.retryAfter != null) {
+        await sleep((e.retryAfter + attempt) * 1000)
+        continue
+      }
+      if (attempt < 1) {
+        await sleep(400)
+        continue
+      }
+      throw e
+    }
+  }
+  throw lastErr
 }
 
 /* ==================== 长文本分条 ==================== */

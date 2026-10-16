@@ -603,16 +603,24 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
    * 判据与命中聚合完全一致（有 faceName 才算命中），只是不折叠成一行。
    * 按时间正序列出（迟到补图/乱序事件也能排好），不截断。
    */
-  const perHitLines = faceHitDetail
-    ? list
-        .filter((r) => (r.type === 'face' || r.faceName) && String(r.faceName || '').trim())
-        .sort((a, b) => (a.time || 0) - (b.time || 0))
-        .map((r) => {
-          const sc = Number(r.faceScore) > 0 ? `（相似度 ${Math.round(Number(r.faceScore) * 100)}%）` : ''
-          return `- ${fmtClockSec(r.time || Date.now())} · ${r.name || '未知通道'} · ${String(r.faceName).trim()}${sc}`
-        })
-        .join('\n')
-    : ''
+  const perHitLines = (() => {
+    if (!faceHitDetail) return ''
+    const all = list
+      .filter((r) => (r.type === 'face' || r.faceName) && String(r.faceName || '').trim())
+      .sort((a, b) => (a.time || 0) - (b.time || 0))
+    // 命中明细截断：超过 LIMIT 条只列前 LIMIT，末尾补"另有 N 次"（用户确认 100 条可接受）。
+    // 纯前端显示节流，不影响缓冲/统计（全部命中仍计入 hitTotal）。
+    const LIMIT = 100
+    const over = Math.max(0, all.length - LIMIT)
+    const shown = over ? all.slice(0, LIMIT) : all
+    const body = shown
+      .map((r) => {
+        const sc = Number(r.faceScore) > 0 ? `（相似度 ${Math.round(Number(r.faceScore) * 100)}%）` : ''
+        return `- ${fmtClockSec(r.time || Date.now())} · ${r.name || '未知通道'} · ${String(r.faceName).trim()}${sc}`
+      })
+      .join('\n')
+    return over ? `${body}\n- …另有 ${over} 次命中未列出` : body
+  })()
 
   const detailLines = (() => {
     const top = [...list].sort((a, b) => (a.time || 0) - (b.time || 0)).slice(0, 20)

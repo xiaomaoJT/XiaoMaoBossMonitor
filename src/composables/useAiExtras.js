@@ -349,7 +349,10 @@ export function useAiExtras(options) {
           })
         }
         if (!fc.eventOnUnknown) continue
-        const key = 'unknown'
+        // 按摄像头聚合：每个摄像头每 cooldownSec 秒最多产一条陌生人脸事件（降噪）。
+        // 原来全局单键 'unknown' 会让"另一路摄像头刚报过"把本路也压住，
+        // 多摄像头场景会出现"门口有人、电梯却不报"的错位压制。
+        const key = 'unknown:' + cam.id
         if (now - (faceEventAt.get(key) || 0) < fc.cooldownSec * 1000) continue
         faceEventAt.set(key, now)
         emit({

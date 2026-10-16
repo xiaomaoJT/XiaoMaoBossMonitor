@@ -42,6 +42,7 @@ import {
   clampDigestMinutes,
   digestCfgOf,
   digestIntervalLabel,
+  isWallAlignedInterval,
   isFaceHit,
   matchSilentSlotAt,
   parseSilentSlots,
@@ -442,6 +443,282 @@ export function useAlertPush(options, hooks = {}) {
    *
    * @param {string[]} [only] 限定渠道（试发用）；缺省 / 空 = 全部已配置渠道
    */
+  /* ==================== 缓冲上限 / 失败缓存 / 补发（P1-3 + P0-2） ==================== */
+  const BUFFER_CAP = 2000
+  /**
+   * 往缓冲里塞一条，超出上限就丢最早的并记下来（flush 时汇总里标注"另有 N 条未列入"）。
+   * 用数组上的 `__dropped` 挂计数，零侵入、无需把缓冲改成对象。
+   */
+  function capPush(arr, item) {
+    if (!('__dropped' in arr)) arr.__dropped = 0
+    arr.push(item)
+    while (arr.length > BUFFER_CAP) {
+      arr.shift()
+      arr.__dropped += 1
+    }
+    markDirty()
+  }
+  function takeDropped(arr) {
+    const d = arr.__dropped || 0
+    arr.__dropped = 0
+    return d
+  }
+  function addDroppedNote(summary, n) {
+    if (!n || n <= 0) return summary
+    const footer = `\n\n_另有 ${n} 条事件因超出缓冲上限（${BUFFER_CAP} 条）未列入本汇总_`
+    return {
+      ...summary,
+      markdown: (summary.markdown || '') + footer,
+      plain: (summary.plain || '') + `\n\n另有 ${n} 条事件因超出缓冲上限（${BUFFER_CAP} 条）未列入本汇总`,
+      html: (summary.html || summary.plain || '') + footer
+    }
+  }
+
+  /**
+   * 渠道级发送结果：每条汇总"先清后发"，发送失败就永久丢失（P0-2）。
+   * 这里把结果拆成成功/失败两份 —— 失败时上层决定"整批放回缓冲重发"还是"只给失败渠道补发"。
+   */
+  async function pushSilentSummary(ids, summary) {
+    const sent = []
+    const failed = []
+    if (ids.includes('tg')) {
+      try {
+        await sendTelegramLongText(readCfg('tg'), summary.plain || summary.html || '')
+        recordPush('tg', true)
+        sent.push('TG')
+      } catch (e) {
+        recordPush('tg', false, (e && e.message) || '未知错误')
+        failed.push({ id: 'tg', name: 'TG', error: (e && e.message) || '未知错误' })
+      }
+    }
+    const rest = await Promise.all(
+      ids
+        .filter((id) => id !== 'tg')
+        .map(async (id) => {
+          const def = CHANNEL_DEFS.find((d) => d.id === id)
+          const name = def ? def.name : id
+          try {
+            if (id === 'ding') {
+              const c = readCfg('ding')
+              await sendDingTalk(
+                { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy },
+                { title: summary.title, text: summary.markdown, msgType: 'markdown' }
+              )
+            } else {
+              const c = readCfg('wecom')
+              await sendWeCom(c, { msgType: 'markdown', content: summary.markdown, atAll: false })
+            }
+            recordPush(id, true)
+            return { id, name, ok: true }
+          } catch (e) {
+            recordPush(id, false, (e && e.message) || '未知错误')
+            return { id, name, ok: false, error: (e && e.message) || '未知错误' }
+          }
+        })
+    )
+    rest.forEach((r) => (r.ok ? sent.push(r.name) : failed.push({ id: r.id, name: r.name, error: r.error })))
+    return { sent, failed }
+  }
+
+  /** 失败信息缓存：key = 汇总作用域（global / cam:<id> / digest:<id> / merged / system） */
+  const flushFail = new Map()
+  /** 部分失败时的"待补发"：只给失败的渠道下一次重发 */
+  const flushResend = new Map()
+
+  function fmtRelTime(ts) {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+    if (s < 60) return `${s} 秒前`
+    if (s < 3600) return `${Math.round(s / 60)} 分钟前`
+    return `${Math.round(s / 3600)} 小时前`
+  }
+  /** 取出上一次失败的简要描述（供下一次汇总头部带上），不清缓存（清放在发送成功后） */
+  function lastFailNote(scopeKey) {
+    const f = flushFail.get(scopeKey)
+    if (!f) return ''
+    const chans = [...new Set(f.failed.map((x) => x.name))]
+    const reasons = [...new Set(f.failed.map((x) => x.error))].slice(0, 3)
+    const when = f.at ? `（${fmtRelTime(f.at)}）` : ''
+    return `上轮汇总发送失败（${chans.join('/')}：${reasons.join('；')}），本汇总已${f.retained ? '并入重发' : '补发'}${when}`
+  }
+  function prependFailNote(summary, note) {
+    const md = `> ⚠️ ${note}\n\n${summary.markdown || ''}`
+    const plain = `⚠️ ${note}\n\n${summary.plain || ''}`
+    const html = `> ⚠️ ${note}\n\n${summary.html || summary.plain || ''}`
+    return { ...summary, markdown: md, plain, html }
+  }
+  /**
+   * 带失败保留/补发的统一发送入口。
+   * @param {string} scopeKey 作用域（用于失败缓存）
+   * @param {object} summary 汇总文本
+   * @param {string[]} ids 目标渠道
+   * @param {() => void} [restore] 全渠道失败时把已 splice 的批放回缓冲头部（数据不丢）
+   * @returns {{sent:string[], failed:Array}}
+   */
+  async function sendScoped(scopeKey, summary, ids, restore) {
+    // 先补发上一轮"部分失败"遗留的渠道（best-effort）
+    const pending = flushResend.get(scopeKey)
+    if (pending && Array.isArray(pending.ids) && pending.ids.length) {
+      try {
+        const r = await pushSilentSummary(pending.ids, pending.summary)
+        if (r.failed.length === 0) flushResend.delete(scopeKey)
+        else flushResend.set(scopeKey, { ids: r.failed.map((f) => f.id), summary: pending.summary })
+      } catch (e) {
+        /* 补发出错留着，下轮再试 */
+      }
+    }
+    const prevNote = lastFailNote(scopeKey)
+    const toSend = prevNote ? prependFailNote(summary, prevNote) : summary
+    const res = await pushSilentSummary(ids, toSend)
+    const failedIds = res.failed.map((f) => f.id)
+    if (res.failed.length) {
+      flushFail.set(scopeKey, {
+        at: Date.now(),
+        failed: res.failed,
+        retained: failedIds.length === ids.length
+      })
+      if (failedIds.length === ids.length) {
+        // 全渠道失败 → 整批放回缓冲头部，下轮（或心跳）重发，数据不丢
+        if (restore) restore()
+      } else {
+        // 部分失败 → 留待下轮只给失败渠道补发
+        flushResend.set(scopeKey, { ids: failedIds, summary: toSend })
+      }
+    } else {
+      // 发送成功 → 清掉失败缓存（上轮的失败原因已随本汇总头部带出）
+      flushFail.delete(scopeKey)
+      flushResend.delete(scopeKey)
+    }
+    markDirty()
+    return res
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 状态落盘（P1-2）：静默 / 日常静默的缓冲与游标重启不丢                      */
+  /* 复用 localStorage：后端由 compat.mjs 落成 server/data/localstorage.json；  */
+  /* 前端原生 localStorage。只在 hooks.persist 为真时生效                     */
+  /* （后端传 true；前端展示实例不落盘，避免多个实例互相覆盖）。                 */
+  /* ------------------------------------------------------------------ */
+  const PUSH_STATE_KEY = 'bm:alertpush:state:v1'
+  let saveTimer = null
+  let loading = false
+  function sset(src) {
+    return Array.from(src || [])
+  }
+  /** 缓冲变化时排一个合并写（1.5s 内多次变化只落一次），不阻塞实时推送 */
+  function markDirty() {
+    if (!hooks.persist || loading) return
+    if (saveTimer) return
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      savePushState()
+    }, 1500)
+  }
+  function savePushState() {
+    if (!hooks.persist) return
+    try {
+      const storeMap = {}
+      digestStore.forEach((st, id) => {
+        storeMap[id] = { buf: st.buf, seen: sset(st.seen), since: st.since }
+      })
+      const payload = {
+        v: 1,
+        at: Date.now(),
+        silent: { buf: silentBuffer, seen: sset(silentSeen) },
+        chState: Object.fromEntries(
+          Object.entries(chState).map(([id, s]) => [
+            id,
+            { windowTs: s.windowTs, lastGlobalAt: s.lastGlobalAt, lastLocalAt: s.lastLocalAt }
+          ])
+        ),
+        digest: {
+          store: storeMap,
+          merged: { buf: digestMerged.buf, seen: sset(digestMerged.seen), since: digestMerged.since },
+          system: { buf: digestSystemBuf, seen: sset(digestSystemSeen), since: digestSystemSince }
+        },
+        fail: {
+          fail: [...flushFail.entries()],
+          resend: [...flushResend.entries()]
+        }
+      }
+      localStorage.setItem(PUSH_STATE_KEY, JSON.stringify(payload))
+    } catch (e) {
+      /* 落盘失败绝不影响实时推送 */
+    }
+  }
+  function loadPushState() {
+    if (!hooks.persist) return
+    try {
+      const raw = localStorage.getItem(PUSH_STATE_KEY)
+      if (!raw) return
+      const p = JSON.parse(raw)
+      loading = true
+      // 静默（免打扰）缓冲
+      if (p.silent && Array.isArray(p.silent.buf)) {
+        silentBuffer.length = 0
+        p.silent.buf.forEach((r) => capPush(silentBuffer, r))
+        silentSeen.clear()
+        ;(p.silent.seen || []).forEach((x) => silentSeen.add(x))
+      }
+      // 渠道限流游标
+      if (p.chState) {
+        Object.entries(p.chState).forEach(([id, s]) => {
+          const st = chState[id]
+          if (!st) return
+          if (Array.isArray(s.windowTs)) st.windowTs = s.windowTs
+          if (s.lastGlobalAt) st.lastGlobalAt = s.lastGlobalAt
+          if (s.lastLocalAt) st.lastLocalAt = s.lastLocalAt
+        })
+      }
+      // 日常静默缓冲（per-cam + 合并 + 系统）
+      if (p.digest) {
+        if (p.digest.store) {
+          const liveIds = (camerasOf() || []).map((c) => c.id)
+          Object.entries(p.digest.store).forEach(([id, s]) => {
+            if (!liveIds.includes(id)) return // 通道已删 → 丢弃，避免 Map 无限增长
+            const st = digestSlot(id)
+            st.buf.length = 0
+            ;(s.buf || []).forEach((r) => capPush(st.buf, r))
+            st.seen.clear()
+            ;(s.seen || []).forEach((x) => st.seen.add(x))
+            st.since = s.since || 0
+          })
+        }
+        if (p.digest.merged) {
+          digestMerged.buf.length = 0
+          ;(p.digest.merged.buf || []).forEach((r) => capPush(digestMerged.buf, r))
+          digestMerged.seen.clear()
+          ;(p.digest.merged.seen || []).forEach((x) => digestMerged.seen.add(x))
+          digestMerged.since = p.digest.merged.since || 0
+        }
+        if (p.digest.system) {
+          digestSystemBuf.length = 0
+          ;(p.digest.system.buf || []).forEach((r) => capPush(digestSystemBuf, r))
+          digestSystemSeen.clear()
+          ;(p.digest.system.seen || []).forEach((x) => digestSystemSeen.add(x))
+          digestSystemSince = p.digest.system.since || 0
+        }
+      }
+      // 失败缓存跨重启存活（失败原因下轮汇总仍带出）
+      if (p.fail) {
+        if (Array.isArray(p.fail.fail)) p.fail.fail.forEach(([k, v]) => flushFail.set(k, v))
+        if (Array.isArray(p.fail.resend)) p.fail.resend.forEach(([k, v]) => flushResend.set(k, v))
+      }
+      loading = false
+      // 让心跳重新排程定时器：overdue 的立刻发，未到点的按 since+间隔发
+      tickCamDigest(Date.now())
+      /*
+       * 静默窗口若在停机期间已经结束 → 新鲜进程读不到 prev，不会触发结束汇总，
+       * 缓冲会卡死。这里兜底：不在窗口里却还有缓冲 → 立刻补发一条（数据可回收）。
+       */
+      if (silentBuffer.length && !currentWindow(Date.now())) {
+        flushSilentSummary({ endMs: Date.now() }).catch(() => {})
+      }
+    } catch (e) {
+      loading = false
+      /* 读坏的状态不致命 */
+    }
+  }
+
   function restrictIds(only) {
     const all = CHANNEL_DEFS.filter((d) => isReady(d.id)).map((d) => d.id)
     if (Array.isArray(only) && only.length) {
@@ -519,50 +796,6 @@ export function useAlertPush(options, hooks = {}) {
     if (win) armSilentEnd(win)
   }
 
-  /** 把汇总消息发到给定渠道，返回成功发出的渠道名 */
-  async function pushSilentSummary(ids, summary) {
-    const sent = []
-    if (ids.includes('tg')) {
-      try {
-        /*
-         * 分条发送：汇总带人脸命中逐条明细后很容易越过 TG 单条 4096 上限，
-         * 硬发会被 API 打回（整条丢失），硬截断又会把最该看的明细切掉。
-         */
-        await sendTelegramLongText(readCfg('tg'), summary.plain || summary.html || '')
-        recordPush('tg', true)
-        sent.push('TG')
-      } catch (e) {
-        recordPush('tg', false, (e && e.message) || '未知错误')
-      }
-    }
-    const rest = await Promise.all(
-      ids
-        .filter((id) => id !== 'tg')
-        .map(async (id) => {
-          const name = CHANNEL_DEFS.find((d) => d.id === id).name
-          try {
-            if (id === 'ding') {
-              const c = readCfg('ding')
-              await sendDingTalk(
-                { webhook: c.webhook, secret: c.secret, useProxy: c.useProxy },
-                { title: summary.title, text: summary.markdown, msgType: 'markdown' }
-              )
-            } else {
-              const c = readCfg('wecom')
-              await sendWeCom(c, { msgType: 'markdown', content: summary.markdown, atAll: false })
-            }
-            recordPush(id, true)
-            return name
-          } catch (e) {
-            recordPush(id, false, (e && e.message) || '未知错误')
-            return null
-          }
-        })
-    )
-    rest.forEach((n) => n && sent.push(n))
-    return sent
-  }
-
   /**
    * 静默收尾：发一条「免打扰时段已结束」提醒（含本时段汇总），然后清空缓冲。
    *
@@ -618,8 +851,11 @@ export function useAlertPush(options, hooks = {}) {
       stillSilent: !!next,
       stillLabel: next ? next.rangeLabel : ''
     })
+    const dropped = takeDropped(silentBuffer)
+    const toSend = addDroppedNote(summary, dropped)
 
-    const sent = await pushSilentSummary(ids, summary)
+    const res = await sendScoped('global', toSend, ids, () => silentBuffer.unshift(...buf))
+    const sent = res.sent
     if (!opts.test) {
       ids.forEach((id) => {
         const st = chState[id]
@@ -758,7 +994,10 @@ export function useAlertPush(options, hooks = {}) {
       scopeName: name,
       rangeLabel: opts.window ? opts.window.rangeLabel : ''
     })
-    const sent = await pushSilentSummary(ids, summary)
+    const dropped = takeDropped(st.buf)
+    const toSend = addDroppedNote(summary, dropped)
+    const res = await sendScoped(`cam:${camId}`, toSend, ids, () => st.buf.unshift(...buf))
+    const sent = res.sent
     if (!opts.test && sent.length) {
       notify(`「${name}」通道静默结束汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
     }
@@ -902,6 +1141,22 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /**
+   * 把「到点时刻」对齐到墙钟网格（仅 30 整数倍间隔启用，见 isWallAlignedInterval）。
+   * 让汇总落在 :00 / :30 这类边界，而不是「开启时刻 + N 分钟」那样错位的 :07 / :37。
+   * 以本地零点为锚：30 分 → :00/:30；60 分 → :00；120 分 → 偶点 :00；240 分 → 每 4 小时 :00。
+   * 返回**下一个 ≥ now** 的网格边界（毫秒），没有"向后借"的边界，越过点就顺延到下一格。
+   */
+  function nextWallBoundary(now, gridMinutes) {
+    const gridMs = clampDigestMinutes(gridMinutes) * 60000
+    const d = new Date(now)
+    const msSinceMidnight =
+      d.getHours() * 3600000 + d.getMinutes() * 60000 + d.getSeconds() * 1000 + d.getMilliseconds()
+    const k = Math.ceil(msSinceMidnight / gridMs)
+    const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+    return midnight + k * gridMs
+  }
+
+  /**
    * 合并模式下的「吸收渠道」= 所有活跃 digest 通道的渠道**并集**。
    * 合并汇总会发往这个并集，所以每条事件都应把并集里的渠道从实时 send/queue 里摘掉，
    * 否则会出现「同一事件既实时推、又进合并汇总」的重复（尤其某路只勾了部分渠道时，
@@ -950,7 +1205,10 @@ export function useAlertPush(options, hooks = {}) {
       variant: 'digest',
       intervalMinutes: mergedIntervalMs(now) / 60000
     })
-    const sent = await pushSilentSummary(ids, summary)
+    const dropped = takeDropped(digestMerged.buf)
+    const toSend = addDroppedNote(summary, dropped)
+    const res = await sendScoped('merged', toSend, ids, () => digestMerged.buf.unshift(...buf))
+    const sent = res.sent
     if (!opts.test && sent.length) {
       notify(`日常事件合并汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
     }
@@ -977,7 +1235,11 @@ export function useAlertPush(options, hooks = {}) {
       digestMerged.armedDue = 0
       return false
     }
-    const due = digestMerged.since + mergedIntervalMs(now)
+    // 30 整数倍间隔（整数小时 / 30 分钟）→ 对齐墙钟 :00/:30，而不是「开启时刻 + N 分钟」
+    const mergedMin = mergedIntervalMs(now) / 60000
+    const due = isWallAlignedInterval(mergedMin)
+      ? nextWallBoundary(now, mergedMin)
+      : digestMerged.since + mergedIntervalMs(now)
     if (now >= due) return true
     if (digestMerged.timer && digestMerged.armedDue === due) return false
     if (digestMerged.timer) clearTimeout(digestMerged.timer)
@@ -1012,6 +1274,7 @@ export function useAlertPush(options, hooks = {}) {
     st.buf.length = 0
     st.seen.clear()
     st.since = 0
+    markDirty()
   }
 
   /**
@@ -1043,10 +1306,12 @@ export function useAlertPush(options, hooks = {}) {
       return false
     }
     /*
-     * dueAt 每次都从 since + 间隔**重算**，而不是记在状态里加一次：
-     * 用户改了间隔就能立刻生效，不必等下一批事件。
+     * dueAt 每次都重算（不是记在状态里加一次）：用户改了间隔就能立刻生效。
+     * 30 整数倍间隔（整数小时 / 30 分钟）→ 对齐墙钟 :00/:30；其余保持 since + 间隔。
      */
-    const due = st.since + s.intervalMs
+    const due = isWallAlignedInterval(s.intervalMinutes)
+      ? nextWallBoundary(now, s.intervalMinutes)
+      : st.since + s.intervalMs
     if (now >= due) return true
     if (st.timer && st.armedDue === due) return false
     if (st.timer) clearTimeout(st.timer)
@@ -1091,7 +1356,10 @@ export function useAlertPush(options, hooks = {}) {
       scopeName: name,
       intervalMinutes: s.intervalMinutes
     })
-    const sent = await pushSilentSummary(ids, summary)
+    const dropped = takeDropped(st.buf)
+    const toSend = addDroppedNote(summary, dropped)
+    const res = await sendScoped(`digest:${camId}`, toSend, ids, () => st.buf.unshift(...buf))
+    const sent = res.sent
     if (!opts.test && sent.length) {
       notify(`「${name}」日常事件汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
     }
@@ -1120,7 +1388,7 @@ export function useAlertPush(options, hooks = {}) {
           st.buf.forEach((r) => {
             if (digestMerged.seen.has(r.key)) return
             digestMerged.seen.add(r.key)
-            digestMerged.buf.push(r)
+            capPush(digestMerged.buf, r)
             if (!digestMerged.since) digestMerged.since = now
           })
           st.buf.length = 0
@@ -1179,7 +1447,10 @@ export function useAlertPush(options, hooks = {}) {
     if (!cam) return false
     const s = digestStateOf(cam, now)
     if (!s.active) return false // 让位给静默窗口：不排定时器，缓冲留着交给心跳
-    const due = (digestSystemSince || now) + s.intervalMs
+    // 30 整数倍间隔对齐墙钟 :00/:30（与合并/per-cam 同口径）；其余保持 since + 间隔
+    const due = isWallAlignedInterval(s.intervalMinutes)
+      ? nextWallBoundary(now, s.intervalMinutes)
+      : (digestSystemSince || now) + s.intervalMs
     if (now >= due) return true
     digestSystemTimer = setTimeout(() => {
       digestSystemTimer = null
@@ -1230,7 +1501,10 @@ export function useAlertPush(options, hooks = {}) {
       intervalMinutes: s.intervalMinutes,
       scopeName: (cam && cam.name) || ''
     })
-    const sent = await pushSilentSummary(ids, summary)
+    const dropped = takeDropped(digestSystemBuf)
+    const toSend = addDroppedNote(summary, dropped)
+    const res = await sendScoped('system', toSend, ids, () => digestSystemBuf.unshift(...buf))
+    const sent = res.sent
     if (!opts.test && sent.length) {
       notify(`系统日常汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
     }
@@ -2201,6 +2475,7 @@ export function useAlertPush(options, hooks = {}) {
     digestSystemSeen.clear()
     digestSystemSince = 0
     pendingCount.value = 0
+    markDirty()
   }
 
   /** 入口：处理一条报警事件 */
@@ -2266,7 +2541,7 @@ export function useAlertPush(options, hooks = {}) {
         if (byGlobal.length) {
           if (!silentSeen.has(record.key)) {
             silentSeen.add(record.key)
-            silentBuffer.push(silentSnapshot(record))
+            capPush(silentBuffer, silentSnapshot(record))
           }
           scheduleSilentFlush()
         } else {
@@ -2274,7 +2549,7 @@ export function useAlertPush(options, hooks = {}) {
           const st = camSlot(record.id)
           if (!st.seen.has(record.key)) {
             st.seen.add(record.key)
-            st.buf.push(silentSnapshot(record))
+            capPush(st.buf, silentSnapshot(record))
           }
           scheduleCamFlush(record.id, now)
         }
@@ -2341,20 +2616,26 @@ export function useAlertPush(options, hooks = {}) {
             const st = digestMerged
             if (!st.seen.has(record.key)) {
               st.seen.add(record.key)
-              st.buf.push(silentSnapshot(record))
+              capPush(st.buf, silentSnapshot(record))
               if (!st.since) st.since = now
             }
-            bufDue = st.since + mergedIntervalMs(now)
+            // 30 整数倍间隔对齐墙钟 :00/:30（否则 since + 间隔），展示与调度共用同一口径
+            const mergedMin = mergedIntervalMs(now) / 60000
+            bufDue = isWallAlignedInterval(mergedMin)
+              ? nextWallBoundary(now, mergedMin)
+              : st.since + mergedIntervalMs(now)
             armMergedDigest(now)
           } else {
             const st = digestSlot(record.id)
             if (!st.seen.has(record.key)) {
               st.seen.add(record.key)
-              st.buf.push(silentSnapshot(record))
+              capPush(st.buf, silentSnapshot(record))
               // 间隔从**这一批的第一条**算起：空等一整天之后不该立刻补一条空汇总
               if (!st.since) st.since = now
             }
-            bufDue = st.since + dState.intervalMs
+            bufDue = isWallAlignedInterval(dState.intervalMinutes)
+              ? nextWallBoundary(now, dState.intervalMinutes)
+              : st.since + dState.intervalMs
             armCamDigest(record.id, now)
           }
           digested = true
@@ -2480,7 +2761,7 @@ export function useAlertPush(options, hooks = {}) {
         const k = key || `${kind}-${now}`
         if (!digestSystemSeen.has(k)) {
           digestSystemSeen.add(k)
-          digestSystemBuf.push({
+          capPush(digestSystemBuf, {
             key: k,
             time: now,
             kind,
@@ -3173,6 +3454,9 @@ export function useAlertPush(options, hooks = {}) {
    *      否则每次重启进程都会给用户刷一遍重复的开始提醒）；
    *   2) 起 30 秒心跳，负责「进入窗口 → 发开始提醒 + 排结束提醒」与「窗口到点兜底」。
    */
+  // 先恢复落盘状态（缓冲 / 游标 / 失败缓存），再启动心跳与窗口定时器
+  loadPushState()
+
   startSilentWatcher()
 
   return {

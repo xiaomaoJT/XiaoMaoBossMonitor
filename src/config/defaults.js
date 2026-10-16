@@ -391,7 +391,7 @@ export const HIDDEN_OPTIONS = {
     dedupeSec: FACE_TUNING.dedupeSec.def,
     /** 识别到已录入的人 → 记事件并推送 */
     eventOnKnown: true,
-    /** 检测到未录入的人脸 → 也记事件（默认关，避免刷屏） */
+    /** 检测到未录入的人脸 → 也记事件（默认开；按摄像头每 cooldownSec 秒聚合一条，避免刷屏） */
     eventOnUnknown: true,
     /** 把没录入的人脸暂存起来，方便在设置里一键录入 */
     collectUnknown: true,
@@ -1831,6 +1831,16 @@ export function digestCfgOf(cam) {
 /** 这一路的日常静默间隔（毫秒） */
 export function digestIntervalMs(cfg) {
   return clampDigestMinutes(cfg && cfg.intervalMinutes) * 60000
+}
+
+/**
+ * 间隔是否走「墙钟对齐」汇总：整数小时（60/120/240…）或 30 分钟（30）这类
+ * 30 的整数倍间隔，把汇总触发点对齐到 :00 / :30 这类墙钟网格，而不是「开启时刻 + N 分钟」。
+ * 其余间隔（1/3/5/10/15）保持原有「since + 间隔」行为，不强制对齐。
+ */
+export function isWallAlignedInterval(min) {
+  const n = clampDigestMinutes(min)
+  return n >= 30 && n % 30 === 0
 }
 
 /**
