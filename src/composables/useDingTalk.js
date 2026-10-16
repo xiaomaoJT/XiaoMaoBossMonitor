@@ -28,7 +28,7 @@ import {
   normalizeEvents
 } from './useAlarmText.js'
 import { runtimeLine } from './useDeviceInfo.js'
-import { BRAND, digestIntervalLabel } from '../config/defaults.js'
+import { BRAND, digestIntervalLabel, silentOverlapSegments } from '../config/defaults.js'
 import { collectAlarmVars, renderTemplate, DEFAULT_DING_TEMPLATE } from './useMessageTemplate.js'
 
 const PROXY_PREFIX = '/dingtalk-robot'
@@ -627,6 +627,23 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   })()
   const detailNote = list.length > 20 ? `\n- …另有 ${list.length - 20} 条` : ''
 
+  /*
+   * 本汇总时段与免打扰时段的重叠段（仅 digest 变体用于后面的提示块）。
+   * cfg 是静默配置（含 slots），silentOverlapSegments 按"今天零点 + 距天分钟数"展开
+   * 跨零点时段并求交，返回毫秒区间；再格式化成"HH:MM~HH:MM"文案。
+   */
+  const overlapSegs = isDigest
+    ? silentOverlapSegments(cfg, startMs, endMs).map((s) => {
+        const p2 = (n) => String(n).padStart(2, '0')
+        const fmt = (ms) => {
+          const d = new Date(ms)
+          return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+        }
+        const cross = new Date(s.to).getDate() !== new Date(s.from).getDate()
+        return { ...s, label: `${fmt(s.from)} ~ ${cross ? '次日 ' : ''}${fmt(s.to)}` }
+      })
+    : []
+
   const lines = [
     `### 【${titleName}】${rangeLabel}`,
     '',
@@ -667,6 +684,22 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     '**📋 按类型**',
     typeLines,
     '',
+    /*
+     * 日常汇总与免打扰时段的**交集**提示（仅 digest 变体）。
+     * 日常静默在免打扰时段里会让位（不吸收新事件），本批汇总的时段若与免打扰重叠，
+     * 重叠期间的事件是由免打扰汇总单独推送的、不会进日常汇总 —— 不点明的话，
+     * 用户会以为"今天门口明明有人、怎么日常汇总里没有"。
+     * 只在真的重叠时才出现（没开免打扰 / 不重叠则整块不出现）。
+     */
+    ...(isDigest && overlapSegs.length
+      ? [
+          '**⚠️ 与免打扰时段重叠**',
+          ...overlapSegs.map(
+            (s) => `- 本汇总时段与免打扰 ${s.label} 重叠，重叠期间事件由「免打扰汇总」单独推送、未计入本汇总`
+          ),
+          ''
+        ]
+      : []),
     // 日常汇总：本批里并入了「完整人形补图」的，点一句（原图已在事件面板，不在聊天里重发）
     ...(isDigest && personImgN
       ? ['- 含完整人形补图 **' + personImgN + '** 张（原图见事件面板）', '']

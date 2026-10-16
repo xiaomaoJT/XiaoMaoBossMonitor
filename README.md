@@ -1704,6 +1704,25 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 
 **配置挂在 `cam.digest`**（与 `cam.silent` 同理）：随通道生灭。另开一张 `_camDigest: { 'cam-1': … }` 就得自己维护增删改名，迟早留下僵尸配置。
 
+#### 日常静默「总开关全开」→ 多通道合并为一条汇总
+
+`cam.digest` 原本是「每路各自一条」：开了 N 路就发 N 条本路汇总，乘上三端渠道 = N×M 条噪音。`allDigestEnabled(cameras)` 为真（**所有通道都开了 `cam.digest` 且各自勾了至少一个渠道**）时，日常汇总改成**合并为一条**，发给所有活跃 digest 通道的**并集**，攒在一个共享缓冲 `digestMerged` 里、由 30s 心跳统一到点发出。
+
+- **吸收渠道 = 并集（`mergedDigestChannels`）**：合并汇总要发往并集，所以每条事件把**并集里所有渠道**都从实时 `send`/`queue` 摘掉，否则会出现「某路只勾了部分渠道 → 没勾的渠道漏成实时、与合并汇总重复」。`non`-合并模式仍按本路 `digest.channels` 摘（保持原语义）。
+- **在库人脸命中也进合并缓冲**。判据仍是 `isFaceHit`，以前被 `!isFaceHit` 挡在门外，现在放行 —— 用户要的正是"汇总里单独强调是否命中在库人脸、命中次数、命中明细"。关键事件急推（`pushDirectToUsers 'face'`）照常、不受合并影响，日常汇总只做"记录"。
+- **总开关切换的缓冲搬运**：开 ↔ 关 的判定用 `lastMergeOn` 记住上一拍；关 → 开 把各路 per-cam 缓冲并入手合并（不丢已攒事件），开 → 关 把合并缓冲**兜底发一条**（此时 per-cam 缓冲为空、继续各自汇总）。切换只发生在那一拍，搬运只做一次。
+- **排程与成员**：`armMergedDigest`（幂等、让位给静默窗口）、`digestMasterOn`、`mergedIntervalMs`（优先 `options.digestIntervalMinutes`，否则取最短活跃间隔）、`flushMergedDigest`、`mergedDigestChannels` 是新增的引擎成员；返回对象里 `mergedDigestInfo()` 暴露 `{on, buffered, since}` 供展示层看"合并缓冲攒了几条"。
+
+#### 日常静默与免打扰时段「交集」要体现出来
+
+合并汇总（digest 变体）的时段若与全局免打扰 `options.silent` 的时段**重叠**，重叠期间事件由「免打扰汇总」单独推送、并**未计入**日常汇总。不点明的话，用户会以为"今天门口明明有人、怎么日常汇总里没有"。三处都要把交集摆出来：
+
+1. **汇总正文**（`buildSilentSummary` 的 digest 变体）新增「⚠️ 与免打扰时段重叠」提示块，列出重叠区间，说明"重叠期间事件由免打扰汇总单独推送、未计入本汇总"。不重叠（没开免打扰 / 不重叠）则整块不出现。
+2. **设置页**：开了总开关且配了免打扰时段时，提示"合并为一条 + 每日于免打扰 X 让位"的复合行为。
+3. **后端 `/cams` 与 `/status`**：每路追加「每日于免打扰 X 让位」、整体汇总行加「（总开关全开 · 多通道合并为一条汇总）」「（每日于免打扰 X 让位）」说明。
+
+计算口径：`silentYieldSlots(silentCfg)` 给出免打扰时段文案（"HH:MM~HH:MM"，跨零点带"次日"）；`silentOverlapSegments(cfg, startMs, endMs)` 按"今天零点 + 距天分钟数"展开跨零点时段并求交，返回毫秒区间。两函数都在 `defaults.js`。
+
 #### 系统通知（设备离线/上线、定时巡检）也收入「系统日常汇总」
 
 日常事件静默原本只收"报警类事件"。现在把**系统通知**也并入：设备离线/上线（`sendDirect` 的 `kind:'status'`）和**定时**巡检（`kind:'patrol'` 且 `digestable:true`）不再实时推，而是攒进一条独立的 `digestSystemBuf`，在**首个活跃 digest 通道**的间隔到点时作为「系统日常汇总」一次性发出。它与 per-cam 报警汇总**平行、各发各的**（一个事件报警走 digest，一个系统通知走 system digest，互不串）。
@@ -1741,6 +1760,7 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 > `ui-probe.mjs` **69/69**（真 `dist/` + 真 localStorage，断言优先看实拍几何与文案）：[A] 老存档（`cam` 上没 `digest` 字段）照样渲染且默认「未开启」、[B] 开关/下拉/渠道与实时文案、[C] 改间隔文案立刻跟随、[D] 只勾一部分 / 全取消时说"暂不生效"、[E] 保存后 `cam.digest` 落盘、[F] 三处 `throughSilence` 默认开、[F1] TG 那处随整块收起、[F2] 关一处不波及另两处且落盘、[G] 新增一路自带 `digest`、[H] 免打扰覆盖此刻时界面自己说「静默时段中 · 暂不汇总」。
 > 系统通知吸收（新增）：`/tmp/digest-system-probe/engine.mjs` **24/24**（真实 `useAlertPush` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`）：[1] digest 关 → status / 定时 patrol 立即实时推（6 条 = 2 通知 × 3 端）、返回非 absorbed；[2] digest 开 → status / 定时 patrol 进系统缓冲、0 实时推、排 300000ms 定时器，手动 patrol 仍实时；[3] 无活跃 digest 通道 → status 回退实时推；[4] 到点触发系统汇总、正文含「系统日常汇总」+ 状态变动 + 巡检、三端各 1；[5] 同 key 状态去重；[6] 无系统通知不排定时器；[7] 一致性：用户关掉 `statusAlerts`/`patrol` → 既不吸收也不实时发、不排定时器。
 > 回归：`critical-probe` 30/30、`parity-commands` 25/25、`face-group unit` 50/50、`pending-full` 39/39 + frontend-wiring 33/33、`collect` 24/24 + summary-detail 21/21、`search` 46/46、`temp-silent` 7/7。
+> 合并与交集（新增）：`/tmp/merged-digest-probe/probe.mjs` **16/16**（真实 `useAlertPush` + `buildSilentSummary` + 受控时钟 + 拦 `setTimeout` + 打桩 `fetch`）：[A] 总开关全开 → 多通道合并为一条（只发并集渠道各 1 条、非 9 条）、在库人脸命中单独成区（共 N 次命中 · M 人 + 逐条明细 + 姓名）、feed 后即刻无合并发送（仅在库人脸命中走关键事件急推）、不到间隔不发；[B] 部分开 → 退回 per-cam 各自汇总（标题带单路后缀）；[C] 总开关 开→关 切换兜底发一条合并汇总；[D] 交集：`silentYieldSlots` 给出免打扰时段、重叠时段正文出现「与免打扰时段重叠」提示块且含区间文案、不重叠时段无提示块。
 > 回退验证（每个变异只改一处生产代码、跑完**逐字节**还原并核对）：
 
 | 变异 | 被谁抓住 |

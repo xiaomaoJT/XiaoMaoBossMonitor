@@ -1855,5 +1855,68 @@ export function camDigestState(cam, opts = {}) {
   return { active: true, pausedBySilent: false, ...base }
 }
 
+/**
+ * 是否**所有通道**都开了日常事件静默（即设置页「总开关」全开）。
+ * 引擎据此决定是否把各路缓冲合并成**一条**汇总推送（见 useAlertPush 的 merged digest）。
+ * 只要有一路没开，就退回「每路各自汇总」的原有行为 —— 合并只发生在总开关全开时。
+ */
+export function allDigestEnabled(cameras) {
+  const list = Array.isArray(cameras) ? cameras : []
+  if (!list.length) return false
+  return list.every((c) => {
+    const d = digestCfgOf(c)
+    return d.enabled && d.channels.length > 0
+  })
+}
+
+/**
+ * 日常静默每天会让位给免打扰的时段文案（来自 options.silent 的 slots）。
+ * 用于设置页 / /cams / /status 提示「日常静默与免打扰存在交集」。
+ * 没开免打扰或没有时段则返回空数组。
+ */
+export function silentYieldSlots(silentCfg) {
+  const c = silentCfg || {}
+  if (!c.enabled) return []
+  const slots = parseSilentSlots(c)
+  const fmt = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+  return slots.map((s) =>
+    s.start < s.end ? `${fmt(s.start)}~${fmt(s.end)}` : `${fmt(s.start)}~次日${fmt(s.end)}`
+  )
+}
+
+/**
+ * 计算 [startMs, endMs] 内与免打扰时段的重叠段（毫秒区间），用于汇总正文里提示
+ * 「本汇总时段与免打扰重叠，重叠期间的事件由免打扰汇总覆盖、未计入本汇总」。
+ * 只覆盖**定时** slots（不含临时静默 —— 临时静默是瞬时操作，不在配置里）。
+ */
+export function silentOverlapSegments(silentCfg, startMs, endMs) {
+  const c = silentCfg || {}
+  const slots = parseSilentSlots(c)
+  if (!slots.length || !(Number(startMs) > 0) || !(Number(endMs) > startMs)) return []
+  const segs = []
+  const dayStart = new Date(startMs)
+  dayStart.setHours(0, 0, 0, 0)
+  const dayEnd = new Date(endMs)
+  dayEnd.setHours(0, 0, 0, 0)
+  for (let t = dayStart.getTime(); t <= dayEnd.getTime(); t += 86400000) {
+    slots.forEach((s) => {
+      const a = slotBoundaryAt(t, s.start, 0)
+      const b = s.start < s.end ? slotBoundaryAt(t, s.end, 0) : slotBoundaryAt(t, s.end, 1)
+      const from = Math.max(a, startMs)
+      const to = Math.min(b, endMs)
+      if (from < to) segs.push({ from, to })
+    })
+  }
+  // 合并相邻/重叠段（跨天切出的相邻段会在这里并成一段）
+  segs.sort((x, y) => x.from - y.from)
+  const merged = []
+  for (const s of segs) {
+    const last = merged[merged.length - 1]
+    if (last && s.from <= last.to) last.to = Math.max(last.to, s.to)
+    else merged.push({ from: s.from, to: s.to })
+  }
+  return merged
+}
+
 /** 新建摄像头时使用的默认地址模板 */
 export const URL_TEMPLATE = `${BASE}01${TAIL}`

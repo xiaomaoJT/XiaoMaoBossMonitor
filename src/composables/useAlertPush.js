@@ -34,10 +34,13 @@ import { EVENT_GROUPS, TYPE_GROUP, featureText, normalizeEvents } from './useAla
 import { runtimeLine } from './useDeviceInfo.js'
 import {
   BRAND,
+  allDigestEnabled,
   camDigestState,
   camSilentOverview,
   camSilentState,
   channelCredReady,
+  clampDigestMinutes,
+  digestCfgOf,
   digestIntervalLabel,
   isFaceHit,
   matchSilentSlotAt,
@@ -851,6 +854,17 @@ export function useAlertPush(options, hooks = {}) {
   let digestSystemTimer = null
   let digestSystemSince = 0
 
+  /**
+   * 合并日常汇总缓冲（总开关全开时启用）。
+   * 总开关全开 → 所有通道的日常事件进**这一份**缓冲，到点合成**一条**汇总推送
+   * （参考全局免打扰汇总的做法：跨通道聚合、人脸命中单独强调）。
+   * 与 per-cam 的 digestStore 互斥：master 开时只走这里，master 关时 per-cam 各自汇总。
+   * 切换 master 状态时由 tickCamDigest 负责把两边缓冲搬运 / 兜底清空，避免事件丢失或双发。
+   */
+  const digestMerged = { buf: [], seen: new Set(), since: 0, timer: null, armedDue: 0 }
+  /** master 开关上一拍的状态，用于检测总开关的 开↔关 切换，触发缓冲搬运 */
+  let lastMergeOn = false
+
   /** 是否有任意通道此刻处于「日常事件静默生效中」（不在静默窗口里）。系统通知吸收的总闸门。 */
   function digestAnyActive(now = Date.now()) {
     const list = camerasOf()
@@ -863,6 +877,117 @@ export function useAlertPush(options, hooks = {}) {
     const list = camerasOf()
     if (!Array.isArray(list)) return null
     return list.find((cam) => cam && cam.id && digestStateOf(cam, now).active) || null
+  }
+
+  /**
+   * 日常事件静默「总开关」是否全开（所有通道都开了 digest）。
+   * 全开时走**合并汇总**（digestMerged），否则退回每路各自汇总。
+   */
+  function digestMasterOn(now = Date.now()) {
+    return allDigestEnabled(camerasOf())
+  }
+
+  /** 合并汇总的间隔（毫秒）：优先用总开关间隔，否则取已开启通道里最短的间隔 */
+  function mergedIntervalMs(now = Date.now()) {
+    const master = Number(options && options.digestIntervalMinutes)
+    if (Number.isFinite(master) && master > 0) return clampDigestMinutes(master) * 60000
+    const list = Array.isArray(camerasOf()) ? camerasOf() : []
+    let min = Infinity
+    list.forEach((cam) => {
+      if (!cam || !cam.id) return
+      const s = digestStateOf(cam, now)
+      if (s.active) min = Math.min(min, s.intervalMs)
+    })
+    return Number.isFinite(min) ? min : clampDigestMinutes(null) * 60000
+  }
+
+  /**
+   * 合并模式下的「吸收渠道」= 所有活跃 digest 通道的渠道**并集**。
+   * 合并汇总会发往这个并集，所以每条事件都应把并集里的渠道从实时 send/queue 里摘掉，
+   * 否则会出现「同一事件既实时推、又进合并汇总」的重复（尤其某路只勾了部分渠道时，
+   * 没勾的渠道会被当成实时渠道漏出去）。
+   * 非合并模式不调用本函数（各自按本路 digest.channels 摘）。
+   */
+  function mergedDigestChannels(now = Date.now()) {
+    const list = Array.isArray(camerasOf()) ? camerasOf() : []
+    const set = new Set()
+    list.forEach((cam) => {
+      if (!cam || !cam.id) return
+      const s = digestStateOf(cam, now)
+      if (s.active) s.channels.forEach((id) => set.add(id))
+    })
+    return [...set]
+  }
+
+  /**
+   * 合并日常汇总的收尾：把 digestMerged 缓冲（含所有已开启通道的事件）合成**一条**汇总发出。
+   * 与 flushCamDigest 平行，但只发一次、发给所有已开启通道 digest 渠道的**并集**。
+   * 标题不带单路后缀（scopeName 留空），由 buildSilentSummary 跨通道聚合出"总览 / 按通道 / 按类型"，
+   * 人脸命中（在库）单独成区 —— 满足"合并成一条 + 单独强调在库人脸命中"的要求。
+   */
+  async function flushMergedDigest(opts = {}) {
+    if (!digestMerged.buf.length) return null
+    const now = Date.now()
+    const buf = opts.test ? digestMerged.buf.slice() : digestMerged.buf.splice(0, digestMerged.buf.length)
+    if (!opts.test) {
+      digestMerged.seen.clear()
+      digestMerged.since = 0
+    }
+    const since = digestMerged.since || now
+    // 所有已开启通道的 digest 渠道并集
+    const list = Array.isArray(camerasOf()) ? camerasOf() : []
+    const chanSet = new Set()
+    list.forEach((cam) => {
+      if (!cam || !cam.id) return
+      const s = digestStateOf(cam, now)
+      if (s.active) s.channels.forEach((id) => chanSet.add(id))
+    })
+    const ids = restrictIds([...chanSet])
+    if (!ids.length) return null
+    const summary = buildSilentSummary(buf, silentCfg(), {
+      startMs: buf.reduce((m, r) => Math.min(m, r.time || since), since),
+      endMs: now,
+      variant: 'digest',
+      intervalMinutes: mergedIntervalMs(now) / 60000
+    })
+    const sent = await pushSilentSummary(ids, summary)
+    if (!opts.test && sent.length) {
+      notify(`日常事件合并汇总已推送（${buf.length} 条 · ${sent.join(' + ')}）`)
+    }
+    return summary
+  }
+
+  /** 排程合并汇总（幂等，挂在同一个 30 秒心跳）。返回是否此刻已到点 */
+  function armMergedDigest(now = Date.now()) {
+    if (!digestMerged.buf.length) {
+      if (digestMerged.timer) {
+        clearTimeout(digestMerged.timer)
+        digestMerged.timer = null
+      }
+      digestMerged.armedDue = 0
+      return false
+    }
+    if (!digestMasterOn(now)) return false
+    // 让位给静默窗口：不排定时器，交给心跳重试（与 per-cam 同口径）
+    if (!digestAnyActive(now)) {
+      if (digestMerged.timer) {
+        clearTimeout(digestMerged.timer)
+        digestMerged.timer = null
+      }
+      digestMerged.armedDue = 0
+      return false
+    }
+    const due = digestMerged.since + mergedIntervalMs(now)
+    if (now >= due) return true
+    if (digestMerged.timer && digestMerged.armedDue === due) return false
+    if (digestMerged.timer) clearTimeout(digestMerged.timer)
+    digestMerged.armedDue = due
+    digestMerged.timer = setTimeout(() => {
+      digestMerged.timer = null
+      digestMerged.armedDue = 0
+      flushMergedDigest().catch(() => {})
+    }, Math.max(1000, due - now))
+    return false
   }
 
   /**
@@ -980,27 +1105,61 @@ export function useAlertPush(options, hooks = {}) {
   function tickCamDigest(now = Date.now()) {
     const raw = camerasOf()
     const list = Array.isArray(raw) ? raw : []
-    const alive = new Set()
-    list.forEach((cam) => {
-      if (!cam || !cam.id) return
-      alive.add(cam.id)
-      const st = digestStore.get(cam.id)
-      if (!st || !st.buf.length) return
-      if (armCamDigest(cam.id, now)) flushCamDigest(cam.id).catch(() => {})
-    })
+    const on = digestMasterOn(now)
+
     /*
-     * 通道被删 / 关闭日常静默 → 连同缓冲与定时器一起清掉。
-     * 不清的话汇总迟早发往一个已经不存在的通道，Map 也会随反复增删无限长大。
+     * 总开关状态切换（开↔关）的缓冲搬运：保证事件不丢、不双发。
+     *   · 关→开：把各路 per-cam 缓冲并入手合并缓冲（免得切换瞬间丢掉已攒的事件）；
+     *   · 开→关：把合并缓冲**立刻发一条**兜底（此时 per-cam 缓冲是空的，会继续各自汇总）。
+     * 30 秒心跳每秒判断一次，切换只发生在这一拍，搬运只做一次。
      */
-    for (const id of [...digestStore.keys()]) {
-      if (alive.has(id)) continue
-      clearCamDigest(id)
-      digestStore.delete(id)
+    if (on !== lastMergeOn) {
+      if (on) {
+        digestStore.forEach((st) => {
+          if (!st.buf.length) return
+          st.buf.forEach((r) => {
+            if (digestMerged.seen.has(r.key)) return
+            digestMerged.seen.add(r.key)
+            digestMerged.buf.push(r)
+            if (!digestMerged.since) digestMerged.since = now
+          })
+          st.buf.length = 0
+          st.seen.clear()
+          st.since = 0
+        })
+      } else if (digestMerged.buf.length) {
+        flushMergedDigest().catch(() => {})
+      }
+      lastMergeOn = on
+    }
+
+    if (on) {
+      // 合并模式：只排合并定时器，per-cam 不再各自汇总（避免双发）
+      if (digestMerged.buf.length && armMergedDigest(now)) flushMergedDigest().catch(() => {})
+    } else {
+      const alive = new Set()
+      list.forEach((cam) => {
+        if (!cam || !cam.id) return
+        alive.add(cam.id)
+        const st = digestStore.get(cam.id)
+        if (!st || !st.buf.length) return
+        if (armCamDigest(cam.id, now)) flushCamDigest(cam.id).catch(() => {})
+      })
+      /*
+       * 通道被删 / 关闭日常静默 → 连同缓冲与定时器一起清掉。
+       * 不清的话汇总迟早发往一个已经不存在的通道，Map 也会随反复增删无限长大。
+       */
+      for (const id of [...digestStore.keys()]) {
+        if (alive.has(id)) continue
+        clearCamDigest(id)
+        digestStore.delete(id)
+      }
     }
     /*
      * 系统通知日常静默：与 per-cam 同构，挂在同一个 30 秒心跳兜底。
      * 单独一份缓冲要单独兜底 —— 否则只有系统通知、没有任何一路报警事件时，
      * 没有 per-cam 定时器会去排它，缓冲就永远发不出去。
+     * 合并模式下也照常跑（系统通知本身已是跨通道单条汇总）。
      */
     if (digestSystemBuf.length) {
       if (armSystemDigest(now)) flushSystemDigest().catch(() => {})
@@ -2024,6 +2183,15 @@ export function useAlertPush(options, hooks = {}) {
       if (st.timer) clearTimeout(st.timer)
     })
     digestStore.clear()
+    // 合并日常汇总同理：定时器与缓冲一并拆掉
+    if (digestMerged.timer) {
+      clearTimeout(digestMerged.timer)
+      digestMerged.timer = null
+    }
+    digestMerged.buf.length = 0
+    digestMerged.seen.clear()
+    digestMerged.since = 0
+    digestMerged.armedDue = 0
     // 系统通知日常静默同理：缓冲、定时器一并拆掉
     if (digestSystemTimer) {
       clearTimeout(digestSystemTimer)
@@ -2132,31 +2300,70 @@ export function useAlertPush(options, hooks = {}) {
      *    "顺手"放宽成两者都收）。
      */
     let digested = false
-    if (send.length || queue.length) {
+    // 已录入人脸（在库命中）：send/queue 已在上方清空（改走关键事件急推），但仍要进日常汇总
+    // 缓冲 —— 用户要在汇总里单独看在库人脸命中（是否命中 / 次数 / 明细），所以这里用
+    // isFaceHit 放行，别被「没有实时渠道可摘」挡在门外（与全局免打扰汇总一致：那里也不剔人脸）。
+    if (send.length || queue.length || isFaceHit(record)) {
       const dCam = camById(record.id)
       const dState = dCam ? digestStateOf(dCam, now) : { active: false }
-      if (dState.active && !isFaceHit(record)) {
+      if (dState.active) {
         const hitSend = send.filter((id) => dState.channels.includes(id))
         const hitQueue = queue.filter((id) => dState.channels.includes(id))
-        if (hitSend.length || hitQueue.length) {
-          const dchans = dState.channels
-          send = send.filter((id) => !dchans.includes(id))
-          queue = queue.filter((id) => !dchans.includes(id))
-          const st = digestSlot(record.id)
-          if (!st.seen.has(record.key)) {
-            st.seen.add(record.key)
-            st.buf.push(silentSnapshot(record))
-            // 间隔从**这一批的第一条**算起：空等一整天之后不该立刻补一条空汇总
-            if (!st.since) st.since = now
+        // 在库人脸：即便 hitSend/hitQueue 为空（实时渠道已在上游清空），也要落缓冲，
+        // 否则同一条既进了关键事件急推、又漏掉日常汇总的命中统计，与"汇总单独强调命中"矛盾。
+        if (hitSend.length || hitQueue.length || isFaceHit(record)) {
+          /*
+           * 无论是否「在库人脸命中」，都收进日常汇总缓冲 —— 用户要的正是
+           * "汇总里单独强调是否命中在库人脸、命中次数、命中明细"，所以这条事件
+           * 必须进缓冲（与全局免打扰汇总一致：那里的缓冲不剔除在库人脸）。
+           * 已知人脸仍会走上面的关键事件私聊提醒（pushDirectToUsers 'face'），
+           * 不依赖这里；这里只决定"日常汇总里有没有这条命中记录"。
+           */
+          // 合并模式下吸收渠道 = 所有活跃 digest 通道的并集（见 mergedDigestChannels）：
+          // 合并汇总会发往并集，所以一条事件的并集渠道都要从实时 send/queue 摘掉，
+          // 否则"某路只勾了部分渠道"时会漏成实时、与合并汇总重复。
+          // 非合并模式保持原语义：只摘本路 digest.channels。
+          const dchans = digestMasterOn(now) ? mergedDigestChannels(now) : dState.channels
+          // 仅对**非在库人脸**事件从实时 send/queue 里摘（避免与日常汇总双发）；
+          // 在库人脸仍按关键事件单独提醒，日常汇总只做"记录"，不重复抑制其实时。
+          if (!isFaceHit(record)) {
+            send = send.filter((id) => !dchans.includes(id))
+            queue = queue.filter((id) => !dchans.includes(id))
           }
-          armCamDigest(record.id, now)
+          /*
+           * 总开关全开 → 进**合并缓冲**，由 tickCamDigest 到点合成「一条」汇总推送；
+           * 否则按原有行为进这一路的缓冲、各自汇总。
+           * 合并模式下仍按本路的 digest 渠道从 send/queue 里摘，语义不变，
+           * 只是落点从 per-cam 缓冲换成合并缓冲。
+           */
+          let bufDue = 0
+          if (digestMasterOn(now)) {
+            const st = digestMerged
+            if (!st.seen.has(record.key)) {
+              st.seen.add(record.key)
+              st.buf.push(silentSnapshot(record))
+              if (!st.since) st.since = now
+            }
+            bufDue = st.since + mergedIntervalMs(now)
+            armMergedDigest(now)
+          } else {
+            const st = digestSlot(record.id)
+            if (!st.seen.has(record.key)) {
+              st.seen.add(record.key)
+              st.buf.push(silentSnapshot(record))
+              // 间隔从**这一批的第一条**算起：空等一整天之后不该立刻补一条空汇总
+              if (!st.since) st.since = now
+            }
+            bufDue = st.since + dState.intervalMs
+            armCamDigest(record.id, now)
+          }
           digested = true
           if (!send.length && !queue.length) {
             onState(
               record.key,
               'silent',
-              `日常事件静默（每 ${digestIntervalLabel(dState.intervalMinutes)} 汇总一次）已收存，` +
-                `将于 ${hhmm(st.since + dState.intervalMs)} 一并推送`
+              `日常事件静默（每 ${digestIntervalLabel(digestMasterOn(now) ? mergedIntervalMs(now) / 60000 : dState.intervalMinutes)} 汇总一次）已收存，` +
+                `将于 ${hhmm(bufDue)} 一并推送`
             )
           }
         }
@@ -3030,6 +3237,19 @@ export function useAlertPush(options, hooks = {}) {
             since: st ? st.since : 0
           }
         }),
+    /**
+     * 合并日常汇总（总开关全开时启用）：把各路缓冲合成**一条**推送。
+     * 导出供设置页「立即推送」与远程 /digest 立即汇总共用。
+     */
+    flushMergedDigest,
+    /** 是否处于合并汇总模式（总开关全开） */
+    digestMasterOn,
+    /** 合并缓冲状态：已收存条数 + 起始时刻（0 条 = 下一条汇总不会发） */
+    mergedDigestInfo: () => ({
+      on: digestMasterOn(),
+      buffered: digestMerged.buf.length,
+      since: digestMerged.since
+    }),
     stopAll
   }
 }

@@ -115,6 +115,14 @@
             （默认每 30 分钟汇总一次、推送到已配置的渠道）。设备离线/上线与定时巡检也一并收入汇总，不再实时打扰。
             各通道卡片下方仍可单独微调开关、渠道与间隔；关闭总开关会把每一路的开关一并关掉。
           </p>
+          <p
+            class="hint warn"
+            v-if="allDigestOn && silentYieldSlots(opts.silent).length"
+          >
+            ⚠️ 日常事件静默与免打扰时段存在交集（{{ silentYieldSlots(opts.silent).join('、') }}）：
+            重叠期间日常静默会暂停收存，相关事件改由「免打扰汇总」单独推送，不计入日常汇总
+            （总开关全开时这些通道会合并成<b>一条</b>日常汇总推送）。
+          </p>
 
           <div class="cam-list" v-if="cams.length">
             <div
@@ -3811,6 +3819,7 @@ import {
   DIGEST_INTERVAL_MIN,
   digestCfgOf,
   digestIntervalLabel,
+  silentYieldSlots,
   HIDDEN_PASSCODE_HASH,
   syncChannelCameras
 } from '../config/defaults'
