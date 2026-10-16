@@ -1607,7 +1607,7 @@ function drawOverlay() {
   if (zoneEditing.value && draftRect.value) {
     const d = draftRect.value
     ctx.lineWidth = Math.max(1, 1.8 * dpr)
-    ctx.strokeStyle = 'var(--cyan)'
+    ctx.strokeStyle = '#22d3ee'
     ctx.setLineDash([7 * dpr, 4 * dpr])
     ctx.strokeRect(d.x * w, d.y * h, d.w * w, d.h * h)
     ctx.setLineDash([])
@@ -1645,7 +1645,7 @@ function drawOverlay() {
     if (!z.rect) return
     ctx.setLineDash([6 * dpr, 4 * dpr])
     ctx.lineWidth = Math.max(1, 1.4 * dpr)
-    ctx.strokeStyle = 'color-mix(in srgb, var(--cyan) 72%, transparent)'
+    ctx.strokeStyle = 'rgba(34, 211, 238, 0.72)'
     ctx.strokeRect(z.rect.x * w, z.rect.y * h, z.rect.w * w, z.rect.h * h)
     ctx.setLineDash([])
 
@@ -1653,9 +1653,9 @@ function drawOverlay() {
     ctx.font = `${Math.round(10.5 * dpr)}px -apple-system, "PingFang SC", sans-serif`
     const tw = ctx.measureText(label).width
     const ly = z.rect.y * h
-    ctx.fillStyle = 'color-mix(in srgb, var(--cyan) 90%, transparent)'
+    ctx.fillStyle = 'rgba(6, 30, 38, 0.82)'
     ctx.fillRect(z.rect.x * w, ly, tw + 10 * dpr, 15 * dpr)
-    ctx.fillStyle = 'color-mix(in srgb, var(--cyan) 18%, var(--panel))'
+    ctx.fillStyle = '#a9edff'
     ctx.fillText(label, z.rect.x * w + 5 * dpr, ly + 11 * dpr)
   })
 

@@ -193,6 +193,11 @@ export function createFlowEngine() {
     return state.cameras
   }
 
+  /** 是否存在「已启用且配置有效」的流向（集成层用它决定是否把走入/走出事件喂给引擎） */
+  function hasActiveFlows() {
+    return state.flows.some((f) => flowValid(f, state.cameras).valid)
+  }
+
   /** 清空缓冲（探针 / 重置用） */
   function reset() {
     progress.clear()
@@ -206,6 +211,7 @@ export function createFlowEngine() {
     tick,
     snapshot,
     getCameras,
+    hasActiveFlows,
     reset,
     _state: state
   }

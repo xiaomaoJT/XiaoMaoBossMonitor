@@ -237,14 +237,26 @@ export function useAiExtras(options) {
     counts.value = { ...tracker.stats }
     status.value = { ...status.value, tracks: live.length }
 
-    /* ---------- 2. 区域事件（同时收集，供走向匹配复用） ---------- */
+    /* ---------- 2. 区域事件 ----------
+     * 报警开关（走入 / 走出 / 徘徊）只控制「事件是否作为报警上抛到事件面板 / 推送」。
+     * 走入 / 走出事件**无论报警开关如何**，只要通道区域规则开着、zone 的 enterExit 开着，
+     * 都会喂给「人员流向」引擎做跨摄像头配对 —— 这样用户可单独把「走出报警」关掉，
+     * 而人员流向照样工作（解耦，见需求）。只有「没有任何生效流向」时才跳过喂引擎，省开销。
+     * 注意：这**不是一刀切** —— 报警开关与流向检测完全独立，用户想收走出报警随时可在
+     * 「区域规则」里把「走出区域」打开，流向检测同样照常工作。 */
     const zoneEvents = []
+    const flowsOn = getFlowEngine().hasActiveFlows()
     for (const evt of res.events) {
-      if (evt.kind === 'loiter' && zc.loiterAlarm === false) continue
-      if (evt.kind === 'enter' && zc.enterAlarm === false) continue
-      if (evt.kind === 'exit' && zc.exitAlarm === false) continue
+      const isLoiter = evt.kind === 'loiter'
+      const isEnter = evt.kind === 'enter'
+      const isExit = evt.kind === 'exit'
+      if (!isLoiter && !isEnter && !isExit) continue
+      // 报警开关：关了就不作为报警事件上抛（但仍可能要喂流向引擎，见下）
+      const alarmOff = (isLoiter && zc.loiterAlarm === false) ||
+                       (isEnter && zc.enterAlarm === false) ||
+                       (isExit && zc.exitAlarm === false)
       const out = {
-        type: evt.kind === 'loiter' ? 'loiter' : evt.kind === 'enter' ? 'enter' : 'exit',
+        type: isLoiter ? 'loiter' : isEnter ? 'enter' : 'exit',
         zoneName: evt.zoneName,
         zoneId: evt.zoneId,
         trackId: evt.trackId,
@@ -254,8 +266,14 @@ export function useAiExtras(options) {
         text: zoneText(evt),
         source: 'zone'
       }
-      zoneEvents.push(out)
-      emit(out)
+      // 报警事件：一定进 zoneEvents（原行为），并上抛报警
+      // 报警关了的走入 / 走出：仅当「人员流向」开着时进 zoneEvents 供 2.5 配对，但**不报警**
+      if (!alarmOff) {
+        zoneEvents.push(out)
+        emit(out)
+      } else if (flowsOn && (isEnter || isExit)) {
+        zoneEvents.push(out)
+      }
     }
 
     if (!live.length) {
