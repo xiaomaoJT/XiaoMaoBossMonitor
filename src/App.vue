@@ -251,6 +251,7 @@ import {
   normalizeCameraDigest,
   normalizeCameraSilent,
   normalizeFlows,
+  enforceFlowZonePrerequisites,
   syncChannelCameras
 } from './config/defaults'
 import { SECRET_SCOPE } from './config/auth'
@@ -433,8 +434,32 @@ const hiddenIds = ref(saved && Array.isArray(saved.hiddenIds) ? saved.hiddenIds 
 // 人员走向引擎：把当前 flows + 通道列表喂给模块级单例，供各摄像头跨实例配对。
 // 配置（flows 增删改、通道区域增删）变化时实时重设，引擎据此判断哪些 flow 生效。
 getFlowEngine().setConfig(options.flows, cameras.value)
+/*
+ * 流向自动保活检测前提：已启用的流向，其路径节点所在的摄像头必须「参与区域分析」、
+ * 且节点区域必须「开启进出检测」—— 否则 tracker 不会产生 enter/exit 事件，流向静默失效。
+ * 这里在初始化 + 流向变更时强制保活（只动确为 false 的，绝不造区域）。
+ * 注意：只挂在「流向变更」上，不挂在 cameras 变更上 —— 这样用户在区域规则页
+ * 手动把某区域「进出」关掉时不会被立刻弹回（此时流向会显示「前提未满足」提示，
+ * 而非悄悄失效），二者互不打架。
+ */
+enforceFlowZonePrerequisites(options.flows, cameras.value)
+// 初始强制若有改动，立即落盘（函数声明已提升，可在此调用），避免下次打开又重新保活一遍
+{
+  const flowPrereqChanges = enforceFlowZonePrerequisites(options.flows, cameras.value)
+  if (flowPrereqChanges.length) writeStorage()
+}
 watch(
-  [() => options.flows, cameras],
+  () => options.flows,
+  () => {
+    getFlowEngine().setConfig(options.flows, cameras.value)
+    const ch = enforceFlowZonePrerequisites(options.flows, cameras.value)
+    if (ch.length) schedulePersist()
+  },
+  { deep: true }
+)
+// 通道（摄像头 / 区域）增删改时不改流向前提，但仍要重设引擎，使其按最新区域判定生效。
+watch(
+  cameras,
   () => getFlowEngine().setConfig(options.flows, cameras.value),
   { deep: true }
 )

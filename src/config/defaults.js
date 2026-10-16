@@ -2083,11 +2083,21 @@ export function normalizeFlows(opts) {
 
 /**
  * 走向规则此刻是否**有效可派发**（全项目唯一判定，UI 与引擎共用）。
- * 仅校验配置完整性 + 通道 / 区域存在性，不关心运行时缓冲状态。
+ * 校验两类东西：
+ *   ① 配置完整性 + 通道 / 区域存在性（errors）
+ *   ② 检测前提（prereq）：路径上每个节点所在的摄像头必须「参与区域分析」，
+ *      且该区域必须「开启进出检测」—— 否则 tracker 根本不会产生 enter/exit 事件，
+ *      流向引擎拿不到原料，会静默失效。
  * path 支持多跳：每个节点都要有摄像头 + 在该摄像头绘制的区域，且相邻节点不能相同。
  *
+ * ⚠️ `valid` 同时包含 ① 与 ②：前提不满足时同样算「未生效」，
+ *    这样既不会被 hasActiveFlows 误判为"在跑"，也能在 UI / /status 明确报出。
+ *    （前提由 enforceFlowZonePrerequisites 在保存流向时自动保活，见下。）
+ *
  * @returns {{
- *   enabled:boolean, valid:boolean, errors:string[], nodeErrors:string[], pathCount:number
+ *   enabled:boolean, valid:boolean, errors:string[], nodeErrors:string[],
+ *   prereq:{met:boolean, issues:Array<{nodeIndex:number,cam:string,zone:string,type:string,text:string}>},
+ *   pathCount:number
  * }}
  */
 export function flowValid(flow, cameras) {
@@ -2096,21 +2106,24 @@ export function flowValid(flow, cameras) {
   const zoneOf = (cam, zid) =>
     cam && Array.isArray(cam.zones) ? cam.zones.find((z) => z && z.id === zid) : undefined
   const errors = []
+  const emptyPrereq = { met: true, issues: [] }
   if (!flow || !flow.enabled) {
     return {
       enabled: false,
       valid: false,
       errors,
       nodeErrors: [],
+      prereq: emptyPrereq,
       pathCount: Array.isArray(flow && flow.path) ? flow.path.length : 0
     }
   }
   const path = Array.isArray(flow.path) ? flow.path : []
   if (path.length < 2) {
     errors.push('至少需要 2 个节点（起点与终点）')
-    return { enabled: true, valid: false, errors, nodeErrors: [], pathCount: path.length }
+    return { enabled: true, valid: false, errors, nodeErrors: [], prereq: emptyPrereq, pathCount: path.length }
   }
   const nodeErrors = []
+  const prereqIssues = []
   for (let i = 0; i < path.length; i++) {
     const node = path[i]
     const cam = camOf(node.cam)
@@ -2119,12 +2132,31 @@ export function flowValid(flow, cameras) {
       nodeErrors.push('摄像头不存在')
       continue
     }
-    if (!zoneOf(cam, node.zone)) {
+    const z = zoneOf(cam, node.zone)
+    if (!z) {
       errors.push(`第 ${i + 1} 个节点：区域未在该摄像头绘制`)
       nodeErrors.push('区域未绘制')
       continue
     }
     nodeErrors.push('')
+    // 检测前提：摄像头必须参与区域分析，且该区域必须开启「进出」
+    if (cam.aiExt && cam.aiExt.zone === false) {
+      prereqIssues.push({
+        nodeIndex: i,
+        cam: node.cam,
+        zone: node.zone,
+        type: 'cam-zone-off',
+        text: `第 ${i + 1} 个节点：摄像头「${cam.name || cam.id}」未开启区域监测`
+      })
+    } else if (z.enterExit === false) {
+      prereqIssues.push({
+        nodeIndex: i,
+        cam: node.cam,
+        zone: node.zone,
+        type: 'zone-enterExit-off',
+        text: `第 ${i + 1} 个节点：区域「${z.name || z.id}」未开启进出检测`
+      })
+    }
   }
   // 相邻节点不能完全相同（否则「从 A 走到 A」没有意义，也配不出有效走向）
   for (let i = 1; i < path.length; i++) {
@@ -2132,11 +2164,57 @@ export function flowValid(flow, cameras) {
       errors.push(`第 ${i} 与第 ${i + 1} 个节点不能相同`)
     }
   }
+  const prereq = { met: prereqIssues.length === 0, issues: prereqIssues }
   return {
     enabled: true,
-    valid: errors.length === 0,
+    valid: errors.length === 0 && prereq.met,
     errors,
     nodeErrors,
+    prereq,
     pathCount: path.length
   }
+}
+
+/**
+ * 让「已启用的流向」自动保活其检测前提（解耦的补强）：
+ * 路径上每个节点的摄像头必须参与区域分析（aiExt.zone 不为 false），
+ * 且节点所在区域必须开启「进出」（enterExit 不为 false）。
+ * 否则该流向会因拿不到 enter/exit 事件而静默失效。
+ *
+ * ⚠️ 与报警开关（options.zone.enterAlarm / exitAlarm）互不干扰：
+ *    这里只保证"区域检测在跑"，报警要不要上抛仍由那两个开关独立控制。
+ *    即使用户在区域规则里把「走出区域」报警关了，这里仍保活进出检测，流向照常工作。
+ *
+ * 原地改 cameras（只动已存在且确为 false 的摄像头 / 区域，绝不凭空造区域），
+ * 返回本次实际发生的改动清单（便于日志 / 回执）。
+ *
+ * @param {Array} flows  options.flows
+ * @param {Array} cameras  摄像头列表（会被原地修改）
+ * @returns {Array<{cam:string, zone:string, type:string}>}
+ */
+export function enforceFlowZonePrerequisites(flows, cameras) {
+  const list = Array.isArray(cameras) ? cameras : []
+  const fl = Array.isArray(flows) ? flows : []
+  const changes = []
+  for (const f of fl) {
+    if (!f || !f.enabled) continue
+    const path = Array.isArray(f.path) ? f.path : []
+    for (const node of path) {
+      if (!node || !node.cam || !node.zone) continue
+      const cam = list.find((c) => c && c.id === node.cam)
+      if (!cam) continue
+      // 摄像头未参与区域分析 → 强制参与
+      if (cam.aiExt && cam.aiExt.zone === false) {
+        cam.aiExt = { ...(cam.aiExt || {}), zone: true }
+        changes.push({ cam: node.cam, zone: node.zone, type: 'cam-zone-on' })
+      }
+      // 区域未开启进出 → 强制开启
+      const zone = Array.isArray(cam.zones) ? cam.zones.find((z) => z && z.id === node.zone) : null
+      if (zone && zone.enterExit === false) {
+        zone.enterExit = true
+        changes.push({ cam: node.cam, zone: node.zone, type: 'zone-enterExit-on' })
+      }
+    }
+  }
+  return changes
 }

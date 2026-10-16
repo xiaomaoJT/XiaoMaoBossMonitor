@@ -2047,6 +2047,11 @@
             默认靠人脸归组名判定身份（几乎零额外算力）；也可放宽到不要求人脸。
             属于轻量离散相遇判定，不是实时轨迹画线。
           </p>
+          <p class="hint tight">
+            保存流向会自动开启相关摄像头的「区域监测」与相关区域的「进出检测」——
+            这是流向的物理前提（流向本质就是检测某人进出这些区域）。你仍可单独在区域规则里关掉
+            「走出 / 走入区域」<b>报警</b>，不影响流向；但若手动关掉某个流向节点的「进出检测」，这里会标红「🔴 前提未满足」。
+          </p>
 
           <div class="flow-head">
             <strong>已配置流向（{{ (opts.flows || []).length }} 条）</strong>
@@ -2143,10 +2148,11 @@
               <span class="switch" :class="{ on: flow.asCritical }" @click="flow.asCritical = !flow.asCritical"></span>
             </label>
 
-            <p class="flow-errors" v-if="flowStateOf(flow).errors.length">
-              <span class="flow-err" v-for="(e, k) in flowStateOf(flow).errors" :key="k">⚠ {{ e }}</span>
+            <p class="flow-errors" v-if="flowStateOf(flow).errors.length || flowStateOf(flow).prereq.issues.length">
+              <span class="flow-err" v-for="(e, k) in flowStateOf(flow).errors" :key="'e' + k">⚠ {{ e }}</span>
+              <span class="flow-err prereq" v-for="(p, k) in flowStateOf(flow).prereq.issues" :key="'p' + k">🔴 {{ p.text }}</span>
             </p>
-            <p class="flow-ok" v-else-if="flow.enabled">✓ 配置有效，已生效</p>
+            <p class="flow-ok" v-else-if="flow.enabled && flowStateOf(flow).prereq.met">✓ 配置有效，已生效</p>
           </div>
         </section>
 
