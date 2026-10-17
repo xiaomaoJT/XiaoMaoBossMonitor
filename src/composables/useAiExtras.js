@@ -127,7 +127,12 @@ function emitFlowEvent(engine, m, ctx, emit) {
     faceName: person,
     spanSec: m.spanSec,
     departureAt: m.startedAt || 0,
-    departureShot: '',
+    departureShot: m.departureShot || '',
+    /**
+     * 各节点截图（有序）：节点 0 = 起点出场帧、节点 k≥1 = 入场帧。
+     * A→B 为 [A 出场, B 入场] 共两张；A→B→C 为三张。空数组时详情页不显示轨迹块。
+     */
+    flowShots: Array.isArray(m.flowShots) ? m.flowShots : [],
     shot: ctx.shot || '',
     box: null,
     at: ctx.at,

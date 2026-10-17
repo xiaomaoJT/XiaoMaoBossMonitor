@@ -88,6 +88,7 @@ const ALARM_TYPES = [
   { id: 'zone', label: '区域' },
   { id: 'pose', label: '姿态' },
   { id: 'motion', label: '移动' },
+  { id: 'flow', label: '走向' },
   { id: 'count', label: '计数' }
 ]
 

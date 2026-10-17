@@ -86,6 +86,10 @@ export function backendEventToPayload(ev) {
     personShot: !!ev.personShot,
     /** 后端那条记录的 key：两边用同一个 key，已读 / 推送状态才能对齐 */
     backendKey: ev.key || '',
+    /** 人员走向：起点出场截图与各节点（有序）截图，详情页渲染「流向轨迹」多图块用 */
+    departureShot: ev.departureShot || '',
+    flowShots: Array.isArray(ev.flowShots) ? ev.flowShots : [],
+    flowPath: Array.isArray(ev.flowPath) ? ev.flowPath : [],
     /** 后端推送状态（前端只展示，不再重复推） */
     backendPush: ev.push || '',
     backendPushError: ev.pushError || '',

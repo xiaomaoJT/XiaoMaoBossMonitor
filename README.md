@@ -1943,6 +1943,32 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 
 > 回归：`/tmp/flow-probe/engine.mjs`（多跳配对 / 超时 / 空身份拦截 / 一次性消费 / LRU / 错序不配对）、`/tmp/flow-probe/predicates.mjs`（配置与校验纯函数）、`/tmp/flow-probe/prereq.mjs`（检测前提判定 + 自动保活）全绿。
 
+**走向事件作为一等事件类型 + 详情页「流向轨迹」多图块（#344/#345）**
+
+- 走向事件现在是一个**完整事件类型**（`type:'flow'` / `source:'flow'`），在事件面板 / 统计 / 推送里与 face / enter / exit 平级，不再只是"藏在某条区域事件里的一行字"。
+- 每条走向事件携带**各节点（有序）截图** `flowShots`：节点 0 = 起点出场帧，节点 k≥1 = 各节点入场帧。**A→B 共两张（A 出场 + B 入场），A→B→C 共三张**，以此类推。
+  - 前端本地检测模式下是 dataURL 直传；后端模式由 `handleEvent` 统一落盘成相对路径（与 `thumb` 同口径，避免 dataURL 直接塞 SQLite 撑爆库），再由 `outEvent` 拼成可访问 URL。
+  - `flowPath`（`[{camName, zoneName}]`）一并落库，给每张节点图配「A·门口 / B·电梯」这样的说明。
+- 事件详情弹窗新增「**流向轨迹**」区块：横排各节点缩略图，每张配文取 `flowPath[i]`（节点 0 标「出场」、其余标「入场」），点任意一张进全屏看板（滚轮缩放 / 拖动平移）。
+- 透传链已打通：`useAiExtras.emitFlowEvent` / `CameraTile.emitExtraAlarm` / `useBackendEvents.backendEventToPayload` 都带 `flowShots` / `flowPath`；`App.vue` 的 `buildRecord` 用 `...payload` 展开，字段自动带上，无需额外改。
+
+**远程指令 `/flow`：跨摄像头走向记录查询（#347）**
+
+- `/flow [T|Y] [img]`：T=今日、Y=昨日（省略为今日）。挑**跨摄像头走向**事件（与 `/hits` 挑「命中已录入人脸」是不同维度，互不包含），逐条给出「谁 · 从哪到哪 · 间隔多久」，路由行 `A·门口 → B·电梯` 一目了然。
+- 末尾加 `img` 才把 A→B 各节点的**轨迹截图**推过来（与 `/collect` / `/hits` / `/search` 带 img 同一套做法：先推概览 + 明细文本，再经共用串行链逐张发节点图，回执只回一句摘要防重复）。不带 img 则刻意**不抢**串行锁（只读）。
+- 四处置定义必须逐字一致：`server/tg-remote.mjs` 的 `COMMANDS`、`SettingsDrawer.vue` 的 `TG_COMMANDS`、`headless-monitor.mjs` 的 `case 'flow'` 分发、`duty-check.mjs` 的 `flow()` 方法。
+
+**后端终端日志：走向事件用绿色图标（#344）**
+
+- 日志图标三态：**人脸命中 🔴 > 人员走向 🟢 > 其余事件 🔔**。优先级与判据都复用 `isFaceHit` / `isFlowEvent`（与推送收窄 / 统计 / `/flow` 共用同一份唯一判定），不在日志处另演算第二种结论。
+
+**统计 / 汇总：走向独立成类，不误归「其它」（#348 自选盘点）**
+
+- 日统计 `ALARM_TYPES` 新增 `{id:'flow', label:'走向'}`（对应 `useDailyStats` 的 `byType.flow`、统计图表「事件类型」维度与「小时×类型」热力桶自动含走向）；`statEvent` 已按 type 自动归。
+- 钉钉 / 企微 `buildSilentSummary` 按通道桶细分：走向单独计 `c.flow`、文案列「走向 N」，不与「其它」混在一起（否则会虚高"其它"且看不出走向发生过）。`/collect` 全天汇总同理只挑 `isFlowEvent`。
+
+> 回归：`/tmp/flow-feature-probe/probe.mjs`（多跳 `flowShots` 产出 / `departureShot` 即 `flowShots[0]` / 身份不一致不配对 / `isFlowEvent` 双判定 / `parseJsonArray` 兜底 / `flowValid` 校验）30/30 全绿。
+
 ---
 
 ## 六、各端运行方式

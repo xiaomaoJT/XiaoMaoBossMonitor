@@ -1238,6 +1238,12 @@ function emitExtraAlarm(evt, canvas) {
     spanSec: typeof evt.spanSec === 'number' ? evt.spanSec : null,
     departureAt: typeof evt.departureAt === 'number' ? evt.departureAt : 0,
     departureShot: evt.departureShot || '',
+    /**
+     * 流向轨迹各节点截图（有序，A→B 共两张）。前端本地模式直接是 dataURL，
+     * 后端模式经 store 落盘成相对路径、再由 outEvent 拼成绝对 URL ——
+     * 事件详情页按此数组渲染「流向轨迹」多图块，缺它就看不了节点图。
+     */
+    flowShots: Array.isArray(evt.flowShots) ? evt.flowShots : [],
     asCritical: !!evt.asCritical
   })
 

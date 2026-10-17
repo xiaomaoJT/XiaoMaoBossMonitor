@@ -491,7 +491,7 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
   let maxCur = 0
   list.forEach((r) => {
     const name = r.name || '未知通道'
-    if (!byCamera[name]) byCamera[name] = { count: 0, person: 0, face: 0, zone: 0, motion: 0, other: 0 }
+    if (!byCamera[name]) byCamera[name] = { count: 0, person: 0, face: 0, zone: 0, motion: 0, flow: 0, other: 0 }
     const c = byCamera[name]
     c.count += 1
     const t = r.type || 'motion'
@@ -504,6 +504,9 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
       if (r.faceName) knownSet.add(String(r.faceName))
     } else if (t === 'zone' || t === 'enter' || t === 'exit' || t === 'loiter') {
       c.zone += 1
+    } else if (t === 'flow') {
+      // 人员走向：独立一类，别和「其他」混在一起（否则会虚高"其他"且看不出走向）
+      c.flow += 1
     } else if (t === 'motion') {
       c.motion += 1
     } else {
@@ -567,7 +570,7 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     ? camNames
         .map((n) => {
           const c = byCamera[n]
-          const parts = [`人形 ${c.person}`, `人脸 ${c.face}`, `区域 ${c.zone}`, `移动 ${c.motion}`]
+          const parts = [`人形 ${c.person}`, `人脸 ${c.face}`, `区域 ${c.zone}`, `移动 ${c.motion}`, `走向 ${c.flow}`]
             .filter((s) => !/ 0$/.test(s))
             .join(' / ')
           return `- **${n}**：${c.count} 条${parts ? `（${parts}）` : ''}`

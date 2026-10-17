@@ -27,6 +27,8 @@ export function createFlowEngine() {
    *   head      当前已抵达的节点下标（settled）；-1 表示尚未开始
    *   open      在途：已离场上一个节点、正等待抵达下一个；{ from, at, shot } 或 null
    *   startedAt 这一程的起点出场时刻（用于算总间隔）
+   *   nodeShots 各节点的截图（字符串，调用方传入）：nodeShots[0] = 起点出场帧，
+   *             nodeShots[k] (k>=1) = 抵达节点 k 的入场帧；走完全程时按 0..last 排出 flowShots
    *   lastAt    最近一次活动时刻（LRU 淘汰用）
    *   expireAt  该链路整体过期时刻（TTL + 断链宽限）
    */
@@ -109,18 +111,21 @@ export function createFlowEngine() {
       const pk = progKey(flow.id, key)
       let st = progress.get(pk)
       if (!st) {
-        st = { flowId: flow.id, key, head: -1, open: null, startedAt: null, lastAt: now, expireAt: 0 }
+        st = { flowId: flow.id, key, head: -1, open: null, startedAt: null, lastAt: now, expireAt: 0, nodeShots: {} }
         progress.set(pk, st)
       }
       if (segIdx === 0) {
-        // 起点：开新一程（允许从任意阶段重新开始，重置起点时刻）
+        // 起点：开新一程（允许从任意阶段重新开始，重置起点时刻 + 节点截图）
         st.head = 0
         st.startedAt = now
+        st.nodeShots = {}
       } else {
         // 途经 / 终点前的出场：必须恰好站在该节点上（上一跳已完成）才能继续
         if (st.head !== segIdx) continue
       }
       st.open = { from: segIdx, at: now, shot: p.shot || null }
+      // 节点 0 的图 = 起点出场帧（其余节点的图在 recordArrival 完成对应入场时记）
+      if (segIdx === 0 && p.shot) st.nodeShots[0] = p.shot
       st.lastAt = now
       st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000
       n++
@@ -138,6 +143,9 @@ export function createFlowEngine() {
    *   matches[].arrivedAt    终点入场时刻
    *   matches[].spanSec      整程间隔（秒）
    *   matches[].shot         终点入场截图
+   *   matches[].departureShot 起点出场截图（节点 0 的那张，即 A 摄像头的图）
+   *   matches[].flowShots    各节点截图（有序）：节点 0 = 出场帧、节点 k≥1 = 入场帧；
+   *                          A→B 为 [A出场, B入场] 共两张，A→B→C 为三张
    */
   function recordArrival(p) {
     if (!p || !p.cam || !p.zone) return { ok: false, reason: 'bad-args' }
@@ -164,11 +172,26 @@ export function createFlowEngine() {
       st.head = segIdx + 1
       st.open = null
       st.lastAt = now
+      // 抵达节点 (segIdx+1) 的图 = 该节点入场帧（多跳时每个节点各留一张）
+      if (p.shot) st.nodeShots[segIdx + 1] = p.shot || null
       const lastIdx = (Array.isArray(flow.path) ? flow.path.length : 0) - 1
       if (st.head >= lastIdx) {
-        // 走完全程
+        // 走完全程：把各节点截图按 0..last 顺序排出（节点 0 = 出场帧，其余 = 入场帧）
         const spanSec = st.startedAt != null ? Math.round((now - st.startedAt) / 1000) : 0
-        matches.push({ flow, startedAt: st.startedAt, arrivedAt: now, spanSec, shot: p.shot || null })
+        const departureShot = st.nodeShots[0] || null
+        const flowShots = []
+        for (let i = 0; i <= lastIdx; i++) {
+          if (st.nodeShots[i]) flowShots.push(st.nodeShots[i])
+        }
+        matches.push({
+          flow,
+          startedAt: st.startedAt,
+          arrivedAt: now,
+          spanSec,
+          shot: p.shot || null,
+          departureShot,
+          flowShots
+        })
         progress.delete(pk)
       } else {
         st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000

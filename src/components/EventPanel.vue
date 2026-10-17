@@ -391,6 +391,16 @@
               </span>
             </div>
 
+            <div class="dt-flow" v-if="detail.flowShots && detail.flowShots.length">
+              <div class="dt-flow-title">流向轨迹（{{ detail.flowShots.length }} 个节点）</div>
+              <div class="dt-flow-row">
+                <figure class="dt-flow-node" v-for="(fs, i) in detail.flowShots" :key="i">
+                  <img v-if="fs" :src="fs" :alt="flowNodeLabel(detail, i)" @click="openFlowPreview(fs, detail)" />
+                  <figcaption v-if="fs">{{ flowNodeLabel(detail, i) }}</figcaption>
+                </figure>
+              </div>
+            </div>
+
             <dl class="dt-rows">
               <div class="dt-row">
                 <dt>通道名称</dt>
@@ -707,6 +717,30 @@ async function openPreview(ev) {
   await ensureShot(ev)
   preview.value = ev
   resetView()
+}
+
+/**
+ * 流向轨迹单节点图点击放大：flowShots[i] 已是可直接显示的 URL / dataURL，
+ * 无需走 IndexedDB 取高清原图，直接塞一个合成对象给截图看板即可。
+ */
+function openFlowPreview(fs, ev) {
+  if (!fs) return
+  preview.value = {
+    shot: fs,
+    name: ev && ev.name ? `${ev.name} · 流向节点` : '流向节点',
+    time: ev ? ev.time : '',
+    type: 'flow',
+  }
+  resetView()
+}
+
+/** 流向轨迹节点说明：节点 0 = 起点出场，其余 = 抵达该节点的入场，配文取 flowPath 的「通道·区域」 */
+function flowNodeLabel(ev, i) {
+  const path = Array.isArray(ev && ev.flowPath) ? ev.flowPath : []
+  const node = path[i] || {}
+  const where = node.camName || node.zoneName ? `${node.camName || ''}·${node.zoneName || ''}` : `节点 ${i + 1}`
+  const kind = i === 0 ? '出场' : '入场'
+  return `${where}（${kind}）`
 }
 
 function closePreview() {
@@ -1674,6 +1708,54 @@ header {
 
 .dt-shot:hover .dt-shot-hint {
   opacity: 1;
+}
+
+/* 流向轨迹：多节点截图横排，节点 0 = 起点出场、其余 = 各节点入场 */
+.dt-flow {
+  flex: 0 0 auto;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  padding: 10px 12px 12px;
+}
+
+.dt-flow-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-text-strong);
+  margin-bottom: 8px;
+}
+
+.dt-flow-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dt-flow-node {
+  margin: 0;
+  flex: 1 1 130px;
+  min-width: 110px;
+  max-width: 200px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+
+.dt-flow-node img {
+  display: block;
+  width: 100%;
+  height: 96px;
+  object-fit: cover;
+  cursor: zoom-in;
+}
+
+.dt-flow-node figcaption {
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim-2);
 }
 
 .dt-rows {

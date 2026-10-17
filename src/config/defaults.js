@@ -1448,10 +1448,12 @@ export function isFaceHit(rec) {
  * 在 record 上打 source:'flow' 标识，零改推送/面板/卡片的渲染分支
  * （它们按 type/faceName 等既有字段工作，走向事件没有 faceName、type==='flow'）。
  *
- * @param {object} rec 事件记录
+ * @param {object} rec 事件记录（前端在途事件带 source:'flow'；后端落库记录无 source 列，靠 type:'flow' 识别）
  */
 export function isFlowEvent(rec) {
-  return !!(rec && rec.source === 'flow')
+  if (!rec) return false
+  // 双判定：在途事件（source）与落库记录（type）都要认，否则后端库里的走向事件会被漏判
+  return rec.source === 'flow' || rec.type === 'flow'
 }
 
 /**
