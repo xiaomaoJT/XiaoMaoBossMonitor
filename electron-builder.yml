@@ -14,6 +14,13 @@ files:
 
 asar: true
 
+# 桌面端打包不重编译原生模块：
+# 打包 files 只含 dist / electron / package.json，node_modules 不进包，
+# 原生依赖（better-sqlite3 / onnxruntime-node / ffmpeg-static）只给独立的
+# `npm run server` 进程用，不需要（也没法）为 Electron 交叉重编译。
+# 否则在 macOS 上打 Windows 包会卡在 node-gyp 跨平台编译报错。
+npmRebuild: false
+
 mac:
   category: public.app-category.video
   icon: build/icon.icns
