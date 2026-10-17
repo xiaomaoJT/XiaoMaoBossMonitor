@@ -20,6 +20,7 @@ import { secretDigest } from '../composables/sha256.js'
  * 不在这里另写一份字面量，免得设置页显示的值与执行层真正用的值悄悄漂开。
  */
 import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
+import { PENDING_DEDUPE } from '../composables/vecMatch.js'
 
 const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
 const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
@@ -415,7 +416,14 @@ export const HIDDEN_OPTIONS = {
      */
     pendingFullAt: PENDING_FULL.fullAt.def,
     /** 到容量的这个比例先预警一次（默认 0.8 = 80%） */
-    pendingWarnRatio: PENDING_FULL.warnRatio.def
+    pendingWarnRatio: PENDING_FULL.warnRatio.def,
+    /**
+     * 待录入的「重复捕获合并间隔」（秒）。同一个人在间隔内被反复采到，
+     * 只刷新已有那条（不新增）；窗外再来才给一条新鲜样本。0 = 关闭去重。
+     * 解析收口在 vecMatch.pendingDedupeSec，匹配判定在 vecMatch.pendingDedupeTarget
+     * （前后端共用，避免"前端合并了、后端又插一条"）。
+     */
+    pendingDedupeSec: PENDING_DEDUPE.sec.def
   },
   /**
    * 人形姿态（YOLOv8n-pose，17 关键点）。

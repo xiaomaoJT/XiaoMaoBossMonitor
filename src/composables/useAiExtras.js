@@ -36,6 +36,7 @@ import {
   readGroupSim
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
+import { pendingDedupeSec } from './vecMatch.js'
 
 /** COCO 17 关键点下标 */
 const KP = {
@@ -180,7 +181,9 @@ export function useAiExtras(options) {
       // 采集调优三旋钮：解析收口在 useTracker.faceTuning（前后端同一份判定）
       ...faceTuning(c),
       // 待录入内存队列容量（= 满库阈值）：与 App.vue 的满库 watcher 共用同一份解析
-      ...pendingFullConf(c, PENDING_MAX)
+      ...pendingFullConf(c, PENDING_MAX),
+      // 重复捕获合并间隔（秒）：与后端 store.addPendingFace 共用同一份解析
+      dedupeWin: pendingDedupeSec(c)
     }
   }
 
@@ -464,7 +467,8 @@ export function useAiExtras(options) {
             at: now,
             camId: cam.id,
             camName: cam.name,
-            max: fc.fullAt
+            max: fc.fullAt,
+            dedupeSec: fc.dedupeWin
           })
         }
         if (!fc.eventOnUnknown) continue
@@ -606,7 +610,8 @@ export function useAiExtras(options) {
                     at: now,
                     camId: cam.id,
                     camName: cam.name,
-                    max: fc.fullAt
+                    max: fc.fullAt,
+                    dedupeSec: fc.dedupeWin
                   })
                 }
               }

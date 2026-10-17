@@ -1671,6 +1671,20 @@
 
               <div class="opt">
                 <span>
+                  <strong>重复捕获合并间隔</strong>
+                  <em>
+                    同一个人在间隔内被反复采到，只刷新已有那条（不新增）；间隔外再来才给一条新鲜样本。
+                    0 = 关闭去重（每张都单独保留）。默认 300 秒
+                  </em>
+                </span>
+                <div class="test-row">
+                  <input class="field mini" type="number" min="0" max="86400" v-model.number="opts.face.pendingDedupeSec" />
+                  <span class="unit">秒</span>
+                </div>
+              </div>
+
+              <div class="opt">
+                <span>
                   <strong>满库预警线</strong>
                   <em>到容量的这个比例先提醒一次（默认 0.8）；再涨到满会再提醒一次</em>
                 </span>
@@ -1816,19 +1830,27 @@
                 </span>
               </div>
 
-              <!-- 手动拆分管理：已生效的「这两个不是同一人」声明，可随时解除 -->
+              <!-- 手动拆分管理：已生效的「这两个不是同一人」声明，可随时解除。
+                   默认收起（占位置）；标题行常显带数量，点「展开」才铺开。 -->
               <div class="face-splits" v-if="faceLibOpen && activeSplits.length">
-                <strong>手动拆分（{{ activeSplits.length }}）</strong>
-                <em>
-                  以下两组被显式声明为<b>不同的人</b>：不会因相似度被并到一起，推送也各叫各的名。
-                  解除后立即恢复自动归类。
-                </em>
-                <div class="face-split-row" v-for="s in activeSplits" :key="s.id">
-                  <span class="face-split-pair">{{ splitLabel(s) }}</span>
-                  <button class="mini-btn ghost" :disabled="!!removingSplit[s.id]" @click="doRemoveSplit(s)">
-                    {{ removingSplit[s.id] ? '解除中…' : '解除' }}
+                <div class="face-splits-head">
+                  <strong>手动拆分（{{ activeSplits.length }}）</strong>
+                  <button class="mini-btn ghost" @click="faceSplitsOpen = !faceSplitsOpen">
+                    {{ faceSplitsOpen ? '收起' : '展开' }}
                   </button>
                 </div>
+                <template v-if="faceSplitsOpen">
+                  <em>
+                    以下两组被显式声明为<b>不同的人</b>：不会因相似度被并到一起，推送也各叫各的名。
+                    解除后立即恢复自动归类。
+                  </em>
+                  <div class="face-split-row" v-for="s in activeSplits" :key="s.id">
+                    <span class="face-split-pair">{{ splitLabel(s) }}</span>
+                    <button class="mini-btn ghost" :disabled="!!removingSplit[s.id]" @click="doRemoveSplit(s)">
+                      {{ removingSplit[s.id] ? '解除中…' : '解除' }}
+                    </button>
+                  </div>
+                </template>
               </div>
 
               <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
@@ -4068,6 +4090,7 @@ import {
   enrollFromImage,
   faceLibOpen,
   faceRowsVersion,
+  faceSplitsOpen,
   faceSplitsVersion,
   faces as faceLib,
   groupFaces,
@@ -5875,6 +5898,7 @@ function resetFaceTune() {
   opts.face.dedupeSec = d.dedupeSec
   opts.face.pendingFullAt = d.pendingFullAt
   opts.face.pendingWarnRatio = d.pendingWarnRatio
+  opts.face.pendingDedupeSec = d.pendingDedupeSec
 }
 
 function triggerEnrollFile() {
@@ -8429,6 +8453,12 @@ function loadHidden() {
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
+}
+.face-splits-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 .face-splits em {
   font-size: 12px;

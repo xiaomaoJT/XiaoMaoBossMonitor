@@ -21,7 +21,7 @@ import {
   faceThumb
 } from './useAiDetector.js'
 import { netErrorText, timeoutReason } from './useNet.js'
-import { cosineOrRaw, looksSame } from './vecMatch.js'
+import { cosineOrRaw, looksSame, pendingDedupeTarget } from './vecMatch.js'
 
 /** 默认比对阈值：余弦相似度高于它才认为是同一个人 */
 export const DEFAULT_FACE_THRESHOLD = 0.38
@@ -52,6 +52,14 @@ export const faceLibOpen = ref(false)
  * 收起时标题行仍然带着数量（待录入人脸（N）），不会让人误以为"没有"。
  */
 export const pendingLibOpen = ref(false)
+
+/**
+ * 「手动拆分」声明列表展开着吗。默认**收起**：拆分声明通常只有一两条，
+ * 但每行都带解除按钮和说明文案，常显会把整页配置顶下去 —— 用户嫌占位置。
+ * 收起时标题行仍带数量（手动拆分（N）），不会误以为"没有"。
+ * 同样放模块级，理由见 faceLibOpen。
+ */
+export const faceSplitsOpen = ref(false)
 
 /** 简单互斥，避免并发写坏自增 id */
 let writeChain = Promise.resolve()
@@ -1061,21 +1069,24 @@ export const PENDING_MAX = 24
  * @param {object} o
  * @param {number} [o.max] 队列容量（来自 `options.face.pendingFullAt` 的解析值；
  *                         缺省回落到 PENDING_MAX，与升级前一致）
+ * @param {number} [o.dedupeSec] 重复捕获合并间隔（秒，`options.face.pendingDedupeSec` 的解析值）；
+ *                          <=0 = 关闭去重。缺省回落 vecMatch.PENDING_DEDUPE.sec.def
  * @returns {{added:boolean, id?:number}}
  */
-export function pushPendingFace({ vector, thumb, full, at, camId, camName, max }) {
+export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, dedupeSec }) {
   if (!vector || !vector.length || !thumb) return { added: false }
   const list = pendingFaces.value
-  // 和已有暂存项太像就只刷新时间，不再重复堆一张
-  for (const it of list) {
-    if (looksSame(it, { vector, thumb })) {
-      it.at = at || Date.now()
-      it.camName = camName || it.camName
-      it.hits = (it.hits || 1) + 1
-      // 同一张脸刷新时间，但「后来抓到的这帧」往往更清晰/更完整，顺手更新原图
-      if (full) it.full = full
-      return { added: false, id: it.id }
-    }
+  const now = at || Date.now()
+  // 合并间隔内遇到过同一个人 → 只刷新已有那条（时间 / hits / 更清晰的原图），不重复堆一张。
+  // 判定收口在 vecMatch.pendingDedupeTarget（与后端 store.addPendingFace 同一份口径）。
+  const hit = pendingDedupeTarget(list, { vector, thumb }, dedupeSec, now)
+  if (hit) {
+    hit.at = now
+    hit.camName = camName || hit.camName
+    hit.hits = (hit.hits || 1) + 1
+    // 同一张脸刷新时间，但「后来抓到的这帧」往往更清晰/更完整，顺手更新原图
+    if (full) hit.full = full
+    return { added: false, id: hit.id }
   }
   const id = (list[0] ? list[0].id : 0) + 1
   list.unshift({
@@ -1083,7 +1094,7 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max }
     vector: Float32Array.from(vector),
     thumb,
     full: full || '',
-    at: at || Date.now(),
+    at: now,
     camId: camId || '',
     camName: camName || '',
     hits: 1
