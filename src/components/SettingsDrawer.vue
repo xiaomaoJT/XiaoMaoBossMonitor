@@ -1910,14 +1910,33 @@
                     >
                       {{ splittingGroup ? '拆分中…' : '按名字拆分' }}
                     </button>
-                    <button class="mini-btn" :disabled="!!mergingGroup" @click="doMergeGroup(selectedGroup)">
-                      {{ mergingGroup ? '合并中…' : '合并为一条' }}
+                    <!-- 合并勾选：默认全选，取消勾选可把某些角度排除在合并之外
+                         （不同角度全并成一条平均脸会丢角度覆盖，见脚本注释） -->
+                    <label class="fgp-allcheck" :title="mergeAllChecked ? '全部不选' : '全部选中'">
+                      <input type="checkbox" :checked="mergeAllChecked" @change="toggleMergeAll" />
+                      <span>{{ mergeAllChecked ? '全不选' : '全选' }}</span>
+                    </label>
+                    <button
+                      class="mini-btn"
+                      :disabled="!!mergingGroup || mergeSelCount < 2"
+                      @click="doMergeGroup(selectedGroup)"
+                    >
+                      {{
+                        mergingGroup
+                          ? '合并中…'
+                          : mergeSelCount < selectedGroup.count
+                            ? `合并勾选的 ${mergeSelCount} 条`
+                            : '合并为一条'
+                      }}
                     </button>
                     <button class="mini-btn ghost" @click="selectedGroupKey = ''">收起</button>
                   </span>
                 </div>
                 <div class="fgp-samples">
                   <div class="fgp-item" v-for="(it, i) in selectedGroup.items" :key="it.id">
+                    <label class="fgp-check" :title="mergeSelected.includes(it.id) ? '不参与合并' : '参与合并'">
+                      <input type="checkbox" :value="it.id" v-model="mergeSelected" />
+                    </label>
                     <img v-if="it.thumb" :src="it.thumb" alt="样本" />
                     <span class="fgp-sim" :title="i === 0 ? '代表样本（最早录入的那张）' : '与代表样本的相似度'">{{ i === 0 ? '代表' : simPct(it.sim) }}</span>
                     <span class="fgp-name" :title="it.name">{{ it.name }}</span>
@@ -1952,7 +1971,8 @@
                 </p>
                 <p class="hint tight" v-else>
                   这几条同名，推送里都用「{{ selectedGroup.name }}」；改名会一起改。
-                  「合并为一条」还能把各角度的特征合成一份（识别更稳，也腾出名额）。
+                  勾选想合并的角度样本，点「合并为一条」把它们的特征平均成一条：适合同一角度拍重了的去重、腾名额；
+                  <b>不同角度的样本建议保持不勾选</b>——识别时是逐条取最高相似度，角度留得全更容易命中。
                 </p>
               </div>
 
@@ -5454,6 +5474,25 @@ const mergingGroup = ref('')
 const deletingSample = reactive({})
 /** 当前点开看全部角度的那一组 */
 const selectedGroupKey = ref('')
+/**
+ * 组面板里「参与合并」的样本 id 勾选。
+ *
+ * 展开组时默认全选（保持一键合并的旧习惯），用户取消勾选即可把某些角度
+ * 排除在外。为什么必须能让用户选：合并是多向量**加权平均**成一条，
+ * 把不同角度全并成一张"平均脸"会丢角度覆盖 —— 识别是逐条样本取最高
+ * 相似度（matchFace），角度留得全才容易命中；合并真正适合的是
+ * 同一角度拍重了的去重 / 腾 libMax 名额。
+ */
+const mergeSelected = ref([])
+const mergeSelCount = computed(() => mergeSelected.value.length)
+const mergeAllChecked = computed(
+  () => !!selectedGroup.value && mergeSelected.value.length === selectedGroup.value.items.length
+)
+/** 全选 / 全不选当前组的合并勾选 */
+function toggleMergeAll() {
+  if (!selectedGroup.value) return
+  mergeSelected.value = mergeAllChecked.value ? [] : selectedGroup.value.items.map((i) => i.id)
+}
 
 /**
  * 是否按相似度把「同一个人」的多角度样本归到一张卡片。
@@ -5514,6 +5553,13 @@ watch(faceGroups, (gs) => {
     selectedGroupKey.value = ''
   }
 })
+/* 展开 / 切换组时把合并勾选重置为全选；组被合并没或收起时清空 */
+watch(
+  () => selectedGroup.value?.key || '',
+  (k) => {
+    mergeSelected.value = k && selectedGroup.value ? selectedGroup.value.items.map((i) => i.id) : []
+  }
+)
 function toggleGroupPanel(g) {
   if (!g || g.count < 2) return
   selectedGroupKey.value = selectedGroupKey.value === g.key ? '' : g.key
@@ -5974,6 +6020,8 @@ async function doDeleteSample(it) {
     alertDialog({ title: '删除失败', message: '删除时出错：' + ((e && e.message) || e), variant: 'danger' })
   } finally {
     delete deletingSample[it.id]
+    // 样本没了，勾选集合里别留 stale id（否则头部"全选"计数对不上）
+    mergeSelected.value = mergeSelected.value.filter((id) => id !== it.id)
   }
 }
 
@@ -5986,13 +6034,25 @@ async function doDeleteSample(it) {
  */
 async function doMergeGroup(g) {
   if (!g || g.count < 2 || mergingGroup.value) return
+  // 只合并**勾选**的样本；没勾选的角度原样留在库里（各自成组或继续归在人名下）
+  const picked = g.items.filter((i) => mergeSelected.value.includes(i.id))
+  if (picked.length < 2) {
+    alertDialog({
+      title: '至少勾选 2 条',
+      message: '合并至少要勾选 2 个角度样本；不想合并的角度请保持不勾选，它们会原样保留。',
+      variant: 'warn'
+    })
+    return
+  }
+  const partial = picked.length < g.count
   const sameName = g.sameName !== false
   if (
     !(await confirmDialog({
       title: '合并为一条人脸记录',
       message:
-        `把${sameName ? `「${g.name}」` : `这一组（${g.names.join(' / ')}）`}的 ${g.count} 条样本合并成 1 条？\n` +
-        `合并后名字沿用「${g.name}」，人脸特征取加权平均（各角度都能对上，识别更稳），并腾出 ${g.count - 1} 个名额。\n` +
+        `把${sameName ? `「${g.name}」` : `这一组（${g.names.join(' / ')}）`}勾选的 ${picked.length} 条样本合并成 1 条` +
+        `${partial ? `，其余 ${g.count - picked.length} 条原样保留` : ''}？\n` +
+        `合并后名字沿用「${g.name}」，人脸特征取加权平均${partial ? '' : `，并腾出 ${g.count - 1} 个名额`}。\n` +
         '此操作不可撤销。',
       variant: 'danger'
     }))
@@ -6000,7 +6060,11 @@ async function doMergeGroup(g) {
     return
   mergingGroup.value = g.key
   try {
-    const r = await mergeFaces(g.items.map((i) => i.id), g.items[0].id)
+    // keepId 传勾选里的第一条（保序于 items）：合并后它当代表样本
+    const r = await mergeFaces(
+      picked.map((i) => i.id),
+      picked[0].id
+    )
     if (!r.ok) {
       alertDialog({ title: '合并失败', message: r.reason || '合并失败', variant: 'danger' })
       return
@@ -8476,6 +8540,31 @@ function loadHidden() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 组面板的合并勾选：每条样本一个 checkbox（放在缩略图上方），头部一个全选 */
+.fgp-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-bottom: 2px;
+}
+.fgp-check input,
+.fgp-allcheck input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--tint);
+  cursor: pointer;
+}
+.fgp-allcheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-soft);
+  cursor: pointer;
+  user-select: none;
 }
 
 /* 样本面板里「手动归入」控件：fgp-item 也是窄列（约 76px），控件铺满列宽，
