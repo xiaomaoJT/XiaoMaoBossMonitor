@@ -6,7 +6,10 @@
  *     分属不同实例，必须用**模块级单例**共享进行中的链路，否则无法配对。
  *   · 默认人脸档几乎零额外推理：只消费已算好的人脸 identity（gid）做哈希配对。
  *   · 内存受 TTL + LRU 硬上限约束（ENGINE_MAX），惰性淘汰，防膨胀。
- *   · 方向单向（出场必须早于入场）；空值拦截：拿不到身份且 requireFace → 丢弃。
+ *   · 方向单向（出场必须早于入场）；拿不到身份时：requireFace → 丢弃，否则走匿名兜底。
+ *   · **匿名兜底（ANON_KEY）**：requireFace:false 且无 gid / reidKey 时，所有匿名者共享
+ *     同一个 key —— 语义是「同一时刻每条 flow 只跟踪一条匿名链路」。单人场景（一个人
+ *     走完整条路径）完全够用；多人同窗并行会串链，要精确配对请把 requireFace 打开并录入人脸。
  *   · **多跳（A→B→C…）**：path 是有序节点数组，逐跳推进状态机；任一跳超时或错序即断链。
  *
  * ⚠️ 本模块**不碰任何图像 / 推送 / 渲染**——只做「多路本地进出事件按身份 + 时间窗串起来」。
@@ -34,6 +37,21 @@ export function createFlowEngine() {
    */
   const progress = new Map()
   let seq = 0
+
+  /*
+   * 可观测性计数（进程生命周期内累计，不落盘）：/status 的「🚶 人员流向」小节与自查用。
+   * 没有这些计数，「走了却没记录」只能靠猜 —— 现在能直接看到是「没喂进来 / 没身份 /
+   * 超时断链 / 匿名被覆盖」中的哪一种。
+   */
+  const stats = {
+    departures: 0, // 进入匹配的出场次数（该 (cam,zone) 是某条生效 flow 的出发节点）
+    arrivals: 0, // 进入匹配的入场次数
+    matched: 0, // 走完全程成功配对的次数
+    hopTimeout: 0, // 单跳超时断链（半路断开，1 秒宽限后整链淘汰）
+    expired: 0, // 整链 TTL / LRU 淘汰次数（含单跳超时后的宽限淘汰）
+    droppedNoGid: 0, // requireFace:true 但拿不到人脸身份 → 丢弃
+    anonReplaced: 0 // 匿名在途链路被同 flow 的新出发覆盖（多人同窗会串链的风险计数）
+  }
 
   const state = {
     flows: [],
@@ -71,10 +89,17 @@ export function createFlowEngine() {
     return out
   }
 
-  /** 某条 flow 的匹配 key：人脸档用 gid，降级档用 reidKey（前缀区分，避免两类 key 串台） */
+  /**
+   * 匿名兜底 key：requireFace:false 且拿不到任何身份（人脸未识别 / 无 reidKey）时，
+   * 所有匿名者共享同一个 key —— 每条 flow 同一时刻只有一条匿名链路在途。
+   * 新出发会覆盖旧链路（单人反复走同一路径不受影响；多人同窗并行会串链）。
+   */
+  const ANON_KEY = 'anon'
+
+  /** 某条 flow 的匹配 key：人脸档用 gid，降级档用 reidKey，再不行用匿名兜底 */
   function keyFor(flow, p) {
     if (flow.requireFace) return p.gid || null
-    return p.gid || (p.reidKey ? `reid:${p.reidKey}` : null)
+    return p.gid || (p.reidKey ? `reid:${p.reidKey}` : ANON_KEY)
   }
   function progKey(flowId, key) {
     return `${flowId}|${key}`
@@ -85,11 +110,17 @@ export function createFlowEngine() {
     for (const [pk, st] of progress) {
       if (st.expireAt > now) continue
       progress.delete(pk)
+      // 只数「真实在途」链路：head=-1 的记录是错序出发留下的空壳（open 为 null），
+      // 随即被淘汰，不算断链，否则计数器会被噪音灌满
+      if (st.head >= 0) stats.expired++
     }
     if (progress.size > FLOW_ENGINE_MAX) {
       const all = [...progress.entries()].sort((a, b) => a[1].lastAt - b[1].lastAt)
       const drop = all.slice(0, all.length - FLOW_ENGINE_MAX)
-      for (const [pk] of drop) progress.delete(pk)
+      for (const [pk, st] of drop) {
+        progress.delete(pk)
+        if (st.head >= 0) stats.expired++
+      }
     }
   }
 
@@ -104,10 +135,14 @@ export function createFlowEngine() {
     evictExpired(now)
     const hits = departFlowsFor(p.cam, p.zone)
     if (!hits.length) return { ok: false, reason: 'no-flow' }
+    stats.departures++
     let n = 0
     for (const { flow, segIdx } of hits) {
       const key = keyFor(flow, p)
-      if (!key) continue // 空值拦截：这条 flow 拿不到身份 → 跳过
+      if (!key) {
+        stats.droppedNoGid++ // 人脸档且没识别到人 → 丢弃（匿名兜底不适用）
+        continue
+      }
       const pk = progKey(flow.id, key)
       let st = progress.get(pk)
       if (!st) {
@@ -116,6 +151,7 @@ export function createFlowEngine() {
       }
       if (segIdx === 0) {
         // 起点：开新一程（允许从任意阶段重新开始，重置起点时刻 + 节点截图）
+        if (st.head >= 0 && key === ANON_KEY) stats.anonReplaced++ // 匿名旧链路被新出发覆盖
         st.head = 0
         st.startedAt = now
         st.nodeShots = {}
@@ -153,16 +189,21 @@ export function createFlowEngine() {
     evictExpired(now)
     const hits = arriveFlowsFor(p.cam, p.zone)
     if (!hits.length) return { ok: false, reason: 'no-flow' }
+    stats.arrivals++
     const matches = []
     for (const { flow, segIdx } of hits) {
       const key = keyFor(flow, p)
-      if (!key) continue
+      if (!key) {
+        stats.droppedNoGid++ // 人脸档且没识别到人 → 丢弃
+        continue
+      }
       const pk = progKey(flow.id, key)
       const st = progress.get(pk)
       if (!st || !st.open) continue
       if (st.open.from !== segIdx) continue // 不是正在等的这一跳
       if (now - st.open.at > clampFlowWindowSec(flow.windowSec) * 1000) {
         // 这一跳超时：链路在半路断掉，清掉在途，保留 head 等可能补救（短暂宽限后整体淘汰）
+        stats.hopTimeout++
         st.open = null
         st.lastAt = now
         st.expireAt = now + 1000
@@ -192,6 +233,7 @@ export function createFlowEngine() {
           departureShot,
           flowShots
         })
+        stats.matched++
         progress.delete(pk)
       } else {
         st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000
@@ -211,6 +253,11 @@ export function createFlowEngine() {
     return { pendingCount: progress.size, limit: FLOW_ENGINE_MAX }
   }
 
+  /** 可观测性：计数快照（/status 展示与自查；拷贝，避免外部改到内部状态） */
+  function flowStats() {
+    return { ...stats }
+  }
+
   /** 取当前通道列表（集成层用它解析出场 / 入场摄像头的展示名） */
   function getCameras() {
     return state.cameras
@@ -225,6 +272,7 @@ export function createFlowEngine() {
   function reset() {
     progress.clear()
     seq = 0
+    for (const k of Object.keys(stats)) stats[k] = 0
   }
 
   return {
@@ -233,6 +281,7 @@ export function createFlowEngine() {
     recordArrival,
     tick,
     snapshot,
+    flowStats,
     getCameras,
     hasActiveFlows,
     reset,

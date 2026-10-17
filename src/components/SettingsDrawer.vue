@@ -2127,7 +2127,7 @@
             <label class="opt">
               <span>
                 <strong>要求人脸身份</strong>
-                <em>开启：只有认出的人（或陌生人但开了采集）才匹配；关闭：仅靠轨迹也能匹配</em>
+                <em>开启：必须识别到人脸才匹配；关闭：匿名兜底——没识别到人脸时按「同一时刻一条匿名链路」匹配，一个人走完整条路径即有效，多人同窗并行可能串链</em>
               </span>
               <span class="switch" :class="{ on: flow.requireFace }" @click="flow.requireFace = !flow.requireFace"></span>
             </label>

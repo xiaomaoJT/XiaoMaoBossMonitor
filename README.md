@@ -1969,6 +1969,21 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 
 > 回归：`/tmp/flow-feature-probe/probe.mjs`（多跳 `flowShots` 产出 / `departureShot` 即 `flowShots[0]` / 身份不一致不配对 / `isFlowEvent` 双判定 / `parseJsonArray` 兜底 / `flowValid` 校验）30/30 全绿。
 
+**匿名兜底：`requireFace:false` 现在真的不需要人脸（#350）**
+
+- 旧行为是**空头支票**：`keyFor` 降级键 `reidKey` 全项目没有任何调用方传入 → 拿不到人脸名时 `recordDeparture` 直接 `no-gid` 静默失败，无记录、无提醒、日志无一行。未录入人脸的人走完整条路径也永远 0 条。
+- 现在 `requireFace:false` 且无 `gid` / `reidKey` 时落到 `ANON_KEY='anon'`：**每条 flow 同一时刻只跟踪一条匿名链路**。一个人走完整条路径（每跳在 `windowSec` 内）即正常配对、正常产出各节点图；多人同窗并行走同一条 flow 会串链（新出发覆盖旧链路，`anonReplaced` 计数可见），要精确配对请把 `requireFace` 打开并录入人脸。`requireFace:true` 仍严格拒绝无身份事件（`droppedNoGid` 计数）。
+- 设置页「要求人脸身份」开关的说明文案已按上述语义改写（原「关闭：仅靠轨迹也能匹配」是误导）。
+
+**可观测性：`/status` 的「🚶 人员流向」小节现在能自诊断（#350）**
+
+- 修了两个真 bug：① `/status` 原来读顶层 `state.config.flows`，而 flows 的真实存储位置是 `options.flows`（`defaults.js` 的 options 默认值）→ 配置里明明有规则却整节不显示；② `App.vue` 的 `backendSyncSignature` 漏了 `flows` → 改流向规则不触发自动重推，后端手上可能还是旧规则（前端不常驻时尤甚）。
+- 引擎新增进程内计数 `flowStats()`：`departures / arrivals / matched / hopTimeout / expired / droppedNoGid / anonReplaced`，`/status` 渲染成「本次进程：配对 N 次 · 出场 X · 入场 Y · 断链 Z · 无身份忽略 K · 匿名串链 J」——「走了却没记录」可直接对号入座：进出都是 0 = 区域事件没喂进来；无身份忽略 = 人脸档没识别到人；断链 = 时间窗不够。
+- 多跳（≥2 跳）生效规则若 `windowSec < 60`，`/status` 追加「⚠️ 时间窗 Ns 对 M 跳偏紧」提示（任一跳超时整链断，且迟到整链先被 TTL 淘汰、不可补救）。
+- 「功能开关」行的「区域 ❌」实为 `options.zone.countEnabled`（区域**计数**推送），与区域进出检测（`cameras[].aiExt.zone`，流向的物理前提）是两回事，已改标签为「区域计数」以免误读。
+
+> 回归：`/tmp/flow-anon-probe/probe.mjs`（匿名三跳全程 / 两跳 / 人脸档丢弃+计数 / 匿名覆盖计数 / 超时断链两种形态 / gid 与匿名 key 隔离 / reset 清零 / **真机配置复现**：电梯→门口→大厅 windowSec=30 requireFace=false 匿名配对成功，来人/溜了两条 flow 各自独立）45/45 全绿；旧探针 30/30 不回退。回退验证：把 `keyFor` 改回 `: null` 后匿名链路断言立即失败。
+
 ---
 
 ## 六、各端运行方式

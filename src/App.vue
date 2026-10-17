@@ -1110,6 +1110,12 @@ const backendSyncSignature = computed(() =>
     dingtalk: options.dingtalk,
     wecom: options.wecom,
     telegram: options.telegram,
+    /*
+     * 人员走向规则必须进指纹：后端 analyzer 每帧用 options.flows 喂流向引擎，
+     * 漏了它 → 改完流向规则不触发自动重推 → 后端手上还是旧规则（或根本没有），
+     * 表现就是「规则配了却永远不记录」，且 /status 也看不出后端有没有收到。
+     */
+    flows: options.flows,
     cameras: cameras.value.map((c) => ({
       id: c.id,
       name: c.name,
