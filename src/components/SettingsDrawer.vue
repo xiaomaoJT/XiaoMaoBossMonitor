@@ -1816,6 +1816,21 @@
                 </span>
               </div>
 
+              <!-- 手动拆分管理：已生效的「这两个不是同一人」声明，可随时解除 -->
+              <div class="face-splits" v-if="faceLibOpen && activeSplits.length">
+                <strong>手动拆分（{{ activeSplits.length }}）</strong>
+                <em>
+                  以下两组被显式声明为<b>不同的人</b>：不会因相似度被并到一起，推送也各叫各的名。
+                  解除后立即恢复自动归类。
+                </em>
+                <div class="face-split-row" v-for="s in activeSplits" :key="s.id">
+                  <span class="face-split-pair">{{ splitLabel(s) }}</span>
+                  <button class="mini-btn ghost" :disabled="!!removingSplit[s.id]" @click="doRemoveSplit(s)">
+                    {{ removingSplit[s.id] ? '解除中…' : '解除' }}
+                  </button>
+                </div>
+              </div>
+
               <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
                 <div
                   class="face-card"
@@ -1885,6 +1900,16 @@
                   </span>
                   <span class="fgp-tag ok" v-else>同名归为一组</span>
                   <span class="fgp-acts">
+                    <!-- 按名字拆分：这一组里其实是两个人（名字不同、只是长得像被并了）→ 显式拆开。
+                         拆分是持久声明，优先于相似度；之后新录入的同名样本也受同一条声明保护。 -->
+                    <button
+                      class="mini-btn"
+                      v-if="selectedGroup.sameName === false && splitNames(selectedGroup).length >= 2"
+                      :disabled="!!splittingGroup"
+                      @click="doSplitGroup(selectedGroup)"
+                    >
+                      {{ splittingGroup ? '拆分中…' : '按名字拆分' }}
+                    </button>
                     <button class="mini-btn" :disabled="!!mergingGroup" @click="doMergeGroup(selectedGroup)">
                       {{ mergingGroup ? '合并中…' : '合并为一条' }}
                     </button>
@@ -1919,6 +1944,11 @@
                   这 {{ selectedGroup.count }} 条现在各有各的名字（{{ selectedGroup.names.join(' / ') }}），
                   推送会按命中的那条来 —— 也就是同一个人的不同角度可能推出不同名字。
                   点卡片上的「改名」统一成一个名字后，不管哪个角度都推这个名字。
+                  <template v-if="splitNames(selectedGroup).length >= 2">
+                    <br />
+                    如果这其实是**两个人**（只是长得像被并到了一起）：点上方「按名字拆分」，
+                    两人会各自成卡、推送也各叫各的名；拆分后新录入的同名样本同样受保护。
+                  </template>
                 </p>
                 <p class="hint tight" v-else>
                   这几条同名，推送里都用「{{ selectedGroup.name }}」；改名会一起改。
@@ -4009,13 +4039,16 @@ import {
   backendPendingError,
   backendPendingFaces,
   backendPendingLoadedAt,
+  addFaceSplits,
   clearFaces,
   clearPendingFaces,
+  currentSplits,
   deleteFaces,
   dropBackendPendingFace,
   enrollFromImage,
   faceLibOpen,
   faceRowsVersion,
+  faceSplitsVersion,
   faces as faceLib,
   groupFaces,
   GROUP_SIM_KEY,
@@ -4026,6 +4059,7 @@ import {
   rawFaceRows,
   readGroupSim,
   refreshFaces,
+  removeFaceSplit,
   removePendingFace,
   renameFace,
   renameFaces
@@ -5455,7 +5489,16 @@ const groupThreshold = computed(() => Number(opts.face.matchThreshold) || DEFAUL
  */
 const faceGroups = computed(() => {
   void faceRowsVersion.value
-  return groupFaces(rawFaceRows(), { threshold: groupThreshold.value, bySimilarity: groupBySim.value })
+  /*
+   * 拆分声明也要当依赖：faceSplitsVersion 一变（新增 / 解除 / 从后端拉回）
+   * 就重算分组 —— 否则拆完界面不刷新，用户以为"点了没用"。
+   */
+  void faceSplitsVersion.value
+  return groupFaces(rawFaceRows(), {
+    threshold: groupThreshold.value,
+    bySimilarity: groupBySim.value,
+    splits: currentSplits()
+  })
 })
 
 /** 一个"人"占了多条、多出来的条数：>0 才展示归类开关与说明 */
@@ -5478,6 +5521,109 @@ function toggleGroupPanel(g) {
 /** 相似度显示成百分比（界面与探针共用同一处格式化） */
 function simPct(s) {
   return Math.round(Math.max(0, Math.min(1, Number(s) || 0)) * 100) + '%'
+}
+
+/* ---------- 手动拆分：「这两个不是同一人」 ----------
+ * 归类判据是概率（相似度），用户的"这是两个人"是确定事实。这里把确定事实
+ * 落成持久声明：id 对 + 名字对都记（见 useFaceLib.addFaceSplits 与
+ * defaults.normalizeFaceSplits），链式合并也绕不过去（groupFaces 里是簇级检查）。
+ */
+
+/** 组里去重后的名字列表（「按名字拆分」按它两两配对） */
+function splitNames(g) {
+  return [...new Set((g && Array.isArray(g.names) ? g.names : []).filter((x) => String(x || '').trim()))]
+}
+
+/** 拆分声明的展示文案：「大刘 ∿ 黎」 */
+function splitLabel(s) {
+  const a = (s && s.aName) || `样本 ${s && s.aId}`
+  const b = (s && s.bName) || `样本 ${s && s.bId}`
+  return `${a} ∿ ${b}`
+}
+
+/**
+ * 仍然有效的拆分声明：两侧名字都还在库里的才显示。
+ * （样本被删光 / 改名后维护逻辑已退休的声明不会出现在这，库里的惰性清理也会收掉。）
+ */
+const activeSplits = computed(() => {
+  void faceSplitsVersion.value
+  const names = new Set((faceNameOptions.value || []).map((n) => String(n || '').trim()))
+  return currentSplits().filter((s) => {
+    if (!s) return false
+    const aOk = (s.aName && names.has(String(s.aName).trim())) || !s.aName
+    const bOk = (s.bName && names.has(String(s.bName).trim())) || !s.bName
+    return aOk && bOk
+  })
+})
+
+const splittingGroup = ref('')
+const removingSplit = reactive({})
+
+/**
+ * 按名字拆分一个混合名组：组内每两个不同的名字之间都记一条声明
+ *（样本取两名字簇的笛卡尔积 —— id 对管改名，名字对管新样本）。
+ */
+async function doSplitGroup(g) {
+  if (!g || splittingGroup.value) return
+  const names = splitNames(g)
+  if (names.length < 2) return
+  const msg =
+    `把「${names.join('」「')}」拆成不同的人？\n\n` +
+    '拆分后：库里各自成卡，推送也各叫各的名；之后新录入的同名样本同样受保护。\n' +
+    // 后端模式（npm run server）下推送名是服务端定的，不同步过去服务端还按旧归类推
+    (faceBackendOn.value
+      ? '当前是后端模式：还需要点一次「同步到后端」，服务端才会按拆分后的名字推送。\n'
+      : '') +
+    '解除拆分（下方「手动拆分」列表）即可恢复自动归类。'
+  if (!(await confirmDialog({ title: '按名字拆分', message: msg }))) return
+  splittingGroup.value = g.key
+  try {
+    const byName = new Map()
+    for (const it of g.items || []) {
+      const nm = String(it.name || '').trim()
+      if (!nm) continue
+      if (!byName.has(nm)) byName.set(nm, [])
+      byName.get(nm).push(it)
+    }
+    const pairs = []
+    const ns = [...byName.keys()]
+    for (let i = 0; i < ns.length; i++) {
+      for (let j = i + 1; j < ns.length; j++) {
+        for (const a of byName.get(ns[i])) {
+          for (const b of byName.get(ns[j])) {
+            pairs.push({ aId: a.id, aName: ns[i], bId: b.id, bName: ns[j] })
+          }
+        }
+      }
+    }
+    const r = await addFaceSplits(pairs)
+    if (!r.ok) {
+      alertDialog({ title: '拆分失败', message: r.reason || '拆分失败', variant: 'danger' })
+      return
+    }
+    // 组已按名字裂开：原来展开的面板自然收起（watch 兜底，这里显式更稳）
+    selectedGroupKey.value = ''
+  } catch (e) {
+    alertDialog({ title: '拆分失败', message: (e && e.message) || '拆分失败', variant: 'danger' })
+  } finally {
+    splittingGroup.value = ''
+  }
+}
+
+/** 解除一条拆分声明（之后相似度会把他们并回去 —— 这正是"解除"的语义） */
+async function doRemoveSplit(s) {
+  if (!s || removingSplit[s.id]) return
+  removingSplit[s.id] = true
+  try {
+    const r = await removeFaceSplit(s.id)
+    if (!r.ok) {
+      alertDialog({ title: '解除失败', message: r.reason || '解除失败', variant: 'danger' })
+    }
+  } catch (e) {
+    alertDialog({ title: '解除失败', message: (e && e.message) || '解除失败', variant: 'danger' })
+  } finally {
+    delete removingSplit[s.id]
+  }
 }
 
 /** 正在录入中的待录入卡片 id（防止「点下去没反馈 → 连点 → 同一张脸被建出多条」）。
@@ -8201,6 +8347,47 @@ function loadHidden() {
 .face-group-toggle .switch {
   flex: 0 0 auto;
   margin-top: 1px;
+}
+
+/* ---------------- 手动拆分声明管理 ---------------- */
+.face-splits {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-soft));
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.face-splits strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.face-splits em {
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+  color: var(--text-dim-2);
+}
+.face-splits em b {
+  color: var(--text);
+}
+.face-split-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--tint) 5%, transparent);
+}
+.face-split-pair {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 /* ---------------- 一个人的角度样本面板 ---------------- */

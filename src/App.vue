@@ -326,10 +326,16 @@ import {
 import {
   clearFaces,
   clearPendingFaces,
+  currentSplits,
+  faceSplitsVersion,
   faces as faceList,
   getAllFaces,
+  getAllFaceSplits,
+  GROUP_SIM_KEY,
   PENDING_MAX,
   pendingFaces,
+  readGroupSim,
+  replaceFaceSplits,
   replaceFaces
 } from './composables/useFaceLib'
 /*
@@ -1074,7 +1080,19 @@ async function backendPayload() {
       vector: f.vector,
       thumb: f.thumb || '',
       createdAt: f.createdAt || 0
-    }))
+    })),
+    /*
+     * 人脸库「手动拆分」声明 + 「按相似度归类」偏好也要推上去：
+     * 后端模式下识别与推送都在服务端跑，后端 matchFace 若不认识这些声明，
+     * 「库里分开了、推送还并着」—— 用户在设置页拆了个寂寞。
+     */
+    faceSplits: (await getAllFaceSplits().catch(() => [])).map((s) => ({
+      aId: s.aId,
+      bId: s.bId,
+      aName: s.aName,
+      bName: s.bName
+    })),
+    faceGroupSim: readGroupSim()
   }
   /*
    * 服务端自己的两个旋钮（顶层字段，不走 options）：
@@ -1116,6 +1134,15 @@ const backendSyncSignature = computed(() =>
      * 表现就是「规则配了却永远不记录」，且 /status 也看不出后端有没有收到。
      */
     flows: options.flows,
+    /*
+     * 人脸库手动拆分声明 + 归类偏好同理：不进指纹 → 拆了个寂寞
+     * （后端识别还按老样子并着推）。依赖 faceSplitsVersion 让缓存刷新后重算。
+     */
+    faceSplits: (() => {
+      void faceSplitsVersion.value
+      return currentSplits().map((s) => ({ aId: s.aId, bId: s.bId, aName: s.aName, bName: s.bName }))
+    })(),
+    faceGroupSim: readGroupSim(),
     cameras: cameras.value.map((c) => ({
       id: c.id,
       name: c.name,
@@ -1588,6 +1615,33 @@ async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
     } catch (e) {
       if (useFlow) stepSyncFlow('faces', 'fail')
       console.warn('⚠️  人脸库拉取失败：', (e && e.message) || e)
+    }
+
+    /*
+     * 手动拆分声明跟着人脸库一起拉（以后端为准，与 replaceFaces 同语义）。
+     * 老后端不带这个字段 → 原样保留本机声明（不做无依据的替换）。
+     * 换机器重装后能恢复「这两个不是同一人」的声明，不会因为本地库是空的
+     * 就默默合回去。
+     */
+    if (Array.isArray(data.faceSplits)) {
+      try {
+        await replaceFaceSplits(data.faceSplits)
+      } catch (e) {
+        console.warn('⚠️  拆分声明拉取失败：', (e && e.message) || e)
+      }
+    }
+
+    /*
+     * 「按相似度归类」偏好也随后端（老后端不带这个字段 → 保留本机设置）。
+     * 不拉的话：A 机器关了相似度归类、B 机器拉过去还是开的，
+     * 两边对"这俩人该不该并成一张卡"各说一套。
+     */
+    if (typeof data.faceGroupSim === 'boolean') {
+      try {
+        localStorage.setItem(GROUP_SIM_KEY, data.faceGroupSim ? '1' : '0')
+      } catch (e) {
+        /* 隐私模式下写不进去：下次读取回落默认开，可接受 */
+      }
     }
 
     /*

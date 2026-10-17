@@ -11,10 +11,18 @@
  *   - 详情弹窗打开时才按 key 把原图从库里捞出来。
  */
 export const DB_NAME = 'monitor-wall-db'
-export const DB_VERSION = 2
+/*
+ * 版本 3：新增 face-splits 表（人脸库「手动拆分」声明）。
+ * ⚠️ 必须涨版本：onupgradeneeded 只在版本变化时触发，不涨的话老库永远不会建这张新表，
+ *    后面所有拆分读写都会 NotFoundError。两个连接（事件 / 人脸）的 upgrade 回调都已幂等
+ *    补齐三张表，谁先 open 都能建全。
+ */
+export const DB_VERSION = 3
 const STORE = 'events'
 /** 人脸库（特征向量 + 缩略图） */
 const FACE_STORE = 'faces'
+/** 人脸库「手动拆分」声明：用户显式声明「这两个名字/这两条样本不是同一人」 */
+export const FACE_SPLIT_STORE = 'face-splits'
 /** 旧版本 localStorage 里的历史记录，迁移完就删掉 */
 const LEGACY_KEY = 'monitor-alarm-history-v1'
 
@@ -89,6 +97,10 @@ export function openDB() {
         // 人脸库：以自增 id 为主键，按录入时间排序
         const fs = db.createObjectStore(FACE_STORE, { keyPath: 'id', autoIncrement: true })
         fs.createIndex('createdAt', 'createdAt')
+      }
+      if (!db.objectStoreNames.contains(FACE_SPLIT_STORE)) {
+        // 手动拆分声明：以自增 id 为主键（解除时按 id 删）
+        db.createObjectStore(FACE_SPLIT_STORE, { keyPath: 'id', autoIncrement: true })
       }
     }
     // 被别的标签页阻塞：立刻给出**能照做**的原因，而不是干等

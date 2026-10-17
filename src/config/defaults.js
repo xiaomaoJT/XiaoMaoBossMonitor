@@ -1457,6 +1457,40 @@ export function isFlowEvent(rec) {
 }
 
 /**
+ * 人脸库「手动拆分」声明的归一化（纯函数，前后端共用）。
+ * ----------------------------------------------------------------------------
+ * 背景：groupFaces 按「同名 ∨ 相似度≥阈值」归类，两个长得像的不同人名下样本会被并成
+ * 一张卡，推送也各按各的名字 —— 用户需要一条**显式**的「这两个不是同一人」。
+ *
+ * 一条声明记录两个「侧」：(aId,aName) 与 (bId,bName)。两侧都记 id + 名字：
+ *   · id 对   —— 改名（黎→老黎）后依然生效，不会因为改了名字就失效；
+ *   · 名字对 —— 之后新录入的同名样本也自动受保护（id 对覆盖不到新样本）。
+ * 改名时由 renameFaces 负责同步更新记录里的名字（两侧同名了 = 用户已统一，记录自动退休）。
+ *
+ * @param {Array<{aId?,bId?,aName?,bName?}|{nameA?,nameB?}>} list 原始声明（容忍单名字写法）
+ * @returns {Array<{aId:number,bId:number,aName:string,bName:string}>} 归一化后的声明
+ *   - id 缺省记 0（纯名字对）；名字 trim 后为空记 ''；两侧完全相同的重复声明去掉
+ */
+export function normalizeFaceSplits(list) {
+  const out = []
+  const seen = new Set()
+  for (const raw of Array.isArray(list) ? list : []) {
+    if (!raw || typeof raw !== 'object') continue
+    const aId = Math.max(0, Number(raw.aId) || 0)
+    const bId = Math.max(0, Number(raw.bId) || 0)
+    const aName = String(raw.aName != null ? raw.aName : raw.nameA != null ? raw.nameA : '').trim()
+    const bName = String(raw.bName != null ? raw.bName : raw.nameB != null ? raw.nameB : '').trim()
+    // 什么都没提供的声明没有意义
+    if (!aId && !bId && !aName && !bName) continue
+    const key = `${aId}|${bId}|${aName}|${bName}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ aId, bId, aName, bName })
+  }
+  return out
+}
+
+/**
  * 走向事件是否按「关键事件」实时急推（类比在库人脸命中，不被静默/日常汇总吸收）。
  * ----------------------------------------------------------------------------
  * 唯一判据 = source==='flow' 且 record.asCritical 为真。

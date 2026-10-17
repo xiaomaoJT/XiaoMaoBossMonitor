@@ -1984,6 +1984,33 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 
 > 回归：`/tmp/flow-anon-probe/probe.mjs`（匿名三跳全程 / 两跳 / 人脸档丢弃+计数 / 匿名覆盖计数 / 超时断链两种形态 / gid 与匿名 key 隔离 / reset 清零 / **真机配置复现**：电梯→门口→大厅 windowSec=30 requireFace=false 匿名配对成功，来人/溜了两条 flow 各自独立）45/45 全绿；旧探针 30/30 不回退。回退验证：把 `keyFor` 改回 `: null` 后匿名链路断言立即失败。
 
+### 5.52 人脸库「手动拆分」：显式声明「这两个不是同一人」
+
+**背景**：归类判据（§5.44 一族）是**概率**——「同名 ∨ 余弦 ≥ 识别阈值」，链式并查集会把两个长得像的人误并到一张卡（用户看到的「大刘」卡片里住着「黎」即此）。改名 / 手动归入都治标：把一条样本改名到另一个人，**相似度仍在，下次刷新又被并回去**。用户的原话是「这两个是我归纳的独立分组」——这是**确定事实**，必须有一条优先于一切自动判据的路。
+
+**功能与语义**
+
+- 混合名组（`sameName === false`）的面板头部出现「**按名字拆分**」：组内每两个不同名字之间记一条声明（样本取两名字簇的笛卡尔积），确认后人各自成卡、推送各叫各的名。
+- 声明持久化在 IndexedDB 新表 `face-splits`（`DB_VERSION` 2→3，两个连接的 `onupgradeneeded` 都已幂等补建，谁先 open 都能建全），**重启 / 换浏览器不丢**；底部「手动拆分」列表可见全部生效中的声明，逐条「解除」（解除后恢复自动归类——这正是"解除"的语义）。
+- 声明是**双轨**的：`{aId, bId, aName, bName}`（`defaults.normalizeFaceSplits` 归一化，容忍 `{nameA,nameB}` 单名字写法、去重、跳过全空）：
+  - **id 对**管「改过名」——黎→老黎后 id 没变，仍拆着（名字对此时已失效，id 对兜底）；
+  - **名字对**管「之后新录入」的同名样本——id 对覆盖不到还没录进来的脸。
+- `groupFaces` 里做的是**簇级检查**（每簇维护 id 集合 + 名字集合）：只拦「这一对样本」不够，A~C~B 的链式合并会把拆开的两人又合回去；合并前看的是"并起来之后簇里会不会同时出现某条声明的两侧"。
+- **改名统一自动退休**：`renameFaces` 后若声明两侧名字被改成一样（用户已把这两人统一），声明自动删除；名字仍不同则只更新记录里的名字。否则「归入到…」会被旧拆分挡着，表现为"点了归入没反应"。
+- 与「同一人归类显示」开关（`bySimilarity`）正交：关掉它只按同名归类；拆分声明在两种模式下都生效。
+
+**后端同步（`npm run server` 模式下必须）**
+
+后端模式下识别与推送都在服务端，不把声明送过去就是「库里分开了、推送还并着」：
+
+- `faceSplits` / `faceGroupSim` 随配置同步：进 `App.vue` 的 `backendPayload` 与 `backendSyncSignature`（依赖 `faceSplitsVersion`，缓存刷新后重算指纹）；POST `/api/config` 由 `applyIncomingConfig` 收（`faceLib.setSplits` / `setGroupSim`，声明 normalize 后落盘 `cfg.faceSplits`）。
+- **空白闸门同理**：未对齐的客户端（`baseRev = 0`）推 `faceSplits: []` 上来会抹掉后端攒下的声明（"拆好的两个人又并回去"，且无任何报错）→ 拦下并回执 `splitsSkipped`（与 `facesSkipped` 同一套判据、同一种回执）。
+- GET `/api/config` 回传 `faceSplits` + `faceGroupSim`；拉取时前端 `replaceFaceSplits` 整体替换、并把「按相似度归类」开关随后端（老后端不带这两个字段 → 原样保留本机，不做无依据的替换）。
+- 服务重启后从落盘配置恢复（`main()` 里 `faceLib.setSplits(cfg.faceSplits || [])`），日志可见「✂️ 拆分声明 : N 条（重启后已恢复）」。
+- 识别路径：`server/analyzer.mjs` 主检测与补拍两处都改调 `faceLib.matchFaceGrouped`——先 `matchFace` 找最像样本，再用**同一份** `groupFaces` 映射到组代表名；推送 `faceName` / 事件 `text` / 冷却键（按组算，同组不同角度不重复发）全部按组名走。判定函数是前端 `useFaceLib.groupFaces` 本体（Node 顶层只 import vue，链安全），不另写第二套。
+
+> 回归：`/tmp/face-split-probe/probe.mjs` **40/40**（A 组：无拆分复现误并 / id 对拆分 / 名字对保护新样本 / 链式穿透被堵 / 装饰性改名 id 对兜底 / 两侧同名声明被忽略 / `bySimilarity:false` / 脏数据；B 组：`normalizeFaceSplits` 归一化六项；C 组：后端真实 SQLite 下 `matchFaceGrouped` 有/无声明两种推送名、陌生人 miss、空库 miss、副本隔离；D 回退验证：splits 置空后并回 1 组、后端推送名回到组代表——证明断言由声明决定，不是恒真）。
+
 ---
 
 ## 六、各端运行方式

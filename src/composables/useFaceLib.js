@@ -9,7 +9,8 @@
  * 缩略图统一压到 96×96 JPEG，每张约 4~6KB，50 个人总共不到 300KB。
  */
 import { ref } from 'vue'
-import { DB_NAME, DB_VERSION, FACE_STORE_NAME } from './useEventStore.js'
+import { DB_NAME, DB_VERSION, FACE_STORE_NAME, FACE_SPLIT_STORE } from './useEventStore.js'
+import { normalizeFaceSplits } from '../config/defaults.js'
 import {
   cosine,
   loadModel,
@@ -118,6 +119,14 @@ function openFaceDB() {
         const os = db.createObjectStore('events', { keyPath: 'key' })
         os.createIndex('time', 'time')
       }
+      /*
+       * 手动拆分声明表（版本 3 新增）。这里也必须幂等补建：
+       * 同一升级窗口里谁先 open 谁触发 onupgradeneeded，漏建这张表 →
+       * 后面所有拆分读写都是 NotFoundError。
+       */
+      if (!db.objectStoreNames.contains(FACE_SPLIT_STORE)) {
+        db.createObjectStore(FACE_SPLIT_STORE, { keyPath: 'id', autoIncrement: true })
+      }
     }
     req.onblocked = () => fail(new Error('本地人脸数据库正被本应用的其它标签页占用，请关掉其它标签页后重试'))
     req.onsuccess = () => {
@@ -187,9 +196,9 @@ function reqAsPromise(req) {
   })
 }
 
-async function store(mode) {
+async function store(mode, name = FACE_STORE_NAME) {
   const db = await openFaceDB()
-  return db.transaction(FACE_STORE_NAME, mode).objectStore(FACE_STORE_NAME)
+  return db.transaction(name, mode).objectStore(name)
 }
 
 /** 读取全量（含向量），仅内部比对与导出用 */
@@ -213,6 +222,15 @@ export async function refreshFaces() {
   }))
   faceRowsVersion.value += 1
   facesReady.value = true
+  /*
+   * 拆分声明跟着人脸库一起刷：两边同温，设置页的归类 computed 与识别路径
+   * （matchFaceGroup 同步读缓存）拿到的才是同一份。失败不波及人脸列表本身。
+   */
+  try {
+    await refreshFaceSplits()
+  } catch (e) {
+    /* 拆分缓存刷不出来只是"拆分暂不生效"，人脸库照常可用 */
+  }
   return faces.value
 }
 
@@ -231,6 +249,201 @@ export const faceRowsVersion = ref(0)
 /** 取上面那份完整记录的快照（含向量），调用方只读、别改 */
 export function rawFaceRows() {
   return rawRows
+}
+
+/* ==================== 手动拆分声明（「这两个不是同一人」） ====================
+ *
+ * 为什么需要它：归类判据是「同名 ∨ 相似度 ≥ 阈值」—— 两个长得像的不同人会被并成
+ * 一张卡，推送也各按各的名字。用户需要一条**显式声明**把两者永久分开：
+ * 相似度是概率，用户的"这是两个人"是确定事实，确定事实必须能压过概率判据。
+ *
+ * 存哪：IndexedDB 的 face-splits 表（与人脸库同生共死；放 localStorage 会被
+ * 单独清掉，届时拆分静默失效、两人又合回去，且没有任何提示）。
+ * 一条声明 = 两个「侧」，每侧记 id + 名字（理由见 defaults.normalizeFaceSplits）：
+ *   · id 对   挡住「改过名」的样本对（黎→老黎后依然分开）；
+ *   · 名字对  挡住「之后新录入」的同名样本（id 对覆盖不到新样本）。
+ */
+
+/** 拆分声明缓存（非响应式，与 rawRows 同模式）：同步读取用 */
+let splitCache = []
+
+/** 每次 refreshFaceSplits 自增 —— 让设置页的归类 / 拆分列表 computed 知道该重算了 */
+export const faceSplitsVersion = ref(0)
+
+/** 取当前拆分声明快照（同步；调用方只读） */
+export function currentSplits() {
+  return splitCache
+}
+
+/** 读全量拆分声明（含历史记录字段），按写入顺序 */
+export async function getAllFaceSplits() {
+  try {
+    const os = await store('readonly', FACE_SPLIT_STORE)
+    const all = await reqAsPromise(os.getAll())
+    return (all || []).sort((a, b) => (a.id || 0) - (b.id || 0))
+  } catch (e) {
+    // 老库还没升级（表不存在）等情形：当没有拆分，绝不能让调用方炸掉
+    return []
+  }
+}
+
+/**
+ * 刷新拆分缓存（人脸库每次 refresh 都跟着刷一次，保证两边同温）。
+ * 顺带做**惰性清理**：两侧样本都已不在、两个名字也都不在库里的声明已经不可能
+ * 命中任何比对，删掉以免无限堆积。
+ * ⚠️ 只有在 rawRows 非空时才清理：底库还没加载完时 rawRows 是空的，
+ *     那时清理会把所有声明误杀。
+ */
+export async function refreshFaceSplits() {
+  let list = await getAllFaceSplits()
+  try {
+    if (rawRows.length && list.length) {
+      const ids = new Set(rawRows.map((r) => r.id))
+      const names = new Set(rawRows.map((r) => String(r.name || '').trim()).filter(Boolean))
+      const alive = list.filter(
+        (s) => ids.has(s.aId) || ids.has(s.bId) || (s.aName && names.has(s.aName)) || (s.bName && names.has(s.bName))
+      )
+      if (alive.length !== list.length) {
+        const db = await openFaceDB()
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+          const os = tx.objectStore(FACE_SPLIT_STORE)
+          for (const s of list) {
+            if (!alive.includes(s)) os.delete(s.id)
+          }
+          tx.oncomplete = () => resolve(true)
+          tx.onerror = () => reject(tx.error)
+          tx.onabort = () => reject(tx.error || new Error('拆分声明清理事务被中止'))
+        })
+        list = alive
+      }
+    }
+  } catch (e) {
+    /* 清理失败不碍事：下次刷新还会试 */
+  }
+  splitCache = list
+  faceSplitsVersion.value += 1
+  return list
+}
+
+/**
+ * 新增拆分声明（已存在的同 id 对 + 同名字对跳过，不会重复堆）。
+ * @param {Array<{aId?,aName?,bId?,bName?}>} pairs 每个元素是一「对」两侧
+ * @returns {Promise<{ok:boolean, added:number, reason?:string}>}
+ */
+export function addFaceSplits(pairs) {
+  return runExclusive(async () => {
+    const want = normalizeFaceSplits(pairs)
+    if (!want.length) return { ok: false, reason: '没有要拆分的对象' }
+    const exist = await getAllFaceSplits()
+    const seen = new Set(exist.map((s) => `${s.aId}|${s.bId}|${s.aName}|${s.bName}`))
+    const fresh = want.filter((w) => !seen.has(`${w.aId}|${w.bId}|${w.aName}|${w.bName}`))
+    if (!fresh.length) return { ok: true, added: 0 }
+    const db = await openFaceDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+      const os = tx.objectStore(FACE_SPLIT_STORE)
+      const now = Date.now()
+      for (const w of fresh) os.add({ ...w, createdAt: now })
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('拆分声明写入事务被中止'))
+    })
+    await refreshFaceSplits()
+    return { ok: true, added: fresh.length }
+  })
+}
+
+/** 解除一条拆分声明（之后恢复自动归类：相似度仍会把他们并回去） */
+export function removeFaceSplit(id) {
+  return runExclusive(async () => {
+    const db = await openFaceDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+      tx.objectStore(FACE_SPLIT_STORE).delete(id)
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('拆分声明删除事务被中止'))
+    })
+    await refreshFaceSplits()
+    return { ok: true }
+  })
+}
+
+/**
+ * 用一份声明**整体替换**本机的（从后端拉取配置时用，以后端为准）。
+ * 与 replaceFaces 同理：明确送来数组才替换；送空数组 = 用户/后端确实没有拆分。
+ */
+export function replaceFaceSplits(list) {
+  return runExclusive(async () => {
+    const want = normalizeFaceSplits(list)
+    const db = await openFaceDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+      const os = tx.objectStore(FACE_SPLIT_STORE)
+      os.clear()
+      const now = Date.now()
+      for (const w of want) os.add({ ...w, createdAt: now })
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('拆分声明替换事务被中止'))
+    })
+    await refreshFaceSplits()
+    return { ok: true, count: want.length }
+  })
+}
+
+/**
+ * 改名之后维护拆分声明（renameFaces 内部调用，别处不需要）。
+ *
+ * 规则只有一条，但必须严：**两侧名字被改成一样了 = 用户已经把这两人统一了，
+ * 声明自动退休**（否则「归入到…」「改名统一」会被旧的拆分挡着，表现为
+ * "点了归入没反应"）。名字仍不同 → 只更新记录里的名字，id 对继续兜底。
+ *
+ * @param {number[]} ids 被改过名的样本 id
+ */
+async function maintainSplitsAfterRename(ids) {
+  const touched = new Set((Array.isArray(ids) ? ids : []).map((x) => Number(x)).filter((x) => x > 0))
+  if (!touched.size) return
+  const list = await getAllFaceSplits()
+  const involved = list.filter((s) => touched.has(Number(s.aId)) || touched.has(Number(s.bId)))
+  if (!involved.length) return
+  // 改名后的当前名字（直接从库里读，别信调用方传的旧值）
+  const db = await openFaceDB()
+  const nameOf = async (id) => {
+    if (!id) return ''
+    const rec = await reqAsPromise(db.transaction(FACE_STORE_NAME, 'readonly').objectStore(FACE_STORE_NAME).get(id))
+    return rec ? String(rec.name || '').trim() : ''
+  }
+  const names = new Map()
+  for (const s of involved) {
+    for (const id of [s.aId, s.bId]) {
+      if (id && !names.has(id)) names.set(id, await nameOf(id))
+    }
+  }
+  const retire = [] // 两侧同名 → 退休
+  const update = [] // 名字变了 → 同步记录
+  for (const s of involved) {
+    const a = names.get(s.aId)
+    const b = names.get(s.bId)
+    const na = a === undefined ? s.aName : a
+    const nb = b === undefined ? s.bName : b
+    if (na && nb && na === nb) {
+      retire.push(s.id)
+    } else if (na !== s.aName || nb !== s.bName) {
+      update.push({ ...s, aName: na, bName: nb })
+    }
+  }
+  if (!retire.length && !update.length) return
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+    const os = tx.objectStore(FACE_SPLIT_STORE)
+    for (const id of retire) os.delete(id)
+    for (const s of update) os.put(s)
+    tx.oncomplete = () => resolve(true)
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error || new Error('拆分声明维护事务被中止'))
+  })
 }
 
 /** 自动编号：人脸 1 / 人脸 2 ……（跳过已占用的序号） */
@@ -316,6 +529,11 @@ export function renameFaces(ids, name) {
       tx.onerror = () => reject(tx.error)
       tx.onabort = () => reject(tx.error || new Error('改名事务被中止'))
     })
+    /*
+     * 先维护拆分声明再刷缓存：两侧被改名成同一个名字 = 用户已把两人统一，
+     * 声明必须在这里退休（否则归入/改名统一会被旧拆分挡着，见该函数说明）。
+     */
+    await maintainSplitsAfterRename(list)
     await refreshFaces()
     return { ok: true, name: finalName, count: list.length }
   })
@@ -642,13 +860,15 @@ export function readGroupSim() {
  * 报出来的都是同一个归类名。
  *
  * @param {Float32Array|number[]} vector 已归一化
- * @param {{threshold?:number, bySimilarity?:boolean}} [opts]
+ * @param {{threshold?:number, bySimilarity?:boolean, splits?:Array}} [opts]
  *        threshold：识别/归类阈值（默认识别默认阈值）；
- *        bySimilarity：是否按相似度归类（与设置页「按相似度归类」开关一致）。
+ *        bySimilarity：是否按相似度归类（与设置页「按相似度归类」开关一致）；
+ *        splits：手动拆分声明；**不传则自动从库里读**（识别路径懒得每次显式传，
+ *                但库里的声明必须生效，否则"库里分开了、推送还并着"）。
  * @returns {Promise<{face:object, score:number, groupName:string}|null>}
  *          miss 情形仍回 `{face,score,miss:true,groupName}`（groupName 回样本本名）。
  */
-export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOLD, bySimilarity = true } = {}) {
+export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOLD, bySimilarity = true, splits } = {}) {
   if (!vector || !vector.length) return null
   const list = await getAllFaces()
   if (!list.length) return null
@@ -663,7 +883,8 @@ export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOL
   const hit = best.score >= threshold ? best : { face: best.face, score: best.score, miss: true }
   // 把命中的这条样本映射到它的「归类」（组代表样本的名字），
   // 让识别报告的名字与用户在人脸库看到的归类名一致。
-  const groups = groupFaces(list, { threshold, bySimilarity })
+  const splitList = Array.isArray(splits) ? splits : await getAllFaceSplits()
+  const groups = groupFaces(list, { threshold, bySimilarity, splits: splitList })
   const g = groups.find((x) => x.items.some((it) => it.id === hit.face.id))
   const groupName = g ? g.name : hit.face.name
   return { ...hit, groupName }
@@ -676,8 +897,10 @@ export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOL
  * 记录数上限本来就是 50，两两比一遍（≤1225 次 512 维点积）可忽略。
  *
  * @param {Array<{id:number,name:string,thumb?:string,createdAt?:number,updatedAt?:number,samples?:number,vector:number[]}>} rows
- * @param {{threshold?:number, bySimilarity?:boolean}} [opts]
+ * @param {{threshold?:number, bySimilarity?:boolean, splits?:Array}} [opts]
  *        threshold：相似度判据；bySimilarity=false 时只按同名的**确定**判据归类
+ *        splits：手动拆分声明（「这两个不是同一人」，见 defaults.normalizeFaceSplits）。
+ *                声明优先于一切自动判据 —— 任何会把声明两侧并进同一簇的合并都被拦下。
  * @returns {Array<{
  *   key:string, id:number, name:string, thumb:string, createdAt:number,
  *   count:number, sameName:boolean, names:string[], score:number,
@@ -688,7 +911,7 @@ export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOL
  *          但 A~C 可能没过），报平均值会把最松的那一环藏起来 —— 用户看着
  *          "平均 0.45 挺像"却不知道里面有一条只有 0.31。
  */
-export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarity = true } = {}) {
+export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarity = true, splits = [] } = {}) {
   const list = (Array.isArray(rows) ? rows : []).filter((r) => r && r.id != null)
   const n = list.length
   const nameOf = (r) => String((r && r.name) || '').trim()
@@ -702,10 +925,57 @@ export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarit
     }
     return r
   }
+  /*
+   * 每个簇当前拥有的「样本 id 集合 + 名字集合」—— 拆分闸门必须做**簇级**检查：
+   * 只拦「这一对样本」不够，A~B 被拦下后，A~C~B 的链式合并会把拆开的两人又合回去，
+   * 所以每次合并前看的是"并起来之后，簇里会不会同时出现某条声明的两侧"。
+   */
+  const clusterIds = new Array(n)
+  const clusterNames = new Array(n)
+  for (let i = 0; i < n; i++) {
+    clusterIds[i] = new Set([list[i].id])
+    const nm = nameOf(list[i])
+    clusterNames[i] = new Set(nm ? [nm] : [])
+  }
+  /*
+   * 声明拆成两张表：id 对 + 名字对，任一中招就拦。
+   *   id 对   —— 改过名（黎→老黎）也拆着；
+   *   名字对  —— 之后新录入的同名样本也自动受保护（id 对覆盖不到新样本）。
+   * 两侧名字相同的声明无意义（同名本来就会并，且 renameFaces 会让它退休）。
+   */
+  const forbidIds = []
+  const forbidNames = []
+  for (const raw of Array.isArray(splits) ? splits : []) {
+    if (!raw || typeof raw !== 'object') continue
+    const aId = Number(raw.aId) || 0
+    const bId = Number(raw.bId) || 0
+    const aName = String(raw.aName || '').trim()
+    const bName = String(raw.bName || '').trim()
+    if (aId && bId && aId !== bId) forbidIds.push([aId, bId])
+    if (aName && bName && aName !== bName) forbidNames.push([aName, bName])
+  }
+  const wouldSplit = (ra, rb) => {
+    if (!forbidIds.length && !forbidNames.length) return false
+    const ids = new Set([...clusterIds[ra], ...clusterIds[rb]])
+    const names = new Set([...clusterNames[ra], ...clusterNames[rb]])
+    for (const [a, b] of forbidIds) {
+      if (ids.has(a) && ids.has(b)) return true
+    }
+    for (const [a, b] of forbidNames) {
+      if (names.has(a) && names.has(b)) return true
+    }
+    return false
+  }
   const union = (a, b) => {
     const ra = find(a)
     const rb = find(b)
-    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb)
+    if (ra === rb) return
+    // 手动拆分优先：这一并不能把用户声明「不是同一人」的两侧并进同一簇
+    if (wouldSplit(ra, rb)) return
+    parent[Math.max(ra, rb)] = Math.min(ra, rb)
+    const root = Math.min(ra, rb)
+    clusterIds[root] = new Set([...clusterIds[ra], ...clusterIds[rb]])
+    clusterNames[root] = new Set([...clusterNames[ra], ...clusterNames[rb]])
   }
 
   for (let i = 0; i < n; i++) {
