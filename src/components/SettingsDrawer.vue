@@ -1793,6 +1793,76 @@
               </div>
             </div>
 
+            <!-- 命中修正（仅后端模式：命中样本由后端检测服务存着）
+                 已入库人脸的命中以前只发事件、不存向量 —— 想修正「认成小刘、
+                 实际是大刘」这种错判时，手里只剩一张图，没有 512 维向量可重新录入。
+                 后端现在每次命中都存下当帧向量 + 当时认定的名字，这里列出最近 20 条，
+                 确认认错后按正确名字「修正」：这条向量会作为一条正确标签的样本
+                 录进人脸库（自动同步到后端），后续同一张脸的余弦相似度就会落到
+                 对的人名下 —— 识别精准度随之提升。 -->
+            <div class="opt col" v-if="faceBackendOn">
+              <span>
+                <strong>
+                  命中修正（{{ backendFaceHits.length }}）
+                  <button class="mini-btn ghost" @click="hitReviewOpen = !hitReviewOpen">
+                    {{ hitReviewOpen ? '收起' : '管理' }}
+                  </button>
+                </strong>
+                <em>最近 {{ backendFaceHits.length }} 条命中样本（带原图）；认错了就按正确名字修正，提升后续识别精准度</em>
+              </span>
+
+              <div class="face-grid" v-if="hitReviewOpen && backendFaceHits.length">
+                <div class="face-card hit" v-for="h in backendFaceHits" :key="h.id">
+                  <img
+                    :src="h.thumb"
+                    alt="命中人脸"
+                    class="pending-thumb"
+                    :class="{ clickable: h.full }"
+                    :title="h.full ? '点击查看命中时的原图' : ''"
+                    @click="h.full && openPendingShot(h)"
+                  />
+                  <span class="hit-cur" :title="h.name || '未识别'">认成：{{ h.name || '未识别' }}</span>
+                  <span class="face-meta">相似度 {{ (h.score * 100).toFixed(0) }}%</span>
+                  <span class="face-meta">{{ h.camName || '未知通道' }}</span>
+                  <span class="face-time" v-if="h.at">{{ fmtPendingAt(h.at) }}</span>
+                  <!-- 正确名字：选库里已有的人，或选「自定义」填一个；修正 = 按这个名字把样本录进人脸库 -->
+                  <div class="face-assign" v-if="faceNameOptions.length">
+                    <FaceAssignSelect
+                      v-model="hitAssign[h.id]"
+                      :options="faceNameOptions"
+                      placeholder="选正确的人"
+                      :custom="true"
+                      custom-placeholder="自定义正确名字"
+                      :disabled="fixingHit[h.id]"
+                    />
+                  </div>
+                  <div class="face-acts">
+                    <button class="mini-btn" :disabled="fixingHit[h.id]" @click="doFixHit(h)">
+                      {{ fixingHit[h.id] ? '修正中' : '修正' }}
+                    </button>
+                    <button class="mini-btn ghost" :disabled="fixingHit[h.id]" @click="doIgnoreHit(h)">忽略</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 空态占位：把「为什么是空的」说清楚，并给一条能立刻做的动作 -->
+              <div class="pending-empty" v-else-if="hitReviewOpen">
+                <span class="pe-icon" aria-hidden="true">{{ hitEmpty.icon }}</span>
+                <div class="pe-body">
+                  <strong class="pe-title">{{ hitEmpty.title }}</strong>
+                  <em class="pe-hint">{{ hitEmpty.hint }}</em>
+                </div>
+              </div>
+
+              <div class="face-acts" v-if="hitReviewOpen">
+                <button class="mini-btn ghost" :disabled="hitRefreshing" @click="refreshBackendFaceHits">
+                  {{ hitRefreshing ? '刷新中…' : '刷新命中' }}
+                </button>
+                <span class="muted" v-if="!hitRefreshNote">来自后端检测服务</span>
+                <span class="muted pending-refresh-note" v-if="hitRefreshNote">{{ hitRefreshNote }}</span>
+              </div>
+            </div>
+
             <!-- 人脸库 -->
             <div class="opt col">
               <span>
@@ -4009,6 +4079,7 @@
           <div class="pending-shot-cap">
             <span>{{ pendingShot.camName || '未知通道' }}</span>
             <span v-if="pendingShot.at"> · {{ fmtPendingAt(pendingShot.at) }}</span>
+            <span v-if="pendingShot.name"> · 认成「{{ pendingShot.name }}」</span>
           </div>
         </div>
       </div>
@@ -4099,6 +4170,9 @@ import { camExtOn } from '../composables/useAiExtras'
 import {
   DEFAULT_FACE_THRESHOLD,
   addFace,
+  backendFaceHits,
+  backendFaceHitsError,
+  backendFaceHitsLoadedAt,
   backendPendingError,
   backendPendingFaces,
   backendPendingLoadedAt,
@@ -4107,6 +4181,7 @@ import {
   clearPendingFaces,
   currentSplits,
   deleteFaces,
+  dropBackendFaceHit,
   dropBackendPendingFace,
   enrollFromImage,
   faceLibOpen,
@@ -4116,6 +4191,8 @@ import {
   faces as faceLib,
   groupFaces,
   GROUP_SIM_KEY,
+  hitReviewOpen,
+  loadBackendFaceHits,
   loadBackendPendingFaces,
   mergeFaces,
   pendingFaces,
@@ -5290,6 +5367,138 @@ const pendingEmpty = computed(() => {
   }
 })
 
+/* ---------- 命中修正（后端链路） ----------
+ * 「命中修正」列表 = 后端检测服务每次认出库里的人时存下的样本
+ * （向量 + 当时认定的名字 + 相似度 + 原图，store.addHitFace）。
+ * 只有后端模式下有内容：前端自己跑检测时不落这份样本。 */
+const hitRefreshing = ref(false)
+const hitRefreshNote = ref('')
+const hitAssign = reactive({}) // h.id -> '' | 已知名字 | '__custom__'
+const hitCustom = reactive({}) // h.id -> 自定义正确名字文本
+const fixingHit = reactive({}) // h.id -> bool（修正进行中）
+
+/** 拉一次后端命中样本（后端模式下识别是在服务端跑的） */
+async function refreshBackendFaceHits() {
+  if (!faceBackendOn.value || hitRefreshing.value) return
+  hitRefreshing.value = true
+  hitRefreshNote.value = ''
+  try {
+    await loadBackendFaceHits(opts.backend.url)
+    if (backendFaceHitsError.value) {
+      hitRefreshNote.value = `刷新失败：${backendFaceHitsError.value}`
+    } else {
+      const n = backendFaceHits.value.length
+      const t = new Date(backendFaceHitsLoadedAt.value || Date.now()).toLocaleTimeString('zh-CN')
+      hitRefreshNote.value = `已刷新 · ${n} 条 · ${t}`
+    }
+  } finally {
+    hitRefreshing.value = false
+  }
+}
+
+/** 把下拉 + 自定义框解析成「正确名字」；'' = 还没选 */
+function hitAssignName(h) {
+  const a = hitAssign[h.id]
+  if (a === '__custom__') return (hitCustom[h.id] || '').trim()
+  return a || ''
+}
+/** 卡片被修正 / 忽略后清掉它占用的选择状态，别留 stale key */
+function clearHitAssign(h) {
+  delete hitAssign[h.id]
+  delete hitCustom[h.id]
+}
+
+/**
+ * 修正一条命中样本：把它的向量按**正确名字**录进人脸库。
+ *
+ * 为什么这能提升精准度：matchFace 是「余弦相似度找最像的样本」——
+ * 同一张脸在库里同时有「小刘」「大刘」两个标签的样本时，谁分数高就报谁。
+ * 按正确名字补一条同 vectors 的样本后，这张脸对正确名字的分数被抬上去，
+ * 后续命中就会落到对的人名下。样本录完即从后端删除（使命完成）。
+ *
+ * ⚠️ 必须走前端 addFace：前端人脸库是 source of truth，会随配置推送
+ *    自动同步覆盖后端；后端自己 addFace 会被下一次同步整体替换掉，白录。
+ */
+async function doFixHit(h) {
+  if (!h || fixingHit[h.id]) return
+  const name = hitAssignName(h)
+  if (!name) {
+    alertDialog({
+      title: '还没选名字',
+      message: '先在下拉里选这个人的正确名字（或选「自定义」填一个），再点「修正」。',
+      variant: 'default'
+    })
+    return
+  }
+  if (name === h.name) {
+    alertDialog({
+      title: '名字没变',
+      message: `选的名字和当前认成的「${h.name}」一样，修正它没有意义 —— 要提升精准度，请选成另一个人（或自定义成对的名字）。`,
+      variant: 'default'
+    })
+    return
+  }
+  fixingHit[h.id] = true
+  try {
+    const res = await addFace(h.vector, h.thumb, name, Number(opts.face.libMax) || 50)
+    if (!res.ok) {
+      alertDialog({ title: '修正失败', message: res.reason || '录入失败', variant: 'danger' })
+      return
+    }
+    // 与待录入同口径：落库成功后本地乐观移除卡片，后端删除放后台异步跑
+    clearHitAssign(h)
+    dropBackendFaceHit(opts.backend.url, h.backendId) // 故意不 await
+    delete fixingHit[h.id] // 落库即解锁，不等网络
+  } catch (e) {
+    alertDialog({
+      title: '修正失败',
+      message: '写入本地人脸库时出错：' + ((e && e.message) || e) + '\n这条样本还在列表里，可以稍后重试。',
+      variant: 'danger'
+    })
+  } finally {
+    delete fixingHit[h.id]
+  }
+}
+
+/** 忽略一条命中样本（不想修正也不想再看到它） */
+function doIgnoreHit(h) {
+  if (!h) return
+  dropBackendFaceHit(opts.backend.url, h.backendId)
+  clearHitAssign(h)
+}
+
+/**
+ * 「命中修正」为空时的占位文案。
+ * 三种"空"的原因完全不同，必须分开说：
+ *   ① 后端开着但这次没拉上 → 网络/超时问题，列表**没被清空**，点刷新重试；
+ *   ② 「命中已录入人脸时报警」关着 → 后端根本不发已知命中事件，也就没有样本；
+ *   ③ 确实还没有命中 → 说明样本从哪来、什么时候会出现。
+ */
+const hitEmpty = computed(() => {
+  if (backendFaceHitsError.value) {
+    const stale = backendFaceHitsLoadedAt.value
+      ? `（下面这份是 ${new Date(backendFaceHitsLoadedAt.value).toLocaleTimeString('zh-CN')} 拿到的）`
+      : ''
+    return {
+      icon: '⚠️',
+      title: '命中样本没能拉回来',
+      hint: `${backendFaceHitsError.value}${stale}。拉取失败不会清空已有列表，点下方「刷新命中」重试即可。`
+    }
+  }
+  if (!opts.face.eventOnKnown) {
+    return {
+      icon: '⚪',
+      title: '「命中已录入人脸时报警」是关着的',
+      hint: '打开它，识别到库里的人才会留下命中样本，也才能在这里修正「认错了人」。'
+    }
+  }
+  return {
+    icon: '📭',
+    title: '后端还没有命中样本',
+    hint: '跑检测的是后端服务，识别到库里的人后，这里会出现最近 20 条样本（带原图）。刚启动或刚录完人脸库时，稍等一会儿点「刷新命中」。'
+  }
+})
+
 /**
  * 抽屉一打开（或后端刚连上）就把状态哨兵快照拉回来。
  * 后端模式下掉线监控与定时巡检都在服务端，用户打开设置最想看的就是
@@ -5301,7 +5510,11 @@ watch(
     if (backendState.value === 'polling' && !backendWatchdog.value) refreshBackendWatchdog(opts)
     // 后端模式下未录入人脸是在服务端抓的，进「检测识别」页就把待录入队列拉回来，
     // 否则用户看到的是空列表，以为「抓到的脸没进库」
-    if (faceBackendOn.value) refreshBackendPending()
+    if (faceBackendOn.value) {
+      refreshBackendPending()
+      // 命中样本同理：后端识别到库里的人才会留下可修正的样本，进页就拉一次
+      refreshBackendFaceHits()
+    }
   },
   { immediate: true }
 )
@@ -8333,6 +8546,26 @@ function loadHidden() {
 
 .face-card.pending {
   border-color: color-mix(in srgb, var(--warn-text) 40%, transparent);
+}
+
+/*
+ * 命中样本卡片（「命中修正」）：与待录入（warn 边框）区分开 ——
+ * 这些是**已经认出是谁**的命中，列出来是为了人工复核「有没有认错」。
+ */
+.face-card.hit {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* 卡片上「当前认成的名字」：比通道名更醒目的正文色，一眼看到识别结论 */
+.hit-cur {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .face-card img {

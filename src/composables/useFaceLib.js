@@ -54,6 +54,15 @@ export const faceLibOpen = ref(false)
 export const pendingLibOpen = ref(false)
 
 /**
+ * 「命中修正」那一块展开着吗。默认**收起**，与 pendingLibOpen 对称。
+ *
+ * 放模块级的理由同 faceLibOpen：抽屉关掉再打开时展开状态要保留。
+ * 默认收起是因为命中样本一列就是十几二十张图，打开设置就全铺开会把
+ * 配置项顶下去；默认收起时标题行仍带数量（命中修正（N））。
+ */
+export const hitReviewOpen = ref(false)
+
+/**
  * 「手动拆分」声明列表展开着吗。默认**收起**：拆分声明通常只有一两条，
  * 但每行都带解除按钮和说明文案，常显会把整页配置顶下去 —— 用户嫌占位置。
  * 收起时标题行仍带数量（手动拆分（N）），不会误以为"没有"。
@@ -1214,6 +1223,93 @@ export async function dropBackendPendingFace(url, backendId) {
     }
   } catch (e) {
     /* 删不掉也只是下次又出现，不影响已录入的人脸；更不该拖住界面 */
+  }
+}
+
+/* ==================== 后端命中样本（命中修正 + 精准度优化） ====================
+ *
+ * 已入库人脸的命中以前只发事件、不存向量 —— 想修正「认成小刘、实际是大刘」
+ * 这种错判时，手里只剩一张图，没有 512 维向量可重新录入，精准度无从提升。
+ * 后端现在每次命中都存一条样本（store.addHitFace：向量 + 名字 + 相似度 + 图），
+ * 这里负责把它取回来给设置页的「命中修正」区。
+ *
+ * ⚠️ 修正为什么必须走前端 addFace：前端人脸库是 source of truth，
+ *    会通过配置推送自动同步覆盖后端（App.vue watch faces → 推 config）。
+ *    后端自己 addFace 会被下一次同步整体替换掉，白录。
+ */
+export const backendFaceHits = ref([])
+export const backendFaceHitsError = ref('')
+export const backendFaceHitsLoadedAt = ref(0)
+
+function normBackendFaceHits(base, list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((h) => h && h.id)
+    .map((h) => ({
+      id: `h${h.id}`, // 加前缀，避免与待录入条目的 id 撞号
+      backendId: Number(h.id),
+      vector: h.vector, // 后端返回普通数组，addFace 直接收
+      thumb: h.thumb || '',
+      full: h.full || '', // 命中时的整帧原图（点缩略图看大图用）
+      name: h.name || '', // 当时认定的名字（可能就是认错了的那个）
+      score: Number(h.score) || 0,
+      at: Number(h.at) || Date.now(),
+      camId: h.camId || '',
+      camName: h.camName || '',
+      fromBackend: true
+    }))
+}
+
+/** 拉一次后端命中样本（默认 20 条：设置页「命中修正」就展示最近 20 条） */
+export async function loadBackendFaceHits(url) {
+  const base = String(url || '').replace(/\/+$/, '')
+  if (!base) {
+    backendFaceHits.value = []
+    backendFaceHitsError.value = ''
+    backendFaceHitsLoadedAt.value = 0
+    return []
+  }
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(timeoutReason('命中样本', 8000)), 8000)
+    let res
+    try {
+      res = await fetch(`${base}/api/face-hits?limit=20`, { signal: ctrl.signal })
+    } finally {
+      clearTimeout(t)
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const data = await res.json()
+    backendFaceHits.value = normBackendFaceHits(base, data && data.hits)
+    backendFaceHitsError.value = ''
+    backendFaceHitsLoadedAt.value = Date.now()
+    return backendFaceHits.value
+  } catch (e) {
+    // 与待录入同口径：失败不清空已有列表（「空白」不许覆盖「非空」），只报错
+    backendFaceHitsError.value = netErrorText(e, '命中样本')
+    return backendFaceHits.value
+  }
+}
+
+/**
+ * 从后端命中样本里删掉一条（修正录入后、或忽略后调用）。
+ *
+ * 「修正」的语义：把这条向量按**正确名字**重新录进人脸库（addFace），
+ * 之后同一张脸的余弦相似度就落到对的人名下 —— 这条样本的使命完成了，删掉。
+ */
+export async function dropBackendFaceHit(url, backendId) {
+  const base = String(url || '').replace(/\/+$/, '')
+  backendFaceHits.value = backendFaceHits.value.filter((h) => h.backendId !== Number(backendId))
+  if (!base) return
+  try {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(timeoutReason('删除命中样本', 6000)), 6000)
+    try {
+      await fetch(`${base}/api/face-hit?id=${encodeURIComponent(backendId)}`, { signal: ctrl.signal })
+    } finally {
+      clearTimeout(t)
+    }
+  } catch (e) {
+    /* 删不掉也只是下次又出现，不影响已录入的人脸 */
   }
 }
 

@@ -63,6 +63,7 @@ BossMonitor 最初是一个「7 路摄像头铺满一块大屏」的网页，后
 | 人形姿态 | 17 关键点 → 跌倒 / 举手 / 蹲下 | `yolov8n-pose` |
 | 人员计数 | 按配置间隔播报当前 / 累计人数 | 复用跟踪器 |
 | 未录入人脸收集 | 认不出的脸自动进「待录入」队列，可一键录入人脸库 | — |
+| 命中修正 | 列出最近 20 条已入库命中（带原图），认错了按正确名字重新录入样本，提升后续识别精准度（仅后端模式） | — |
 
 > 四项扩展能力（人脸 / 姿态 / 区域 / 计数）有两层开关：**全局总闸**（`options.face.enabled` 等）和**通道级分流**（`cam.aiExt`）。总闸关着时，通道级即使为 true 也不会有动作 —— 这一份判定集中在 `src/config/features.js`，前后端共用，不会出现「画面上显示开了、推送里说没开」。
 >
@@ -174,7 +175,7 @@ Monitor/
 │  ├─ source.mjs               流 → JPEG 帧管道（ffmpeg；ws-flv 走 ws 灌 stdin）
 │  ├─ watchdog.mjs             状态哨兵：掉线告警 + 定时巡检
 │  ├─ notify.mjs               推送调度（转发到前端 useAlertPush）
-│  ├─ store.mjs                SQLite 存储层（事件 / 人脸库 / 待录入 / kv 游标）
+│  ├─ store.mjs                SQLite 存储层（事件 / 人脸库 / 待录入 / 命中样本 / kv 游标）
 │  ├─ face-lib.mjs             人脸库（512 维向量 + 内存缓存 + 余弦比对）
 │  ├─ imageops.mjs             纯 JS 位图 + 最小 Canvas 2D 实现（给 alignFace 用）
 │  ├─ compat.mjs               Node 兼容层（window / document / localStorage）
@@ -189,7 +190,7 @@ Monitor/
 │  ├─ logstamp.mjs             给所有 console 输出加 [HH:mm:ss] 前缀
 │  ├─ config.json              后端的落盘配置（运行时数据，可删）
 │  └─ data/                    运行期数据（已 gitignore）
-│     ├─ monitor.db            SQLite：事件 / 人脸库 / 待录入 / kv
+│     ├─ monitor.db            SQLite：事件 / 人脸库 / 待录入 / 命中样本 / kv
 │     ├─ shots/                事件快照 JPEG
 │     ├─ restart.log / .json   重启日志与台账
 │     ├─ tg-offset.json        TG 指令游标（重启不重放积压，见 5.12）
@@ -2016,6 +2017,25 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 
 > 回归：`/tmp/face-split-probe/probe.mjs` **40/40**（A 组：无拆分复现误并 / id 对拆分 / 名字对保护新样本 / 链式穿透被堵 / 装饰性改名 id 对兜底 / 两侧同名声明被忽略 / `bySimilarity:false` / 脏数据；B 组：`normalizeFaceSplits` 归一化六项；C 组：后端真实 SQLite 下 `matchFaceGrouped` 有/无声明两种推送名、陌生人 miss、空库 miss、副本隔离；D 回退验证：splits 置空后并回 1 组、后端推送名回到组代表——证明断言由声明决定，不是恒真）。
 
+### 5.53 命中修正：把「认成小刘、实际是大刘」的样本按正确名字重新录入
+
+用户诉求（原话）：**「能否对已在库命中记录进行人脸精准度优化？比如罗列出最近的 20 条命中记录（带原始图片），可以去指导修正，比如某一条命中的是小刘，但实际上是大刘，能否支持去手动修正并提升识别精准度。」**
+
+**根因：已入库命中以前不存向量。** 未录入的脸走 `store.addPendingFace`（向量 + 缩略图 + 整帧都落库），而**已知命中只发事件、什么都不存** —— 设置页里想翻出「这条明明认错了」的记录时，手里只剩一张图，没有 512 维向量，「修正」也就无从谈起（离线重提图链路太长且未必复现）。于是这次做的第一件事是把缺口补上：命中时把当帧向量一并落库。
+
+**功能与数据链**
+
+- **落库**（`server/store.mjs` 新表 `hit_faces` + `server/analyzer.mjs` 已知命中分支）：每次命中通过 `eventOnKnown` + 冷却后、`send()` 之前，`store.addHitFace({ vector, thumb, full, name, score, at, camId, camName })` —— 与待录入**同口径按人去重**（`pendingDedupeTarget`：同一个人窗内反复命中只刷一条，名字/相似度更新成最新一次），并 `pruneHitFaces(60)` 滚动清理（列表只展示最近 20 条，60 条留足余量）。
+- **接口**：`GET /api/face-hits?limit=20`（`thumb` / `full` 是 dataURL，与待录入同口径直通，不拼 URL）+ `DELETE /api/face-hit?id=`。
+- **前端**（`useFaceLib.js` 的 `loadBackendFaceHits` / `dropBackendFaceHit` + 设置 → 检测识别 → 「命中修正」区）：列出最近 20 条（人脸图可点开看整帧原图 + 当前认成的名字 + 相似度 + 通道 + 时间），下拉选**正确的人**（或自定义名字）→ 点「修正」；也有「忽略」。
+- **为什么这能提升精准度**：`matchFace` 是「余弦相似度找最像的样本」——同一张脸在库里同时有「小刘」「大刘」两个标签的样本时，谁分数高就报谁。按正确名字补一条同 vectors 的样本后，这张脸对正确名字的分数被抬上去，**后续命中就会落到对的人名下**。样本录完即从后端删除（使命完成）。
+- **必须走前端 `addFace`**：前端人脸库是 source of truth，会随配置推送自动同步覆盖后端；后端自己 `addFace` 会被下一次同步整体替换掉，白录（与 5.52 的拆分声明走同一条同步链）。
+- 选的名字与当前认成的一样时明确拒绝并说明（「修正它没有意义」），不做无声的无操作。
+
+**空态把「为什么空」说清楚**（沿用 5.26 的约定，三种空分开讲）：拉取失败（列表不清空、给数据时间戳）/「命中已录入人脸时报警」关着（后端根本不发已知命中事件，没有样本）/ 确实还没有命中（说明样本何时出现）。
+
+> 回归：`/tmp/hit-faces-probe/` —— 存储层单元探针 **27/27**（新增字段 / 按人去重窗内窗外 / 不同人各存各的 / 空向量无图拦下 / 滚动清理留最新 / 单删 / 与待录入两表互不干扰）；HTTP 端点探针 **21/21**（真起服务 + 隔离 `MONITOR_DATA_DIR`：空列表 → 直插一行 → dataURL 直通与向量还原 → 删除回空 → 缺 id 400 → 待录入/人脸库端点回归 → 端口释放）。回退验证：把 `addHitFace` 改成不落库后，单元探针立即失败（断言由功能决定，非恒真）。
+
 ---
 
 ## 六、各端运行方式
@@ -2349,7 +2369,9 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 | `POST` | `/api/read` | 已读回写（保持前后端一致） |
 | `POST` | `/api/shot` | 补图 / 人脸信息回写 |
 | `GET` | `/api/pending-faces` | 未录入人员队列 |
+| `GET` | `/api/face-hits` | **命中样本队列**（最近 20 条已入库命中：向量 + 当帧认定的名字 + 相似度 + 原图，供「命中修正」，见 5.53） |
 | `GET` `DELETE` | `/api/faces` · `/api/pending-face` | 人脸库查询 / 删除待录入单条 |
+| `DELETE` | `/api/face-hit` | 删除单条命中样本（修正录入后 / 忽略） |
 | `GET` | `/api/db/export` | **导出运行数据库**：在线热备当前 `monitor.db`（含 WAL 未落盘写入）成自包含 SQLite 文件流式下载，文件名带时间戳。裸 LAN 接口，与 `/api/config` 同规格（要收紧就给整组裸接口统一加网关）。前端在「配置方案」页点「导出运行数据库」触发，**仅后端模式可用**（数据库在后端服务器上） |
 | `GET` | `/shots/*` | 事件快照 JPEG（带防目录穿越校验） |
 | `*` | `/dingtalk-robot/**` | 反向代理 → `oapi.dingtalk.com` |
