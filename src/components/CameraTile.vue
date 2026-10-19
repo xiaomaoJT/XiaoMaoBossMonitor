@@ -229,6 +229,39 @@
 
     <!-- 底部操作条：只放操作按钮，低频操作收进「更多」 -->
     <div class="bar bottom" v-if="status !== 'idle' || decode">
+      <!--
+        盲视模式放在左下角（常用）：一键隐藏画面、检测照常运行。
+        图标表示「点下去会发生什么」：现在显示着 → 眼睛划掉（隐藏）；已盲视 → 眼睛（恢复）。
+      -->
+      <button
+        class="icon-btn"
+        :class="{ active: blindOn }"
+        :title="blindOn ? '关闭盲视模式（显示画面）' : '开启盲视模式（隐藏画面，检测照常运行）'"
+        @click.stop="toggleBlind"
+      >
+        <svg v-if="blindOn" viewBox="0 0 24 24" width="15" height="15">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+          />
+          <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" width="15" height="15">
+          <path
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+          />
+          <line x1="1" y1="1" x2="23" y2="23" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+        </svg>
+      </button>
       <span class="drag-handle" title="按住拖拽可调整位置" @pointerdown.stop="armDrag">
         <svg viewBox="0 0 24 24" width="15" height="15">
           <path fill="currentColor" d="M9 5.5h2v2H9zM13 5.5h2v2h-2zM9 11h2v2H9zM13 11h2v2h-2zM9 16.5h2v2H9zM13 16.5h2v2h-2z" />
@@ -345,10 +378,6 @@
             </button>
             <button v-if="zoneCount" class="mi" @click.stop="pickMore('zone-clear')">
               <span class="mi-ico">⌫</span> 清除全部区域
-            </button>
-            <button class="mi" @click.stop="pickMore('blind')">
-              <span class="mi-ico" :class="{ on: blindOn }">◉</span> 盲视模式
-              <em>{{ blindOn ? '画面已隐藏' : '' }}</em>
             </button>
             <button class="mi" @click.stop="pickMore('fullscreen')">
               <span class="mi-ico">⛶</span> 全屏显示
@@ -537,7 +566,7 @@ function pickMore(kind) {
     emit('zone-clear', { id: props.cam.id })
     return
   }
-  if (kind === 'blind') return toggleBlind()
+  // 盲视模式已直接放到底部操作条左下角（常用），不再经「更多」菜单
   if (kind === 'fullscreen') return toggleFullscreen()
   if (kind === 'close') return emit('close', props.index)
 }

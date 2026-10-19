@@ -262,9 +262,11 @@ export class Tracker {
           at: t,
           box: { ...tr.box },
           dwellMs: st.since ? t - st.since : 0,
-          gone: true
+          gone: true,
+          // 虚拟区域（人员流向的「画面全区域」）：只产事件，不计入人员计数
+          virtual: !!zone.virtual
         })
-        this.stats.totalOut += 1
+        if (!zone.virtual) this.stats.totalOut += 1
       }
     }
   }
@@ -294,9 +296,11 @@ export class Tracker {
             trackId: tr.id,
             at: t,
             box: { ...tr.box },
-            score: tr.score
+            score: tr.score,
+            // 虚拟区域（人员流向的「画面全区域」）：只产事件，不计入人员计数
+            virtual: !!zone.virtual
           })
-          this.stats.totalIn += 1
+          if (!zone.virtual) this.stats.totalIn += 1
         }
       } else if (!inNow && st.inside) {
         /* ---- 离开 ---- */
@@ -312,9 +316,10 @@ export class Tracker {
             trackId: tr.id,
             at: t,
             box: { ...tr.box },
-            dwellMs
-          })
-          this.stats.totalOut += 1
+          dwellMs,
+          virtual: !!zone.virtual
+        })
+        if (!zone.virtual) this.stats.totalOut += 1
         }
       }
 

@@ -2164,6 +2164,55 @@ export const FLOW_WINDOW_DEFAULT = 120
 export const FLOW_MAX_NODES = 8
 
 /**
+ * 流向节点的「画面全区域」虚拟区域 id。
+ *
+ * 为什么需要它：区域事件本来只能由**圈选过的区域**产生，没圈区域的摄像头
+ * 永远产不出进出事件 —— 用户只想「这人离开了门口这幅画面」时，被迫先圈一个
+ * 区域，多一步且容易圈歪。选了这一项后，跟踪器会注入一个铺满全画面的虚拟
+ * 区域（rect = 0,0,1,1）：轨迹**出现**即 enter、**消失**即 exit（gone），
+ * 语义正好是「进入 / 离开这幅画面」。
+ *
+ * ⚠️ 虚拟区域**只喂人员流向引擎，不当报警**（不进事件面板、不推送、不计入
+ *    人员计数统计）—— 见 useTracker 的 virtual 标记与 useAiExtras / analyzer 的过滤。
+ * ⚠️ id 用 '*'：真实区域 id 是 `zone-...` 形态，永不撞车。
+ */
+export const FLOW_FULL_ZONE = '*'
+/** 该选项的统一展示名（UI 下拉 / 状态回执 / 事件文案共用一份） */
+export const FLOW_FULL_ZONE_NAME = '全区域'
+
+/** 某节点区域是否为「画面全区域」 */
+export function isFlowFullZone(zoneId) {
+  return zoneId === FLOW_FULL_ZONE
+}
+
+/**
+ * 节点区域展示名：全区域 / 已绘制区域名 / 空。
+ *  UI、/status 回执、flow 事件文案都从这里取，避免同一区域三个叫法。
+ */
+export function flowZoneName(cam, zoneId) {
+  if (isFlowFullZone(zoneId)) return FLOW_FULL_ZONE_NAME
+  if (!zoneId) return ''
+  const z = cam && Array.isArray(cam.zones) ? cam.zones.find((zz) => zz && zz.id === zoneId) : null
+  return z ? z.name || zoneId : zoneId
+}
+
+/**
+ * 造一个铺满全画面的虚拟区域（跟踪器用）。
+ * `virtual: true` 是硬约定：Tracker 据此跳过计数统计，useAiExtras / analyzer
+ * 据此跳过报警上抛 —— 它只服务人员流向。
+ */
+export function fullFrameZone() {
+  return {
+    id: FLOW_FULL_ZONE,
+    name: FLOW_FULL_ZONE_NAME,
+    rect: { x: 0, y: 0, w: 1, h: 1 },
+    enterExit: true,
+    minDwellMs: 0,
+    virtual: true
+  }
+}
+
+/**
  * 把时间窗夹到 [FLOW_WINDOW_MIN, FLOW_WINDOW_MAX]。
  * 「没配」与「配成 0」分开：null/undefined/''/[]/{} 视为没配落回默认；
  * 显式 0 或负数按规则夹到下限 1（与 clampDigestMinutes 同思路）。
@@ -2268,6 +2317,8 @@ export function normalizeFlows(opts) {
  *      且该区域必须「开启进出检测」—— 否则 tracker 根本不会产生 enter/exit 事件，
  *      流向引擎拿不到原料，会静默失效。
  * path 支持多跳：每个节点都要有摄像头 + 在该摄像头绘制的区域，且相邻节点不能相同。
+ * 例外：区域选「画面全区域」（FLOW_FULL_ZONE）时不要求圈选 —— 虚拟区域铺满全画面，
+ * 轨迹出现即入场、消失即出场；前提只要求该摄像头参与区域分析。
  *
  * ⚠️ `valid` 同时包含 ① 与 ②：前提不满足时同样算「未生效」，
  *    这样既不会被 hasActiveFlows 误判为"在跑"，也能在 UI / /status 明确报出。
@@ -2311,14 +2362,16 @@ export function flowValid(flow, cameras) {
       nodeErrors.push('摄像头不存在')
       continue
     }
-    const z = zoneOf(cam, node.zone)
-    if (!z) {
+    // 「画面全区域」是虚拟区域：不要求圈选，只要求这一路参与区域分析（跟踪器才跑区域判定）
+    const full = isFlowFullZone(node.zone)
+    const z = full ? null : zoneOf(cam, node.zone)
+    if (!full && !z) {
       errors.push(`第 ${i + 1} 个节点：区域未在该摄像头绘制`)
       nodeErrors.push('区域未绘制')
       continue
     }
     nodeErrors.push('')
-    // 检测前提：摄像头必须参与区域分析，且该区域必须开启「进出」
+    // 检测前提：摄像头必须参与区域分析（虚拟区域没有「进出检测」开关，永远开着）
     if (cam.aiExt && cam.aiExt.zone === false) {
       prereqIssues.push({
         nodeIndex: i,
@@ -2327,7 +2380,7 @@ export function flowValid(flow, cameras) {
         type: 'cam-zone-off',
         text: `第 ${i + 1} 个节点：摄像头「${cam.name || cam.id}」未开启区域监测`
       })
-    } else if (z.enterExit === false) {
+    } else if (z && z.enterExit === false) {
       prereqIssues.push({
         nodeIndex: i,
         cam: node.cam,
@@ -2366,6 +2419,7 @@ export function flowValid(flow, cameras) {
  *
  * 原地改 cameras（只动已存在且确为 false 的摄像头 / 区域，绝不凭空造区域），
  * 返回本次实际发生的改动清单（便于日志 / 回执）。
+ * 区域为「画面全区域」的节点只保活摄像头级开关（虚拟区域没有自己的进出开关）。
  *
  * @param {Array} flows  options.flows
  * @param {Array} cameras  摄像头列表（会被原地修改）

@@ -15,7 +15,7 @@
  * ⚠️ 本模块**不碰任何图像 / 推送 / 渲染**——只做「多路本地进出事件按身份 + 时间窗串起来」。
  *    截图由调用方在 record 时传入 `shot`（字符串），引擎只存不取。
  */
-import { flowValid, clampFlowWindowSec } from '../config/defaults.js'
+import { flowValid, clampFlowWindowSec, isFlowFullZone } from '../config/defaults.js'
 
 /** 进行中的链路硬上限（与 useAlertPush 的 BUFFER_CAP 同源思路） */
 export const FLOW_ENGINE_MAX = 2000
@@ -268,6 +268,24 @@ export function createFlowEngine() {
     return state.flows.some((f) => flowValid(f, state.cameras).valid)
   }
 
+  /**
+   * 这一路是否有「已启用且有效」的流向节点选了「画面全区域」。
+   * 集成层（useAiExtras / analyzer 的 syncZones）据此给跟踪器注入铺满全画面的
+   * 虚拟区域 —— 没圈选区域的摄像头也要能产进出事件，否则流向配了也是静默失效。
+   * 与 hasActiveFlows 同一口径：无效的流向不注入（它的节点事件本来也不会被匹配）。
+   */
+  function hasFullZoneNode(camId) {
+    if (!camId) return false
+    return state.flows.some(
+      (f) =>
+        !!f &&
+        f.enabled &&
+        Array.isArray(f.path) &&
+        f.path.some((n) => n && n.cam === camId && isFlowFullZone(n.zone)) &&
+        flowValid(f, state.cameras).valid
+    )
+  }
+
   /** 清空缓冲（探针 / 重置用） */
   function reset() {
     progress.clear()
@@ -284,6 +302,7 @@ export function createFlowEngine() {
     flowStats,
     getCameras,
     hasActiveFlows,
+    hasFullZoneNode,
     reset,
     _state: state
   }

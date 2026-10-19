@@ -37,6 +37,7 @@ import {
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
 import { pendingDedupeSec } from './vecMatch.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone } from '../config/defaults.js'
 
 /** COCO 17 关键点下标 */
 const KP = {
@@ -92,8 +93,13 @@ function emitFlowEvent(engine, m, ctx, emit) {
   const f = m.flow
   const cams = engine.getCameras() || []
   const camOf = (id) => cams.find((c) => c && c.id === id)
+  // 「画面全区域」没有真实区域可查，展示名走 defaults 的统一口径
   const zoneNameOf = (cam, zid) =>
-    cam && Array.isArray(cam.zones) ? (cam.zones.find((z) => z && z.id === zid) || {}).name || zid : zid
+    isFlowFullZone(zid)
+      ? FLOW_FULL_ZONE_NAME
+      : cam && Array.isArray(cam.zones)
+        ? (cam.zones.find((z) => z && z.id === zid) || {}).name || zid
+        : zid
   const route = (Array.isArray(f.path) ? f.path : []).map((node) => {
     const cam = camOf(node.cam)
     return {
@@ -207,12 +213,18 @@ export function useAiExtras(options) {
      * 通道级「区域规则」关掉时，这一路按"没有区域"处理。
      * 注意跟踪器本身照常跑 —— 它是零成本的，而且人脸的"同一个人不重复提特征"
      * 就是靠它的轨迹连续性，不能因为关了区域规则就一起停掉。
+     *
+     * 「画面全区域」虚拟区域：这一路若有生效流向节点选了它，就注入一个铺满
+     * 全画面的区域（rect 0,0,1,1）—— 没圈选区域的摄像头也要能产进出事件
+     * （轨迹出现 = enter、消失 = exit），否则流向配了也是静默失效。
+     * 虚拟区域带 virtual 标记：只喂流向引擎，不当报警、不计入人员计数。
      */
     const list = camExtOn(cam, 'zone') ? (cam && cam.zones) || [] : []
-    const key = JSON.stringify(list.map((z) => [z.id, z.rect, z.enterExit, z.loiter, z.loiterSec, z.loiterRadius]))
+    const zones = getFlowEngine().hasFullZoneNode(cam && cam.id) ? [...list, fullFrameZone()] : list
+    const key = JSON.stringify(zones.map((z) => [z.id, z.rect, z.enterExit, z.loiter, z.loiterSec, z.loiterRadius, !!z.virtual]))
     if (key === zonesKey) return
     zonesKey = key
-    tracker.setZones(list)
+    tracker.setZones(zones)
   }
 
   function reset() {
@@ -276,7 +288,8 @@ export function useAiExtras(options) {
       }
       // 报警事件：一定进 zoneEvents（原行为），并上抛报警
       // 报警关了的走入 / 走出：仅当「人员流向」开着时进 zoneEvents 供 2.5 配对，但**不报警**
-      if (!alarmOff) {
+      // 虚拟区域（画面全区域）事件：只喂流向引擎，绝不作为报警上抛（否则每人出现一次就刷一条）
+      if (!alarmOff && !evt.virtual) {
         zoneEvents.push(out)
         emit(out)
       } else if (flowsOn && (isEnter || isExit)) {

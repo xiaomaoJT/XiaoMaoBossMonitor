@@ -2240,11 +2240,16 @@
             「谁从哪去了哪」。支持多跳（A→B→C…）—— 点「加途经点」可串更长。
             默认靠人脸归组名判定身份（几乎零额外算力）；也可放宽到不要求人脸。
             属于轻量离散相遇判定，不是实时轨迹画线。
+            <br />
+            每个节点的区域既可以圈选，也可以选<b>「画面全区域」</b>（整幅画面的出现 / 离开即进出）。
           </p>
           <p class="hint tight">
             保存流向会自动开启相关摄像头的「区域监测」与相关区域的「进出检测」——
             这是流向的物理前提（流向本质就是检测某人进出这些区域）。你仍可单独在区域规则里关掉
             「走出 / 走入区域」<b>报警</b>，不影响流向；但若手动关掉某个流向节点的「进出检测」，这里会标红「🔴 前提未满足」。
+            <br />
+            不想圈区域也可以：节点区域选<b>「画面全区域」</b>——不圈选，这一路画面的「有人出现 / 人离开」即进出
+            （离开判定依赖轨迹消失，通常有几秒延迟；该选项只服务流向，不会当成走进 / 走出报警，也不计入人员计数）。
           </p>
 
           <div class="flow-head">
@@ -2296,8 +2301,9 @@
                     :options="zoneOptions(node.cam)"
                     :placeholder="`第 ${ni + 1} 个节点区域`"
                   />
-                  <p class="hint tight" v-if="node.cam && !zoneOptions(node.cam).length">
-                    该摄像头还没有区域。请到对应画面的「更多操作 → 进出 / 徘徊区域」（图标 ▤）拖拽圈选，不是「圈选检测区域」（图标 ▢）。
+                  <p class="hint tight" v-if="node.cam && !camHasZones(node.cam)">
+                    该摄像头还没有圈选区域。可以直接选<b>「画面全区域」</b>（整幅画面的出现 / 离开即进出，无需圈选）；
+                    要更精细的节点，请到对应画面的「更多操作 → 进出 / 徘徊区域」（图标 ▤）拖拽圈选，不是「圈选检测区域」（图标 ▢）。
                   </p>
                 </div>
                 <div v-if="ni < flow.path.length - 1" class="flow-arrow">→</div>
@@ -4212,7 +4218,9 @@ import {
   FLOW_WINDOW_MIN,
   FLOW_WINDOW_MAX,
   FLOW_WINDOW_DEFAULT,
-  FLOW_MAX_NODES
+  FLOW_MAX_NODES,
+  FLOW_FULL_ZONE,
+  FLOW_FULL_ZONE_NAME
 } from '../config/defaults'
 import { SECRET_SCOPE } from '../config/auth'
 import { secretDigest, secretMatches } from '../composables/sha256'
@@ -4414,11 +4422,22 @@ const flowCams = computed(() =>
   Array.isArray(props.cameras) && props.cameras.length ? props.cameras : cams.value
 )
 
-/** 某摄像头下的区域下拉项；没选摄像头时给空数组（SelectField 显示占位文字） */
+/**
+ * 某摄像头下的区域下拉项；没选摄像头时给空数组（SelectField 显示占位文字）。
+ * 「画面全区域」永远在第一位：不圈选也能配流向 —— 整幅画面的「出现 / 离开」即进出。
+ */
 function zoneOptions(camId) {
   const cam = flowCams.value.find((c) => c.id === camId)
-  if (!cam || !Array.isArray(cam.zones)) return []
-  return cam.zones.map((z) => ({ value: z.id, label: z.name || z.id }))
+  if (!cam) return []
+  const full = { value: FLOW_FULL_ZONE, label: `画面全区域（不圈选，整幅画面）` }
+  const zones = Array.isArray(cam.zones) ? cam.zones.map((z) => ({ value: z.id, label: z.name || z.id })) : []
+  return [full, ...zones]
+}
+
+/** 该摄像头是否真的圈过区域（决定「去圈选」提示是否显示；全区域选项不算） */
+function camHasZones(camId) {
+  const cam = flowCams.value.find((c) => c.id === camId)
+  return !!(cam && Array.isArray(cam.zones) && cam.zones.length)
 }
 
 /** 新增一条默认流向（默认 2 节点：起点 → 终点） */
