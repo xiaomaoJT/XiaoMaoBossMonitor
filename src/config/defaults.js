@@ -868,6 +868,19 @@ export const HIDDEN_OPTIONS = {
        * ⚠️ 对 kind='silence'（静默开始提醒）而言，它就是"静默开始时要不要单独推一条"。
        */
       throughSilence: true,
+      /**
+       * 「结算汇总只走关键事件」（缺省 false = 两条都发，与老版本一致）。
+       *
+       * 场景：关键事件机器人与日常推送是两个机器人，免打扰结束后两边各推一条
+       * **内容相同**的结算汇总（用户原话："两个机器人会各推一条结算汇总，
+       * 但内容其实是一样的"）。打开后，这一端的日常推送不再发结算汇总，
+       * 只由这个关键事件机器人单独发（它本来就有一条；"免打扰已结束"短提醒
+       * 内容不同、不算重复，仍照发）。
+       * ⚠️ 只有这个关键事件机器人确实发得出去才让位（启用 + 勾了「静默汇总」
+       *    + Webhook 已配 + 静默期放行），否则日常推送照发 —— 开关开着而
+       *    机器人没配好时，这条汇总不能谁都收不到。
+       */
+      summaryOnly: false,
       /* ---- @ 设置（同样全功能） ---- */
       atAll: false,
       /** 手机号，多个用英文逗号分隔 */
@@ -997,6 +1010,12 @@ export const HIDDEN_OPTIONS = {
        * critical.throughSilence **完全一致**（见那边的说明），缺省同样为开。
        */
       throughSilence: true,
+      /**
+       * 「结算汇总只走关键事件」（缺省 false = 两条都发）。语义与钉钉
+       * critical.summaryOnly 完全一致：免打扰结束后这一端的日常推送不再发
+       * 结算汇总，只由这个关键事件机器人单独发；没配好时日常推送仍兜底。
+       */
+      summaryOnly: false,
       /** 额外接收人（Telegram 用户 id，纯数字） */
       chatIds: []
     }
@@ -1100,6 +1119,12 @@ export const HIDDEN_OPTIONS = {
       events: { silence: true, summary: true, face: true, pending: true },
       /** 静默时段也允许推送（缺省/显式 true = 允许）。语义与钉钉 critical.throughSilence 一致 */
       throughSilence: true,
+      /**
+       * 「结算汇总只走关键事件」（缺省 false = 两条都发）。语义与钉钉
+       * critical.summaryOnly 完全一致：免打扰结束后这一端的日常推送不再发
+       * 结算汇总，只由这个关键事件机器人单独发；没配好时日常推送仍兜底。
+       */
+      summaryOnly: false,
       /* ---- @ 设置（同样全功能） ---- */
       atAll: false,
       /** 成员手机号，多个用英文逗号分隔 */
@@ -1564,6 +1589,61 @@ export function normalizeFaceBlocks(list) {
  */
 export function isFlowCritical(rec) {
   return isFlowEvent(rec) && !!(rec && rec.asCritical)
+}
+
+/* ----------------------------------------------------------------------------
+ * 关键事件三端（钉钉 critical / 企微 critical / TG directPush）的共用判定
+ * ----------------------------------------------------------------------------
+ * 「哪几类关键事件发不发」这件事在三个地方各写一遍就会漂：执行层三处发送前置
+ * 检查、设置页开关态、免打扰结束的「结算汇总接管」。全部收口到这两个纯函数。
+ */
+
+/**
+ * 关键事件某一端「这类事件配置层面放不放行」—— 全项目唯一判定。
+ *
+ * 与 useTelegram.directPushEventOn 逐字同语义（enabled + events[kind] !== false），
+ * 再加上三端共有的 throughSilence：静默时段且该端显式关掉 → 不放行。
+ *
+ * ⚠️ 放行不代表发得出去：钉钉 / 企微还要 Webhook 非空，TG 还要机器人配好 +
+ *    私聊接收人非空。那些是传输层就绪度，由调用方算好传进来（见 ends.sends）。
+ *
+ * @param {object} blk 关键事件配置块（dingtalk.critical / wecom.critical / telegram.directPush）
+ * @param {string} kind 'silence' | 'summary' | 'face' | 'pending' | 'flow'
+ * @param {{silentBlocked?:boolean}} [ctx] 此刻是否处于静默时段（全局 ∨ 该通道）
+ * @returns {boolean}
+ */
+export function criticalEndSends(blk, kind, { silentBlocked = false } = {}) {
+  if (!blk || blk.enabled !== true) return false
+  const ev = blk.events || {}
+  if (ev[kind] === false) return false
+  if (silentBlocked && blk.throughSilence === false) return false
+  return true
+}
+
+/**
+ * 免打扰结束「结算汇总」的日常渠道接管表（"结算汇总只走关键事件"开关）。
+ *
+ * 用户诉求：关键事件与日常推送是两个机器人，免打扰结束后各推一条**内容相同**
+ * 的结算汇总。开关打开后这一端的日常推送不再发，由关键事件机器人单独发
+ * （它本来就有一条）；缺省关 = 老行为两条都发。
+ *
+ * ⚠️ 只有关键事件这一端确实发得出去（ends[id].sends，由引擎算好凭据/接收人
+ *    就绪度后传入）才接管 —— 开关开着而机器人没配好时，日常推送必须照发，
+ *    否则这条汇总谁都收不到（"空白不许覆盖非空"的同一规矩）。
+ *
+ * @param {string[]} ids 日常推送本轮目标渠道（restrictIds 的结果，如 ['ding','tg']）
+ * @param {Object<string,{blk:object, sends:boolean}>} ends 各端关键事件状态
+ * @returns {Set<string>} 被接管（日常推送不再发）的渠道 id 集合
+ */
+export function takenOverSummaryChannels(ids, ends) {
+  const taken = new Set()
+  for (const id of Array.isArray(ids) ? ids : []) {
+    const e = (ends || {})[id]
+    if (!e || !e.sends) continue
+    if (!e.blk || e.blk.summaryOnly !== true) continue
+    taken.add(id)
+  }
+  return taken
 }
 
 /**

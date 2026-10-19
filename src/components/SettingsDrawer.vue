@@ -2943,6 +2943,24 @@
             ></span>
           </label>
 
+          <!--
+            「结算汇总只走关键事件」—— 免打扰结束后，日常推送和这个关键事件机器人
+            会各推一条**内容相同**的结算汇总。缺省关 = 两条都发（老行为）；打开后
+            日常推送不再发，只由这个机器人单独发（"免打扰已结束"短提醒内容不同，
+            仍照发）。这个机器人没配好时，日常推送仍会兜底发这条。
+          -->
+          <label class="opt">
+            <span>
+              <strong>结算汇总只走关键事件</strong>
+              <em>打开后：免打扰结束的结算汇总不再走日常推送，只由这个关键事件机器人发（没配好时日常推送仍兜底）</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: critSummaryOnly('dingtalk') }"
+              @click="toggleCritSummaryOnly('dingtalk')"
+            ></span>
+          </label>
+
           <div class="opt">
             <span>
               <strong>消息格式</strong>
@@ -3193,6 +3211,22 @@
                   class="switch"
                   :class="{ on: critThroughSilence('tg') }"
                   @click="toggleCritThroughSilence('tg')"
+                ></span>
+              </label>
+
+              <!--
+                「结算汇总只走关键事件」语义与钉钉 / 企微那两处完全一致：
+                免打扰结束后 TG 群（日常推送）不再发结算汇总，只由私聊这条路发。
+              -->
+              <label class="opt">
+                <span>
+                  <strong>结算汇总只走关键事件</strong>
+                  <em>打开后：免打扰结束的结算汇总不再走 TG 日常推送，只由私聊推给接收人（没配好时日常推送仍兜底）</em>
+                </span>
+                <span
+                  class="switch"
+                  :class="{ on: critSummaryOnly('tg') }"
+                  @click="toggleCritSummaryOnly('tg')"
                 ></span>
               </label>
 
@@ -3810,6 +3844,19 @@
               class="switch"
               :class="{ on: critThroughSilence('wecom') }"
               @click="toggleCritThroughSilence('wecom')"
+            ></span>
+          </label>
+
+          <!-- 「结算汇总只走关键事件」语义与钉钉那处完全一致 -->
+          <label class="opt">
+            <span>
+              <strong>结算汇总只走关键事件</strong>
+              <em>打开后：免打扰结束的结算汇总不再走日常推送，只由这个关键事件机器人发（没配好时日常推送仍兜底）</em>
+            </span>
+            <span
+              class="switch"
+              :class="{ on: critSummaryOnly('wecom') }"
+              @click="toggleCritSummaryOnly('wecom')"
             ></span>
           </label>
 
@@ -5826,6 +5873,31 @@ function toggleCritThroughSilence(which) {
   const blk = critBlockOf(which)
   if (!blk) return
   blk.throughSilence = blk.throughSilence === false
+}
+
+/**
+ * 「结算汇总只走关键事件」（summaryOnly）是否开启。
+ *
+ * 场景：关键事件机器人与日常推送是两个机器人，免打扰结束后两边各推一条
+ * **内容相同**的结算汇总（用户原话："两个机器人会各推一条结算汇总，但内容
+ * 其实是一样的"）。缺省 false = 两条都发（与老版本一致）；打开后这一端的
+ * 日常推送不再发，只由这个关键事件机器人单独发（"免打扰已结束"短提醒内容
+ * 不同、不算重复，仍照发）。
+ * ⚠️ 与执行层 takenOverSummaryChannels 同一语义：**只有显式 true 才算开**；
+ *    且只有这个机器人确实发得出去（启用 + 勾了静默汇总 + 配了 Webhook）才
+ *    真正让位，没配好时日常推送仍会兜底发这条。
+ *
+ * @param {string} which 'dingtalk' | 'wecom' | 'tg'
+ */
+function critSummaryOnly(which) {
+  const blk = critBlockOf(which)
+  return !!blk && blk.summaryOnly === true
+}
+
+function toggleCritSummaryOnly(which) {
+  const blk = critBlockOf(which)
+  if (!blk) return
+  blk.summaryOnly = blk.summaryOnly !== true
 }
 
 /* ==================== AI 扩展分析 ==================== */

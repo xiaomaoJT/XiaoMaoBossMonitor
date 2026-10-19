@@ -40,6 +40,7 @@ import {
   camSilentState,
   channelCredReady,
   clampDigestMinutes,
+  criticalEndSends,
   digestCfgOf,
   digestIntervalLabel,
   isWallAlignedInterval,
@@ -47,12 +48,12 @@ import {
   isFlowCritical,
   matchSilentSlotAt,
   parseSilentSlots,
-  slotBoundaryAt
+  slotBoundaryAt,
+  takenOverSummaryChannels
 } from '../config/defaults.js'
 import {
   buildTelegramCaption,
   buildTelegramMergedText,
-  directPushEventOn,
   directPushRecipients,
   normalizeTelegram,
   sendTelegramAlarm,
@@ -855,22 +856,55 @@ export function useAlertPush(options, hooks = {}) {
     const dropped = takeDropped(silentBuffer)
     const toSend = addDroppedNote(summary, dropped)
 
-    const res = await sendScoped('global', toSend, ids, () => silentBuffer.unshift(...buf))
-    const sent = res.sent
+    /*
+     * 「结算汇总只走关键事件」接管（summaryOnly，缺省关 = 老行为两条都发）。
+     * 用户原话：两个机器人各推一条结算汇总、内容其实是一样的。开关打开后，
+     * 这一端的日常推送不再发结算汇总，只由关键事件机器人单独发（它本来就有一条；
+     * 上面那条"免打扰已结束"短提醒内容不同、不算重复，仍由关键事件照发）。
+     * ⚠️ 只有关键事件这一端确实发得出去才让位（silentSummaryTakeover 里判
+     *    凭据 / 接收人就绪度），否则开关开着而机器人没配好，汇总会谁都收不到。
+     */
+    const taken = silentSummaryTakeover(ids)
+    const dailyIds = ids.filter((id) => !taken.has(id))
+    // 被接管渠道名下的「上轮失败备注 / 待补发」旧账一并作废：否则开关刚打开，
+    // 下一轮 sendScoped 开头的补发逻辑还会把上一轮的旧汇总补发给已让位的日常群
+    dropTakenFailState('global', taken, dailyIds.length)
+
+    let sent = []
+    if (dailyIds.length) {
+      const res = await sendScoped('global', toSend, dailyIds, () => silentBuffer.unshift(...buf))
+      sent = res.sent
+    } else {
+      /*
+       * 全接管：日常推送一条不发。状态仍要落盘 —— 否则 localStorage 里还是
+       * 含这批事件的旧缓冲，进程重启后「停机期间窗口已结束」的兜底会把它们
+       * 再汇总发一次（sendScoped 内部本来就会 markDirty，这里补上）。
+       */
+      markDirty()
+    }
     if (!opts.test) {
-      ids.forEach((id) => {
+      /*
+       * 限流游标只给**真的收到了汇总**的渠道记一笔：被接管（summaryOnly）的
+       * 渠道这条路径上一条都没发，记了反而白白占掉它的额度、还把"实时推送
+       * 已恢复"往后拖。
+       */
+      dailyIds.forEach((id) => {
         const st = chState[id]
         if (st) {
           st.windowTs.push(endMs)
           st.lastGlobalAt = endMs
         }
       })
-      if (sent.length) {
-        notify(
-          buf.length
-            ? `静默结束提醒已推送（含 ${buf.length} 条汇总 · ${sent.join(' + ')}）`
-            : `静默结束提醒已推送（${sent.join(' + ')}）`
-        )
+      if (sent.length || taken.size) {
+        const notes = []
+        if (sent.length) {
+          notes.push(buf.length ? `含 ${buf.length} 条汇总 · ${sent.join(' + ')}` : sent.join(' + '))
+        }
+        if (taken.size) {
+          const names = [...taken].map((id) => (CHANNEL_DEFS.find((d) => d.id === id) || {}).name || id)
+          notes.push(`${names.join('、')}的汇总按设置只走关键事件`)
+        }
+        notify(`静默结束提醒已推送（${notes.filter(Boolean).join('；')}）`)
       }
       /*
        * 关键事件单独提醒（静默结束状态）。
@@ -892,13 +926,87 @@ export function useAlertPush(options, hooks = {}) {
        * 一个是"额外私聊"，混在一起将来加渠道会互相牵连。
        * 汇总正文里已经含「人脸命中」单列分区（见 buildSilentSummary）。
        */
-      pushDirectToUsers('summary', {
+      const summaryPayload = {
         title: summary.title,
         text: summary.plain,
         html: summary.html || summary.plain
-      }).catch(() => {})
+      }
+      if (dailyIds.length) {
+        // 日常推送还有渠道在发：关键事件这条是"再单独发一份"，照旧即发即忘
+        pushDirectToUsers('summary', summaryPayload).catch(() => {})
+      } else {
+        /*
+         * 全接管：关键事件这条是**唯一**的送达通道。三端一个都没发出去时，
+         * 把缓冲放回头部 —— 与日常推送「全渠道失败」同一规矩（整批放回、
+         * 下轮再发）；有任一端发成就此打住，不放回，否则成功的端会收到重复第二条。
+         */
+        const r = await pushDirectToUsers('summary', summaryPayload).catch(() => null)
+        if (!r || !r.sent) silentBuffer.unshift(...buf)
+      }
     }
     return summary
+  }
+
+  /**
+   * 免打扰结束「结算汇总」的日常渠道接管（summaryOnly）—— 三端各自判定。
+   *
+   * 一端开着不影响另外两端：钉钉日常让位给钉钉关键事件机器人、企微日常让位给
+   * 企微关键事件机器人、TG 群让位给 TG 私聊推送。
+   *
+   * 「关键事件发不发得出去」= criticalEndSends（配置级：启用 / 勾了「静默汇总」/
+   * 静默期放行）+ 这一端的传输就绪度：
+   *   · 钉钉 / 企微：critical.webhook 非空；
+   *   · TG：机器人已配好（isReady）且私聊接收人非空（directPushRecipients）。
+   * 就绪度算不出来 → 不让位（日常推送照发，汇总不能谁都收不到）。
+   */
+  function silentSummaryTakeover(ids) {
+    const silentBlocked = criticalSilentBlocked({})
+    const dingCrit = (readCfg('ding') || {}).critical || null
+    const wecomCrit = (readCfg('wecom') || {}).critical || null
+    const tgCfg = readCfg('tg') || {}
+    const ends = {
+      tg: {
+        blk: tgCfg.directPush || null,
+        sends:
+          criticalEndSends(tgCfg.directPush, 'summary', { silentBlocked }) &&
+          isReady('tg') &&
+          directPushRecipients(tgCfg).length > 0
+      },
+      ding: {
+        blk: dingCrit,
+        sends:
+          criticalEndSends(dingCrit, 'summary', { silentBlocked }) &&
+          !!String((dingCrit && dingCrit.webhook) || '').trim()
+      },
+      wecom: {
+        blk: wecomCrit,
+        sends:
+          criticalEndSends(wecomCrit, 'summary', { silentBlocked }) &&
+          !!String((wecomCrit && wecomCrit.webhook) || '').trim()
+      }
+    }
+    return takenOverSummaryChannels(ids, ends)
+  }
+
+  /**
+   * 被接管渠道的「上轮失败备注 / 待补发」旧账作废。
+   * 不清理的话：开关刚打开，下一轮 sendScoped 开头的补发逻辑还会把上一轮
+   * 失败的旧汇总补发给已经让位的日常群 —— 用户明明关掉了这条路径。
+   */
+  function dropTakenFailState(scopeKey, taken, targetCount) {
+    if (!taken || !taken.size) return
+    const rs = flushResend.get(scopeKey)
+    if (rs && Array.isArray(rs.ids)) {
+      const keep = rs.ids.filter((id) => !taken.has(id))
+      if (keep.length) flushResend.set(scopeKey, { ids: keep, summary: rs.summary })
+      else flushResend.delete(scopeKey)
+    }
+    const fl = flushFail.get(scopeKey)
+    if (fl && Array.isArray(fl.failed)) {
+      const keep = fl.failed.filter((f) => !taken.has(f.id))
+      if (keep.length) flushFail.set(scopeKey, { ...fl, failed: keep, retained: keep.length >= targetCount })
+      else flushFail.delete(scopeKey)
+    }
   }
 
   /* ==================== 通道级静默：收存 → 结束汇总 ==================== */
@@ -2981,10 +3089,9 @@ export function useAlertPush(options, hooks = {}) {
     } catch (e) {
       return { ok: false, sent: 0, reason: '' }
     }
-    if (!directPushEventOn(tg, kind)) return { ok: false, sent: 0, reason: '' }
-    const dp = tg.directPush || {}
-    // 静默时段也允许推送：缺省即开（老配置没有这个字段 → 与升级前一致）
-    if (silentBlocked && dp.throughSilence === false) return { ok: false, sent: 0, reason: '' }
+    // 启用 / 事件勾选 / 静默期放行：三端共用同一份判定（criticalEndSends），
+    // 与 useTelegram.directPushEventOn 逐字同语义，别在这里再写一遍
+    if (!criticalEndSends(tg.directPush, kind, { silentBlocked })) return { ok: false, sent: 0, reason: '' }
     if (!isReady('tg')) return { ok: false, sent: 0, reason: '' }
     const to = directPushRecipients(tg)
     if (!to.length) return { ok: false, sent: 0, reason: '' }
@@ -3029,10 +3136,8 @@ export function useAlertPush(options, hooks = {}) {
       return { ok: false, sent: 0, reason: '' }
     }
     const crit = (dt && dt.critical) || null
-    if (!crit || crit.enabled !== true) return { ok: false, sent: 0, reason: '' }
-    if (crit.events && crit.events[kind] === false) return { ok: false, sent: 0, reason: '' }
-    // 静默时段也允许推送：缺省即开（老配置没有这个字段 → 与升级前一致）
-    if (silentBlocked && crit.throughSilence === false) return { ok: false, sent: 0, reason: '' }
+    // 启用 / 事件勾选 / 静默期放行：三端共用同一份判定（criticalEndSends）
+    if (!criticalEndSends(crit, kind, { silentBlocked })) return { ok: false, sent: 0, reason: '' }
     const webhook = String(crit.webhook || '').trim()
     if (!webhook) return { ok: false, sent: 0, reason: '' }
 
@@ -3093,10 +3198,8 @@ export function useAlertPush(options, hooks = {}) {
       return { ok: false, sent: 0, reason: '' }
     }
     const crit = (wc && wc.critical) || null
-    if (!crit || crit.enabled !== true) return { ok: false, sent: 0, reason: '' }
-    if (crit.events && crit.events[kind] === false) return { ok: false, sent: 0, reason: '' }
-    // 静默时段也允许推送：缺省即开（老配置没有这个字段 → 与升级前一致）
-    if (silentBlocked && crit.throughSilence === false) return { ok: false, sent: 0, reason: '' }
+    // 启用 / 事件勾选 / 静默期放行：三端共用同一份判定（criticalEndSends）
+    if (!criticalEndSends(crit, kind, { silentBlocked })) return { ok: false, sent: 0, reason: '' }
     const webhook = String(crit.webhook || '').trim()
     if (!webhook) return { ok: false, sent: 0, reason: '' }
 
