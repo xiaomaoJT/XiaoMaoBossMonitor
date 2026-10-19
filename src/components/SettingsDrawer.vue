@@ -7391,7 +7391,8 @@ const TG_COMMANDS = [
   { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）', cat: 'system' },
   { cmd: 'stop', usage: '/stop', desc: '终止监控服务（仅退进程，机器仍开机，需手动重启；需单独开启 + 二次确认）', cat: 'system' },
   { cmd: 'hardreboot', usage: '/hardreboot', desc: '重启整台电脑（最后手段，需两次开启 + 二次确认）', cat: 'system' },
-  { cmd: 'shutdown', usage: '/shutdown', desc: '关闭整台电脑（比硬重启更彻底，需开启电源操作 + 二次确认）', cat: 'system' }
+  { cmd: 'shutdown', usage: '/shutdown', desc: '关闭整台电脑（比硬重启更彻底，需开启电源操作 + 二次确认）', cat: 'system' },
+  { cmd: 'system', usage: '/system', desc: '查看系统操作类指令（重启 / 终止 / 硬重启 / 关机）的完整说明与各自的二次确认方式', cat: 'system' }
 ]
 
 const newAllowId = ref('')

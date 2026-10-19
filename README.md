@@ -563,7 +563,7 @@ analyzer.mjs（每路一个实例）
 2. **必须在白名单**（`from.id ∈ allowUserIds`）；
 3. **必须以 `/` 开头**。
 
-危险指令（`/reboot`、`/stop`、`/hardreboot`、`/shutdown`）额外要 `allowReboot` 开关，且默认关闭。`/reboot` 与 `/stop` 只需这一道开关（只动服务、不动机器）；`/hardreboot` 与 `/shutdown` 还要再多开 `systemReboot.enabled`。每条指令都写一行审计日志（时间 / 来源 id / 指令 / 结果）。
+危险指令（`/reboot`、`/stop`、`/hardreboot`、`/shutdown`）额外要 `allowReboot` 开关，且默认关闭。`/reboot` 与 `/stop` 只需这一道开关（只动服务、不动机器）；`/hardreboot` 与 `/shutdown` 还要再多开 `systemReboot.enabled`。每条指令都写一行审计日志（时间 / 来源 id / 指令 / 结果）。这些危险指令在 `/help` 里不展开，统一由 `/system` 指令给出完整说明与各自的二次确认方式。
 
 ### 5.12 启动重放与积压（为什么「一启动就反复重启」）
 
@@ -2240,7 +2240,8 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 
 | 指令 | 作用 |
 |---|---|
-| `/help` | 查看全部指令。**常用指令平铺展示**；系统操作类（关机 / 重启 / 终止服务等危险动作）单独收进一块，只给概览 + 引导「发送对应指令看详情」，不堆完整说明。输入 `/` 也能唤起命令菜单 |
+| `/help` | 查看全部指令。**按类型分组**：📊 查询与报表（status/cams/hits/flow/collect/search/compile/duty/patrol/db/config）放最前，🔕 静默与推送（silent/until/resume/csilent/digest/cdigest）其次；系统操作类（关机 / 重启 / 终止服务等危险动作）**不罗列细节**，只给一行引导「发送 `/system` 看完整说明」。输入 `/` 也能唤起命令菜单 |
+| `/system` | 系统操作类指令的**详情入口**：列出 重启 / 终止 / 硬重启 / 关机 四条危险指令各自的说明与二次确认方式（如 `/stop confirm`）。`/help` 里这类只放引导，完整说明收在这里 |
 | `/silent <小时数> [渠道]` | 开启临时静默，如 `/silent 2`（开启与结束都会推送提醒，期间报警收存、结束时汇总）。不写渠道就走设置页那份默认（钉钉 + 企微）；也可临时指定：`/silent 2 wecom`、`/silent 2 ding,tg` |
 | `/until <HH:MM> [渠道]` | 静默到指定时刻（今天已过则顺延到明天），如 `/until 08:00`，同样可跟渠道 |
 | `/resume` | 立刻结束临时静默，并推结束提醒 + 已收存报警汇总 |
