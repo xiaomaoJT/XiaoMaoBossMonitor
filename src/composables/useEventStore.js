@@ -13,16 +13,19 @@
 export const DB_NAME = 'monitor-wall-db'
 /*
  * 版本 3：新增 face-splits 表（人脸库「手动拆分」声明）。
+ * 版本 4：新增 face-blocks 表（陌生人反例：「不是本人」标记，拦住误命中）。
  * ⚠️ 必须涨版本：onupgradeneeded 只在版本变化时触发，不涨的话老库永远不会建这张新表，
- *    后面所有拆分读写都会 NotFoundError。两个连接（事件 / 人脸）的 upgrade 回调都已幂等
- *    补齐三张表，谁先 open 都能建全。
+ *    后面所有读写都会 NotFoundError。两个连接（事件 / 人脸）的 upgrade 回调都已幂等
+ *    补齐全部表，谁先 open 都能建全。
  */
-export const DB_VERSION = 3
+export const DB_VERSION = 4
 const STORE = 'events'
 /** 人脸库（特征向量 + 缩略图） */
 const FACE_STORE = 'faces'
 /** 人脸库「手动拆分」声明：用户显式声明「这两个名字/这两条样本不是同一人」 */
 export const FACE_SPLIT_STORE = 'face-splits'
+/** 陌生人反例：被误认成库里某人的陌生脸向量（匹配时反例更相似即判未录入） */
+export const FACE_BLOCK_STORE = 'face-blocks'
 /** 旧版本 localStorage 里的历史记录，迁移完就删掉 */
 const LEGACY_KEY = 'monitor-alarm-history-v1'
 
@@ -101,6 +104,10 @@ export function openDB() {
       if (!db.objectStoreNames.contains(FACE_SPLIT_STORE)) {
         // 手动拆分声明：以自增 id 为主键（解除时按 id 删）
         db.createObjectStore(FACE_SPLIT_STORE, { keyPath: 'id', autoIncrement: true })
+      }
+      if (!db.objectStoreNames.contains(FACE_BLOCK_STORE)) {
+        // 陌生人反例：以自增 id 为主键（解除时按 id 删）
+        db.createObjectStore(FACE_BLOCK_STORE, { keyPath: 'id', autoIncrement: true })
       }
     }
     // 被别的标签页阻塞：立刻给出**能照做**的原因，而不是干等

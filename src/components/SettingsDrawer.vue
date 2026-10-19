@@ -1840,6 +1840,16 @@
                     <button class="mini-btn" :disabled="fixingHit[h.id]" @click="doFixHit(h)">
                       {{ fixingHit[h.id] ? '修正中' : '修正' }}
                     </button>
+                    <!-- 「不是本人」= 陌生人被误认成了库里某人：忽略只删样本不治本，
+                         标记成反例后，匹配时反例更相似即判未录入，同一张脸不再冒名 -->
+                    <button
+                      class="mini-btn ghost"
+                      :disabled="fixingHit[h.id]"
+                      title="这条是陌生人被误认成了「{{ h.name || '未识别' }}」——标记后同一张脸再来会直接判未录入"
+                      @click="doMarkStranger(h)"
+                    >
+                      不是本人
+                    </button>
                     <button class="mini-btn ghost" :disabled="fixingHit[h.id]" @click="doIgnoreHit(h)">忽略</button>
                   </div>
                 </div>
@@ -1860,6 +1870,44 @@
                 </button>
                 <span class="muted" v-if="!hitRefreshNote">来自后端检测服务</span>
                 <span class="muted pending-refresh-note" v-if="hitRefreshNote">{{ hitRefreshNote }}</span>
+              </div>
+            </div>
+
+            <!-- 陌生人标记（反例）：被误认成库里某人的陌生脸
+                 标记 = 把这条脸的向量存成反例；匹配时「反例分 ≥ 阈值且 ≥ 库内最像分」
+                 即判未录入，之后同一张脸再来直接走待录入/陌生人路径，不再冒名。
+                 库里真人本人不受影响（对自己样本 ~0.9，天然压过对陌生反例的分）。
+                 与拆分声明同模式：IndexedDB 为源、随配置同步后端、重启恢复。 -->
+            <div class="opt col" v-if="faceBackendOn">
+              <span>
+                <strong>
+                  陌生人标记（{{ strangerMarks.length }}）
+                  <button class="mini-btn ghost" @click="blockLibOpen = !blockLibOpen">
+                    {{ blockLibOpen ? '收起' : '管理' }}
+                  </button>
+                </strong>
+                <em>被误认成库里某人的陌生脸；标记后同一张脸再来会直接判「未录入」，不再冒名</em>
+              </span>
+
+              <div class="face-grid" v-if="blockLibOpen && strangerMarks.length">
+                <div class="face-card block" v-for="b in strangerMarks" :key="b.id">
+                  <img :src="b.thumb" alt="陌生人脸" class="pending-thumb" />
+                  <span class="hit-cur" :title="b.name">曾被认成：{{ b.name || '未知' }}</span>
+                  <span class="face-time" v-if="b.at">{{ fmtPendingAt(b.at) }}</span>
+                  <div class="face-acts">
+                    <button class="mini-btn ghost" @click="doUnmarkStranger(b)">解除</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="pending-empty" v-else-if="blockLibOpen">
+                <span class="pe-icon" aria-hidden="true">🚫</span>
+                <div class="pe-body">
+                  <strong class="pe-title">还没有陌生人标记</strong>
+                  <em class="pe-hint">
+                    在「命中修正」里看到陌生人被认成了某人，点卡片上的「不是本人」即可标记；之后同一张脸再来会直接走待录入/陌生人路径。
+                  </em>
+                </div>
               </div>
             </div>
 
@@ -4170,6 +4218,7 @@ import { camExtOn } from '../composables/useAiExtras'
 import {
   DEFAULT_FACE_THRESHOLD,
   addFace,
+  addFaceBlock,
   backendFaceHits,
   backendFaceHitsError,
   backendFaceHitsLoadedAt,
@@ -4179,11 +4228,14 @@ import {
   addFaceSplits,
   clearFaces,
   clearPendingFaces,
+  blockLibOpen,
+  currentFaceBlocks,
   currentSplits,
   deleteFaces,
   dropBackendFaceHit,
   dropBackendPendingFace,
   enrollFromImage,
+  faceBlocksVersion,
   faceLibOpen,
   faceRowsVersion,
   faceSplitsOpen,
@@ -4200,6 +4252,7 @@ import {
   rawFaceRows,
   readGroupSim,
   refreshFaces,
+  removeFaceBlock,
   removeFaceSplit,
   removePendingFace,
   renameFace,
@@ -5468,6 +5521,73 @@ function doIgnoreHit(h) {
 }
 
 /**
+ * 把一条命中样本标成「不是本人」（陌生人反例）。
+ *
+ * 为什么「忽略」不够：忽略只是把样本从列表删掉，库内样本与这张陌生脸的
+ * 余弦依然过高，下次照认。反例把这条脸的向量存下来（addFaceBlock），
+ * 匹配时「反例分 ≥ 阈值且 ≥ 库内最像分」即判未录入 —— 同一张脸再来
+ * 直接走待录入/陌生人路径。库里真人本人不受影响。
+ *
+ * 与修正同一套规矩：必须走前端 addFaceBlock（前端 IndexedDB 是 source of
+ * truth，随配置同步覆盖后端；后端直接写会被下一次同步替换掉，白标）。
+ */
+async function doMarkStranger(h) {
+  if (!h || fixingHit[h.id]) return
+  if (!h.vector || !h.vector.length) {
+    alertDialog({
+      title: '没法标记',
+      message: '这条样本没有可用的特征向量（可能是旧版本后端存的），换个样本或先刷新命中。',
+      variant: 'default'
+    })
+    return
+  }
+  fixingHit[h.id] = true
+  try {
+    const res = await addFaceBlock({ vector: h.vector, thumb: h.thumb, name: h.name || '' })
+    if (!res.ok) {
+      alertDialog({ title: '标记失败', message: res.reason || '写入反例失败', variant: 'danger' })
+      return
+    }
+    // 与修正同口径：本地落库成功后乐观移除卡片，后端删除放后台异步跑
+    clearHitAssign(h)
+    dropBackendFaceHit(opts.backend.url, h.backendId) // 故意不 await
+    delete fixingHit[h.id] // 落库即解锁，不等网络
+  } catch (e) {
+    alertDialog({
+      title: '标记失败',
+      message: '写入反例时出错：' + ((e && e.message) || e) + '\n这条样本还在列表里，可以稍后重试。',
+      variant: 'danger'
+    })
+  } finally {
+    delete fixingHit[h.id]
+  }
+}
+
+/** 解除一条陌生人标记（之后这张脸重新参与正常匹配） */
+async function doUnmarkStranger(b) {
+  if (!b) return
+  try {
+    await removeFaceBlock(b.id)
+  } catch (e) {
+    alertDialog({ title: '解除失败', message: ((e && e.message) || e), variant: 'danger' })
+  }
+}
+
+/**
+ * 「陌生人标记」列表（轻量，去掉向量）。
+ * 依赖 faceBlocksVersion：反例增删后缓存刷新会自增它，这里才会重算。
+ */
+const strangerMarks = computed(() => {
+  void faceBlocksVersion.value
+  return currentFaceBlocks().map((b) => ({
+    id: b.id,
+    thumb: b.thumb || '',
+    name: b.name || '',
+    at: b.at || 0
+  }))
+})
+
+/**
  * 「命中修正」为空时的占位文案。
  * 三种"空"的原因完全不同，必须分开说：
  *   ① 后端开着但这次没拉上 → 网络/超时问题，列表**没被清空**，点刷新重试；
@@ -5495,7 +5615,9 @@ const hitEmpty = computed(() => {
   return {
     icon: '📭',
     title: '后端还没有命中样本',
-    hint: '跑检测的是后端服务，识别到库里的人后，这里会出现最近 20 条样本（带原图）。刚启动或刚录完人脸库时，稍等一会儿点「刷新命中」。'
+    hint:
+      '跑检测的是后端服务，识别到库里的人后，这里会出现最近 20 条样本（带原图）。刚启动或刚录完人脸库时，稍等一会儿点「刷新命中」。' +
+      '如果是陌生人被误认成了某人（而不是认错了人），点卡片上的「不是本人」把它标成反例，之后同一张脸再来会直接判未录入。'
   }
 })
 
@@ -8554,6 +8676,14 @@ function loadHidden() {
  */
 .face-card.hit {
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/*
+ * 陌生人标记卡片（反例）：与命中（accent）再区分开 ——
+ * 这些是**被误认**的陌生脸，列出来是为了能看清"拦的是谁"、必要时解除。
+ */
+.face-card.block {
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
 }
 
 /* 卡片上「当前认成的名字」：比通道名更醒目的正文色，一眼看到识别结论 */

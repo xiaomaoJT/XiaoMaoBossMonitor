@@ -326,15 +326,19 @@ import {
 import {
   clearFaces,
   clearPendingFaces,
+  currentFaceBlocks,
   currentSplits,
+  faceBlocksVersion,
   faceSplitsVersion,
   faces as faceList,
+  getAllFaceBlocks,
   getAllFaces,
   getAllFaceSplits,
   GROUP_SIM_KEY,
   PENDING_MAX,
   pendingFaces,
   readGroupSim,
+  replaceFaceBlocks,
   replaceFaceSplits,
   replaceFaces
 } from './composables/useFaceLib'
@@ -1092,6 +1096,17 @@ async function backendPayload() {
       aName: s.aName,
       bName: s.bName
     })),
+    /*
+     * 陌生人反例（「不是本人」标记）也要推上去：后端模式下识别在服务端跑，
+     * 不认识反例 → 误命中照旧发生（用户在设置页标了个寂寞）。
+     */
+    faceBlocks: (await getAllFaceBlocks().catch(() => [])).map((b) => ({
+      id: b.id,
+      vector: b.vector,
+      thumb: b.thumb || '',
+      name: b.name || '',
+      at: b.at || 0
+    })),
     faceGroupSim: readGroupSim()
   }
   /*
@@ -1141,6 +1156,20 @@ const backendSyncSignature = computed(() =>
     faceSplits: (() => {
       void faceSplitsVersion.value
       return currentSplits().map((s) => ({ aId: s.aId, bId: s.bId, aName: s.aName, bName: s.bName }))
+    })(),
+    /*
+     * 陌生人反例同理：不进指纹 → 标了「不是本人」也不重推，
+     * 后端手上还是旧名单（或根本没有），误命中继续发生。
+     */
+    faceBlocks: (() => {
+      void faceBlocksVersion.value
+      return currentFaceBlocks().map((b) => ({
+        id: b.id,
+        vector: b.vector,
+        thumb: b.thumb || '',
+        name: b.name || '',
+        at: b.at || 0
+      }))
     })(),
     faceGroupSim: readGroupSim(),
     cameras: cameras.value.map((c) => ({
@@ -1628,6 +1657,18 @@ async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
         await replaceFaceSplits(data.faceSplits)
       } catch (e) {
         console.warn('⚠️  拆分声明拉取失败：', (e && e.message) || e)
+      }
+    }
+
+    /*
+     * 陌生人反例跟着人脸库一起拉（以后端为准，与拆分声明同语义）。
+     * 老后端不带这个字段 → 原样保留本机反例（不做无依据的替换）。
+     */
+    if (Array.isArray(data.faceBlocks)) {
+      try {
+        await replaceFaceBlocks(data.faceBlocks)
+      } catch (e) {
+        console.warn('⚠️  陌生人反例拉取失败：', (e && e.message) || e)
       }
     }
 

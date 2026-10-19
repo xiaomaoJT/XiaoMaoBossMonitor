@@ -1499,6 +1499,61 @@ export function normalizeFaceSplits(list) {
 }
 
 /**
+ * 陌生人反例（「不是本人」标记）容量上限：滚动清理时按 at 留最新这么多条。
+ * 与拆分声明不同，反例带 512 维向量、还会进配置同步载荷，200 条 ≈ 400KB 量级，
+ * 再大就把每次配置推送/落盘都拖慢了（匹配只是内存里多扫一遍，很便宜）。
+ */
+export const BLOCK_KEEP = 200
+
+/**
+ * 陌生人反例（「不是本人」标记）的归一化（纯函数，前后端共用）。
+ * ----------------------------------------------------------------------------
+ * 背景：陌生人被误认成库里某人（脸撞了阈值）时，「忽略」只删样本不治本——
+ * 库内样本与这张陌生脸的余弦依然过高，下次照认。反例把这张脸的向量存下来，
+ * 匹配时同时算「库内最像分」与「反例最像分」，仅当反例分 ≥ 阈值且 ≥ 库内最像分
+ * 才判未录入（blocked），保证库里真人本人不受影响（真人对己样本 ~0.9 > 对陌生人 ~0.4）。
+ *
+ * 一条反例记录：{ id, vector, name, at, thumb }
+ *   · vector —— 这张陌生脸的 512 维特征（判据本体，空向量整条作废）；
+ *   · name   —— 当初被误认成的库内人名（展示用「曾被认成：小刘」，可空）；
+ *   · at     —— 标记时间 ms（滚动清理按它留新）；
+ *   · id     —— IndexedDB 自增 id（单条解除用；0 = 纯配置来源无 id）。
+ *
+ * 与 normalizeFaceSplits 同一套规格：容忍缺省形状、去重、跳过空向量、
+ * 钳上限 BLOCK_KEEP（按 at 新者优先；同 at 保持原相对顺序）。
+ *
+ * @param {Array<{id?,vector?,name?,at?,thumb?}>} list 原始反例
+ * @returns {Array<{id:number,vector:number[],name:string,at:number,thumb:string}>}
+ */
+export function normalizeFaceBlocks(list) {
+  const out = []
+  const seen = new Set()
+  for (const raw of Array.isArray(list) ? list : []) {
+    if (!raw || typeof raw !== 'object') continue
+    const vec = Array.isArray(raw.vector) ? raw.vector : null
+    // 空向量 / 含非数值的向量没有判据意义（长度不符的由匹配端自然跳过）
+    if (!vec || !vec.length || !vec.every((n) => Number.isFinite(n))) continue
+    const id = Math.max(0, Math.round(Number(raw.id)) || 0)
+    const name = String(raw.name != null ? raw.name : '').trim()
+    const at = Math.max(0, Math.round(Number(raw.at)) || 0)
+    const thumb = String(raw.thumb != null ? raw.thumb : '')
+    // 有 id 按 id 去重；无 id（配置来源）按「名字+时间+向量指纹」去重
+    const key = id > 0
+      ? `i${id}`
+      : `v${name}|${at}|${vec.length}|${vec[0]}|${vec[vec.length - 1]}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ id, vector: vec.slice(), name, at, thumb })
+  }
+  if (out.length <= BLOCK_KEEP) return out
+  // 超上限：按 at 新者优先截断，保留者在输出里维持原相对顺序（稳定）
+  const order = out.map((_, i) => i)
+  order.sort((a, b) => (out[b].at - out[a].at) || (a - b))
+  const keep = new Set(order.slice(0, BLOCK_KEEP))
+  return out.filter((_, i) => keep.has(i))
+}
+
+/**
  * 走向事件是否按「关键事件」实时急推（类比在库人脸命中，不被静默/日常汇总吸收）。
  * ----------------------------------------------------------------------------
  * 唯一判据 = source==='flow' 且 record.asCritical 为真。

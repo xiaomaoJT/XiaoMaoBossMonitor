@@ -9,8 +9,8 @@
  * 缩略图统一压到 96×96 JPEG，每张约 4~6KB，50 个人总共不到 300KB。
  */
 import { ref } from 'vue'
-import { DB_NAME, DB_VERSION, FACE_STORE_NAME, FACE_SPLIT_STORE } from './useEventStore.js'
-import { normalizeFaceSplits } from '../config/defaults.js'
+import { DB_NAME, DB_VERSION, FACE_STORE_NAME, FACE_SPLIT_STORE, FACE_BLOCK_STORE } from './useEventStore.js'
+import { normalizeFaceSplits, normalizeFaceBlocks, BLOCK_KEEP } from '../config/defaults.js'
 import {
   cosine,
   loadModel,
@@ -69,6 +69,13 @@ export const hitReviewOpen = ref(false)
  * 同样放模块级，理由见 faceLibOpen。
  */
 export const faceSplitsOpen = ref(false)
+
+/**
+ * 「陌生人标记」（反例）列表展开着吗。默认**收起**，与 faceSplitsOpen 对称。
+ * 放模块级的理由同 faceLibOpen；默认收起是因为平时通常没几条，
+ * 展开时标题行仍带数量（陌生人标记（N））。
+ */
+export const blockLibOpen = ref(false)
 
 /** 简单互斥，避免并发写坏自增 id */
 let writeChain = Promise.resolve()
@@ -143,6 +150,12 @@ function openFaceDB() {
        */
       if (!db.objectStoreNames.contains(FACE_SPLIT_STORE)) {
         db.createObjectStore(FACE_SPLIT_STORE, { keyPath: 'id', autoIncrement: true })
+      }
+      /*
+       * 陌生人反例表（版本 4 新增）。同上必须幂等补建，理由见拆分表。
+       */
+      if (!db.objectStoreNames.contains(FACE_BLOCK_STORE)) {
+        db.createObjectStore(FACE_BLOCK_STORE, { keyPath: 'id', autoIncrement: true })
       }
     }
     req.onblocked = () => fail(new Error('本地人脸数据库正被本应用的其它标签页占用，请关掉其它标签页后重试'))
@@ -247,6 +260,11 @@ export async function refreshFaces() {
     await refreshFaceSplits()
   } catch (e) {
     /* 拆分缓存刷不出来只是"拆分暂不生效"，人脸库照常可用 */
+  }
+  try {
+    await refreshFaceBlocks()
+  } catch (e) {
+    /* 反例缓存刷不出来只是"误命中拦截暂不生效"，人脸库照常可用 */
   }
   return faces.value
 }
@@ -408,6 +426,157 @@ export function replaceFaceSplits(list) {
     await refreshFaceSplits()
     return { ok: true, count: want.length }
   })
+}
+
+/* ==================== 陌生人反例（「不是本人」标记） ====================
+ *
+ * 为什么需要它：陌生人被误认成库里某人时，「忽略」只删样本不治本——
+ * 库内样本与这张陌生脸的余弦依然过高，下次照认。反例把这张陌生脸的向量
+ * 存下来，匹配时同时算「库内最像分」与「反例最像分」，仅当
+ *     反例分 ≥ 阈值 且 反例分 ≥ 库内最像分
+ * 才判未录入（blocked）。库里真人本人不受影响：真人对己样本 ~0.9，
+ * 远高于对陌生反例 ~0.4，库内分天然压过反例分。
+ *
+ * 与拆分声明同模式：IndexedDB face-blocks 表是唯一 source of truth，
+ * 随配置同步给后端（faceBlocks 字段），后端只在内存里缓存 + 落盘 cfg。
+ */
+
+/** 反例缓存（非响应式，与 splitCache 同模式）：匹配路径同步读 */
+let blockCache = []
+
+/** 每次 refreshFaceBlocks 自增 —— 让设置页「陌生人标记」列表 computed 知道该重算了 */
+export const faceBlocksVersion = ref(0)
+
+/** 取当前反例快照（同步；调用方只读） */
+export function currentFaceBlocks() {
+  return blockCache
+}
+
+/** 读全量反例（含向量），按 id 升序（= 标记时间先后） */
+export async function getAllFaceBlocks() {
+  try {
+    const os = await store('readonly', FACE_BLOCK_STORE)
+    const all = await reqAsPromise(os.getAll())
+    return (all || []).sort((a, b) => (a.id || 0) - (b.id || 0))
+  } catch (e) {
+    // 老库还没升级（表不存在）等情形：当没有反例，绝不能让调用方炸掉
+    return []
+  }
+}
+
+/** 刷新反例缓存（人脸库每次 refresh 都跟着刷一次，保证匹配拿到的是最新的） */
+export async function refreshFaceBlocks() {
+  const list = await getAllFaceBlocks()
+  blockCache = list
+  faceBlocksVersion.value += 1
+  return list
+}
+
+/**
+ * 新增一条陌生人反例。
+ * @param {{vector:number[], thumb?:string, name?:string}} rec
+ *        vector：这张陌生脸的 512 维特征（判据本体）；
+ *        thumb：缩略图（设置页要能看见"是谁被认错了"）；
+ *        name：当初被误认成的库内人名（展示用，可空）。
+ * @returns {Promise<{ok:boolean, id?:number, reason?:string}>}
+ */
+export function addFaceBlock({ vector, thumb, name } = {}) {
+  return runExclusive(async () => {
+    const vec = Array.isArray(vector) ? vector.slice() : null
+    if (!vec || !vec.length || !vec.every((n) => Number.isFinite(n))) {
+      return { ok: false, reason: '这条样本没有可用的特征向量' }
+    }
+    const db = await openFaceDB()
+    const rec = {
+      vector: vec,
+      thumb: String(thumb || ''),
+      name: String(name || '').trim(),
+      at: Date.now()
+    }
+    const id = await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+      const os = tx.objectStore(FACE_BLOCK_STORE)
+      const rq = os.add(rec)
+      rq.onsuccess = () => resolve(rq.result)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('反例写入事务被中止'))
+    })
+    // 滚动清理：超上限按 at 留最新 BLOCK_KEEP 条（与后端探针同一口径）
+    await pruneFaceBlocks()
+    await refreshFaceBlocks()
+    return { ok: true, id }
+  })
+}
+
+/** 解除一条反例（之后这张脸重新参与正常匹配） */
+export function removeFaceBlock(id) {
+  return runExclusive(async () => {
+    const db = await openFaceDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+      tx.objectStore(FACE_BLOCK_STORE).delete(id)
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('反例删除事务被中止'))
+    })
+    await refreshFaceBlocks()
+    return { ok: true }
+  })
+}
+
+/**
+ * 用一份反例**整体替换**本机的（从后端拉取配置时用，以后端为准）。
+ * 与 replaceFaceSplits 同理：明确送来数组才替换；送空数组 = 后端确实没有反例。
+ */
+export function replaceFaceBlocks(list) {
+  return runExclusive(async () => {
+    const want = normalizeFaceBlocks(list)
+    const db = await openFaceDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+      const os = tx.objectStore(FACE_BLOCK_STORE)
+      os.clear()
+      for (const w of want) os.add({ ...w })
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('反例替换事务被中止'))
+    })
+    await refreshFaceBlocks()
+    return { ok: true, count: want.length }
+  })
+}
+
+/** 清空全部反例 */
+export function clearFaceBlocks() {
+  return runExclusive(async () => {
+    const db = await openFaceDB()
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+      tx.objectStore(FACE_BLOCK_STORE).clear()
+      tx.oncomplete = () => resolve(true)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error || new Error('反例清空事务被中止'))
+    })
+    await refreshFaceBlocks()
+    return { ok: true }
+  })
+}
+
+/** 滚动清理：超过 BLOCK_KEEP 条时删最旧的（按 at） */
+async function pruneFaceBlocks() {
+  const all = await getAllFaceBlocks()
+  if (all.length <= BLOCK_KEEP) return 0
+  const drop = all.slice(0, all.length - BLOCK_KEEP) // at 升序存，前面最旧
+  const db = await openFaceDB()
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+    const os = tx.objectStore(FACE_BLOCK_STORE)
+    for (const r of drop) os.delete(r.id)
+    tx.oncomplete = () => resolve(true)
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error || new Error('反例清理事务被中止'))
+  })
+  return drop.length
 }
 
 /**
@@ -884,6 +1053,7 @@ export function readGroupSim() {
  *                但库里的声明必须生效，否则"库里分开了、推送还并着"）。
  * @returns {Promise<{face:object, score:number, groupName:string}|null>}
  *          miss 情形仍回 `{face,score,miss:true,groupName}`（groupName 回样本本名）。
+ *          被反例拦下的误命中回 `{face,score,miss:true,blocked:true,groupName:''}`。
  */
 export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOLD, bySimilarity = true, splits } = {}) {
   if (!vector || !vector.length) return null
@@ -898,6 +1068,24 @@ export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOL
   }
   if (!best) return null
   const hit = best.score >= threshold ? best : { face: best.face, score: best.score, miss: true }
+  /*
+   * 陌生人反例拦截（「不是本人」标记）：
+   * 本来要认成库里某人（过了阈值）时，再看反例里有没有更像的 —— 反例分 ≥ 阈值
+   * 且 ≥ 库内最像分，才判未录入。真人本人不受影响：对自己样本 ~0.9 远高于
+   * 对陌生反例 ~0.4，库内分天然压过反例分，拦截永远不会误伤本人。
+   * 反例缓存读不到了（refresh 失败等）只是"暂不拦截"，绝不影响正常识别。
+   */
+  if (!hit.miss && blockCache.length) {
+    let blockBest = -1
+    for (const b of blockCache) {
+      if (!b.vector || b.vector.length !== q.length) continue
+      const s = cosine(q, b.vector)
+      if (s > blockBest) blockBest = s
+    }
+    if (blockBest >= threshold && blockBest >= best.score) {
+      return { face: best.face, score: best.score, miss: true, blocked: true, groupName: '' }
+    }
+  }
   // 把命中的这条样本映射到它的「归类」（组代表样本的名字），
   // 让识别报告的名字与用户在人脸库看到的归类名一致。
   const splitList = Array.isArray(splits) ? splits : await getAllFaceSplits()
