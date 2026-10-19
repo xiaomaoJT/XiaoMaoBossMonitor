@@ -30,6 +30,17 @@ export const backendLastSyncAt = ref(0)
 /** 服务状态快照（来自 /api/status） */
 export const backendStatus = ref(null)
 /**
+ * 后端当前配置版本号（来自 /api/events 响应里的 configRev）。
+ *
+ * 为什么轮询要顺带读它：远程指令（/digest、/cdigest、/hitfix、/hitblock…）
+ * 改的是**后端**那份配置，改完 bump configRev。前端每 pollMs 就在轮询
+ * /api/events，这个字段是现成的「后端配置变了」信号 ——
+ * App.vue 拿它和本机 syncRev 比，后端更新就静默自动拉取（alignWithBackend），
+ * 远程修正的人脸库 / 反例因此能传播进前端 source of truth。
+ * 0 = 还没拉到过 / 后端没这个字段（老版本服务）。
+ */
+export const backendConfigRev = ref(0)
+/**
  * 状态哨兵快照（来自 /api/watchdog）：
  * 掉线告警与定时巡检在后端跑，这里只取回来给设置页看（各通道状态 / 下次巡检时间）。
  */
@@ -251,6 +262,12 @@ export function startBackendPolling(options, onEvent) {
       // cid：顺带让后端把"这台设备还在看"记一笔（设备列表的唯一心跳来源）
       const data = await fetchJson(`${base}/api/events?since=${since}&limit=100${clientQuery()}`)
       lastTime = Math.max(lastTime, Number(data.now) || Date.now())
+      /*
+       * 后端配置版本号：远程指令改后端配置后会 +1。只记**变大**的值 ——
+       * 服务重启 / 换了一台 rev 更小的后端时，不能把本机已对齐的状态冲掉。
+       */
+      const cfgRev = Number(data.configRev) || 0
+      if (cfgRev > backendConfigRev.value) backendConfigRev.value = cfgRev
       errStreak = 0
       backendError.value = ''
       backendState.value = 'polling'
@@ -295,6 +312,8 @@ export function stopBackendPolling() {
   backendState.value = 'idle'
   backendStatus.value = null
   backendWatchdog.value = null
+  // 配置版本号归零：换后端 / 重开开关时重新学，别拿旧后端的 rev 比新后端的
+  backendConfigRev.value = 0
 }
 
 /**

@@ -1244,6 +1244,106 @@ export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarit
   return groups
 }
 
+/**
+ * 「人脸库容量（libMax）调小到当前库存之下」时，算出该淘汰谁 —— **纯函数**，
+ * 不碰 IndexedDB，所以"砍谁、砍几条、剩几条"能被穷举测试守住。
+ *
+ * 背景：libMax 以前只在 addFace 那一刻当门槛（满了就不许录），把上限从 100 改到 50
+ * 时，已录入的 80 条原样留着、界面显示超额状态，用户完全看不出会发生什么。
+ * 现在改成：保存前给出**明确警告**，确认后按本函数的计划自动淘汰。
+ *
+ * 淘汰粒度是「人」（groupFaces 的一张卡片 = 一个人），不是单条样本：
+ * 同一个人被砍一半样本比整个人消失更怪（卡片还在、样本少了几张，用户会以为bug）。
+ * 组按**组内最早样本**的 createdAt 升序淘汰（"最旧的人"= 建档最早的人），
+ * 同刻按代表样本 id 兜底，顺序稳定。砍整组可能让结果略低于新上限（要的是"淘汰最旧的人"，
+ * 不是"凑够条数"），对话框里写的保留数是按这个计划实算的。
+ *
+ * 组没覆盖到的记录（调用方传了过期 groups 才会发生）按单条一组参与同一套排序，
+ * 不会出现"先砍组里较新的、留下没编组的更旧记录"。
+ *
+ * @param {Array<{id:number,name:string,createdAt?:number}>} rows 人脸库全部记录（faces）
+ * @param {Array<{id:number,createdAt?:number,count:number,items:Array<{id:number,createdAt?:number}>}>} groups
+ *        groupFaces(rows) 的分组结果
+ * @param {number} cap 新上限（按**记录条数**计，与 addFace 的门槛同一口径）
+ * @returns {{
+ *   need:number, totalRecords:number, totalPeople:number, cap:number,
+ *   victimIds:number[], removedRecords:number, removedPeople:number,
+ *   keepRecords:number, keepPeople:number
+ * }} need<=0 表示不需要淘汰（victimIds 为空）
+ */
+export function planEvictOldest(rows, groups, cap) {
+  const list = (Array.isArray(rows) ? rows : []).filter((r) => r && r.id != null)
+  const gs = (Array.isArray(groups) ? groups : []).filter((g) => g && Array.isArray(g.items) && g.items.length)
+  const c = Math.max(1, Math.round(Number(cap) || DEFAULT_FACE_MAX))
+  const need = Math.max(0, list.length - c)
+  const out = {
+    need,
+    totalRecords: list.length,
+    totalPeople: gs.length,
+    cap: c,
+    victimIds: [],
+    removedRecords: 0,
+    removedPeople: 0,
+    keepRecords: list.length,
+    keepPeople: gs.length
+  }
+  if (need <= 0) return out
+
+  const victimSet = new Set()
+  const rowIds = new Set(list.map((r) => r.id))
+  /*
+   * 组没覆盖到的记录（调用方传了过期 groups 才会发生）按**单条一组**补进去，
+   * 再和真组一起按"组内最早样本"排 —— 单一排序点，且不会出现
+   * "先砍了组里较新的、留下没编组的更旧记录"这种自相矛盾。
+   */
+  const covered = new Set()
+  for (const g of gs) for (const it of g.items) covered.add(it.id)
+  const orphans = list
+    .filter((r) => !covered.has(r.id))
+    .map((r) => ({ id: r.id, items: [{ id: r.id, createdAt: r.createdAt }] }))
+  // groups 自身已按代表样本排过，这里不依赖那个顺序，只认组内最早样本
+  const ordered = [...gs, ...orphans]
+    .map((g) => ({
+      g,
+      oldest: g.items.reduce((m, it) => Math.min(m, Number(it.createdAt) || 0), Infinity)
+    }))
+    .sort((a, b) => a.oldest - b.oldest || (a.g.id || 0) - (b.g.id || 0))
+
+  let rest = need
+  for (const { g } of ordered) {
+    if (rest <= 0) break
+    for (const it of g.items) {
+      // 只对**真实存在**的记录计数：过期 groups 里的幽灵 id 不该把缺口抵掉
+      if (rowIds.has(it.id) && !victimSet.has(it.id)) {
+        victimSet.add(it.id)
+        rest -= 1
+      }
+    }
+  }
+  // 兜底：还有缺口（理论上走到这说明 rows/groups 有重复 id 之类）→ 按记录级补砍最旧的
+  if (rest > 0) {
+    const leftovers = list
+      .filter((r) => !victimSet.has(r.id))
+      .slice()
+      .sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0) || (a.id || 0) - (b.id || 0))
+    for (const r of leftovers) {
+      if (rest <= 0) break
+      if (!victimSet.has(r.id)) {
+        victimSet.add(r.id)
+        rest -= 1
+      }
+    }
+  }
+
+  out.victimIds = list.filter((r) => victimSet.has(r.id)).map((r) => r.id)
+  out.removedRecords = out.victimIds.length
+  // 「涉及几人」= 有样本被砍的组；「留下几人」= 还有样本存活的组（兜底补砍可能是半个组）
+  out.removedPeople = gs.filter((g) => g.items.some((it) => victimSet.has(it.id))).length
+  out.keepPeople = gs.filter((g) => g.items.some((it) => !victimSet.has(it.id))).length
+  out.keepRecords = list.length - out.removedRecords
+  return out
+}
+
 /* ==================== 待录入人脸（采集暂存） ==================== */
 /**
  * 检测到、但还没入库的人脸，先暂存在内存里供用户在设置页一键录入。

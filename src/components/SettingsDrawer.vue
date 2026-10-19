@@ -1590,7 +1590,7 @@
             <div class="opt">
               <span>
                 <strong>人脸库容量</strong>
-                <em>上限，满了必须先删人才能继续录入</em>
+                <em>满了必须先删人才能继续录入；调小到当前人数以下时，保存前会明确警告并自动淘汰最旧的人</em>
               </span>
               <div class="test-row">
                 <input class="field mini" type="number" min="1" max="500" v-model.number="opts.face.libMax" />
@@ -4263,6 +4263,7 @@ import { EVENT_DEFAULTS, EVENT_GROUPS } from '../composables/useAlarmText'
 import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
 import { camExtOn } from '../composables/useAiExtras'
 import {
+  DEFAULT_FACE_MAX,
   DEFAULT_FACE_THRESHOLD,
   addFace,
   addFaceBlock,
@@ -4296,6 +4297,7 @@ import {
   mergeFaces,
   pendingFaces,
   pendingLibOpen,
+  planEvictOldest,
   rawFaceRows,
   readGroupSim,
   refreshFaces,
@@ -7762,6 +7764,30 @@ const TG_COMMANDS = [
     desc: '检索某一天的某一分钟内的所有事件（加 img 连截图一起推）。仅支持 T(今日)/Y(昨日)，如 /search T 14:11 img'
   },
   {
+    cmd: 'hit',
+    usage: '/hit [HH:MM:SS] [窗口秒数]',
+    desc: '按时刻查人脸命中样本（带编号）。省略时刻=看最近若干条；窗口默认±60秒，如 /hit 14:23:05 300',
+    detail: '从命中样本表里按时刻捞记录并给出编号，供下面三条修正指令指哪打哪。同一秒可能有多路通道各自命中，用编号认条才不会改错人。'
+  },
+  {
+    cmd: 'hitfix',
+    usage: '/hitfix <编号> <人名>',
+    desc: '把某条命中样本修正为指定人名：用该样本的特征+截图补录进人脸库（认错人时把脸录到正确的人名下）',
+    detail: '与设置页「命中修正」的录入同一套动作；库满时会拒绝并提示先删人或改用 /hitblock。改完后端立即生效，前端数秒内自动拉取新底库。'
+  },
+  {
+    cmd: 'hitblock',
+    usage: '/hitblock <编号>',
+    desc: '把某条命中样本标记为「不是本人」（陌生人反例）：之后同一张脸再来直接判未录入，不再冒名',
+    detail: '即设置页命中卡片上的「不是本人」。反例不占人脸库容量；库里真人本人不受影响。'
+  },
+  {
+    cmd: 'hitignore',
+    usage: '/hitignore <编号>',
+    desc: '忽略某条命中样本：从命中记录里删掉它（录错/不想留的样本）',
+    detail: '只删样本、不改人脸库；若这张脸是被认错了的陌生人，用 /hitblock 标反例才能阻止以后再被认错。'
+  },
+  {
     cmd: 'csilent',
     usage: '/csilent <通道> <小时数|HH:MM|off> [渠道]',
     desc: '通道静默：只让某一路监控在指定时段不推送。如 /csilent 门口 2（2 小时）、/csilent 门口 08:00（到 08:00）、/csilent off 门口（恢复）'
@@ -7980,7 +8006,55 @@ function onDragEnd() {
 }
 
 /* ---------- 保存 / 重置 / 导入导出 ---------- */
-function save() {
+/**
+ * 「人脸库容量」调小到当前库存之下时的明确警告 + 自动淘汰最旧。
+ *
+ * 为什么放在保存前：libMax 是配置项，改数字那一刻没有任何反馈，用户直到下次
+ * 录入被拒（"人脸库已满"）才发现上限变了 —— 而库里其实已经超额。
+ * 现在保存前先把账算清楚（计划由纯函数 planEvictOldest 产出，可单测）：
+ *   - 不需要淘汰（上限 ≥ 当前条数）→ 直接放行；
+ *   - 需要淘汰 → danger 确认框写明「当前 X 条（Y 人）→ 新上限 Z，将淘汰最旧的
+ *     N 人共 M 条（不可恢复），保留 …」，确定才砍并继续保存，取消则**整个保存作废**
+ *     （回去把上限调大，或先去人脸库里手动删人）。
+ *
+ * 为什么整组淘汰而不是砍单条：一张卡片 = 一个人，砍掉这个人一半的样本，
+ * 卡片还在、样本少几张，用户会以为出了 bug。
+ *
+ * ⚠️ 删除只动本地 IndexedDB；随后 faceList 变化会经 App.vue 的推送指纹
+ * （pushSignature 含 faces）自动同步给后端，不需要在这里手动推。
+ *
+ * @returns {Promise<boolean>} true = 可以继续保存；false = 用户取消 / 淘汰失败
+ */
+async function ensureLibMaxRoom() {
+  const cap = Math.max(1, Math.round(Number(opts.face.libMax) || DEFAULT_FACE_MAX))
+  const plan = planEvictOldest(faceLib.value, faceGroups.value, cap)
+  if (plan.need <= 0) return true
+  const ok = await confirmDialog({
+    title: '人脸库容量已调小',
+    variant: 'danger',
+    okText: '自动淘汰并保存',
+    cancelText: '取消',
+    message:
+      `当前人脸库 ${plan.totalRecords} 条样本（${plan.totalPeople} 人），新上限 ${cap} 条，多出 ${plan.need} 条。\n\n` +
+      `保存后将自动淘汰最旧的 ${plan.removedPeople} 人（共 ${plan.removedRecords} 条样本，不可恢复），` +
+      `保留 ${plan.keepPeople} 人（${plan.keepRecords} 条）。\n\n` +
+      `点「取消」放弃本次保存：可以把上限调大，或先去人脸库里手动删人。`
+  })
+  if (!ok) return false
+  try {
+    const r = await deleteFaces(plan.victimIds)
+    if (!r || !r.ok) {
+      await alertDialog({ title: '淘汰失败', message: (r && r.reason) || '删除旧样本时出错', variant: 'danger' })
+      return false
+    }
+  } catch (e) {
+    await alertDialog({ title: '淘汰失败', message: '删除旧样本时出错：' + ((e && e.message) || e), variant: 'danger' })
+    return false
+  }
+  return true
+}
+
+async function save() {
   const cleaned = cams.value
     .filter((c) => c.url && c.url.trim())
     .map((c, i) => ({ ...c, name: c.name || `画面 ${i + 1}` }))
@@ -7989,6 +8063,8 @@ function save() {
    * 删掉/隐藏某一路之后，名单里不能还留着它的 id（否则后端会去盯一个不存在的通道）。
    */
   syncChannelCameras(cleaned, opts)
+  // 上限调小到库存之下：先明确警告 + 自动淘汰，用户取消则整个保存作废
+  if (!(await ensureLibMaxRoom())) return
   emit('save', { cameras: cleaned, options: { ...opts }, hiddenIds: hidden.value })
 }
 

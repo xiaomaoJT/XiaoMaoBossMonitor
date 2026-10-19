@@ -296,6 +296,7 @@ import { alarmBrief, alarmLabel } from './composables/useAlarmText'
 import {
   backendEventToPayload,
   backendOn,
+  backendConfigRev,
   fetchBackendHistory,
   markReadOnBackend,
   mergeEventLists,
@@ -1324,6 +1325,28 @@ watch(
     if (!backendActive.value) return
     if (applyingRemote) return
     scheduleConfigSync(pushPayload, { url: options.backend.url })
+  }
+)
+
+/**
+ * 远程指令改了**后端**配置（/digest /cdigest /hitfix /hitblock …）→ 后端 configRev +1
+ * → /api/events 轮询把新版本号带回来（useBackendEvents.backendConfigRev）。
+ * 本机还停在旧 rev 时静默自动拉取一次（走 alignWithBackend 的 'silent' 路径），
+ * 远程修正的人脸库 / 反例因此能传播进前端 source of truth。
+ *
+ * 为什么在 watch 里拉、而不是在轮询回调里直接拉：拉取会改 syncRev、会整体换配置，
+ * 与轮询循环（在途请求 / 错误退避）解耦更安全；alignWithBackend 自己有
+ * applyingRemote / localRev 判据，拉完 rev 追平就不会再触发，不会死循环。
+ */
+watch(
+  () => (backendActive.value ? backendConfigRev.value : 0),
+  (rev) => {
+    if (!backendActive.value || !rev) return
+    if (applyingRemote) return
+    // 本机从没跟这个后端交换过（localRev=0）时不自动拉：那种情况交给开关打开时的首屏对齐
+    if (!(localRev.value > 0)) return
+    if (rev <= syncRev.value) return
+    alignWithBackend()
   }
 )
 
