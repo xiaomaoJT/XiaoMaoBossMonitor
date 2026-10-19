@@ -3809,6 +3809,23 @@
             <button class="btn small" @click="pickFile">选择 .json 文件</button>
           </div>
 
+          <div class="opt" v-if="backendEnabled">
+            <span>
+              <strong>导出运行数据库</strong>
+              <em>把后端服务器上当前运行的 monitor.db（报警记录、人脸库、统计一并含 WAL 热备）下载到本机</em>
+            </span>
+            <button class="btn small primary" :disabled="dbExporting" @click="exportDatabase">
+              {{ dbExporting ? '导出中…' : '导出 .db' }}
+            </button>
+          </div>
+          <div class="opt" v-else>
+            <span>
+              <strong>导出运行数据库</strong>
+              <em>数据库在后端服务器上（monitor.db）。请先在「后端检测」里开启并填写服务地址，才能导出。</em>
+            </span>
+            <button class="btn small" disabled>导出 .db</button>
+          </div>
+
           <div class="opt col">
             <span>
               <strong>加载内置配置</strong>
@@ -5030,6 +5047,11 @@ function restartSystemNow() {
 function backendBase() {
   return String((props.options.backend && props.options.backend.url) || '').replace(/\/+$/, '')
 }
+
+/** 是否启用了后端检测服务（数据库在后端服务器上，才能导出 monitor.db） */
+const backendEnabled = computed(
+  () => !!(props.options.backend && props.options.backend.enabled && props.options.backend.url)
+)
 
 /** 重启结果码 → 人话 */
 function restartResultText(r) {
@@ -7629,6 +7651,51 @@ function exportConfig() {
   a.download = `monitor-config-${new Date().toISOString().slice(0, 10)}.json`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+/** 导出后端运行的数据库（monitor.db 在线热备下载） */
+const dbExporting = ref(false)
+async function exportDatabase() {
+  const base = backendBase()
+  if (!base) {
+    alertDialog({
+      title: '无法导出',
+      message: '未配置后端检测服务地址。数据库在后端服务器上，请先在「后端检测」页开启并填写服务地址。',
+      variant: 'danger'
+    })
+    return
+  }
+  dbExporting.value = true
+  try {
+    const res = await fetch(`${base}/api/db/export`)
+    if (!res.ok) throw new Error(`服务器返回 ${res.status}`)
+    const blob = await res.blob()
+    if (!blob.size) throw new Error('导出的文件为空')
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    // 优先用服务端给的文件名（带时间戳），否则兜底
+    const cd = res.headers.get('Content-Disposition')
+    const m = cd && cd.match(/filename="?([^";]+)"?/)
+    a.download = m ? m[1] : `monitor-${Date.now()}.db`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    alertDialog({
+      title: '导出成功',
+      message: '数据库文件已下载（含 WAL 热备，是完整一致的快照）。可用于备份或迁移到其它设备。',
+      variant: 'ok'
+    })
+  } catch (e) {
+    alertDialog({
+      title: '导出失败',
+      message: '数据库导出失败：' + ((e && e.message) || e),
+      variant: 'danger'
+    })
+  } finally {
+    dbExporting.value = false
+  }
 }
 
 function pickFile() {

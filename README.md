@@ -2342,6 +2342,7 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 | `POST` | `/api/shot` | 补图 / 人脸信息回写 |
 | `GET` | `/api/pending-faces` | 未录入人员队列 |
 | `GET` `DELETE` | `/api/faces` · `/api/pending-face` | 人脸库查询 / 删除待录入单条 |
+| `GET` | `/api/db/export` | **导出运行数据库**：在线热备当前 `monitor.db`（含 WAL 未落盘写入）成自包含 SQLite 文件流式下载，文件名带时间戳。裸 LAN 接口，与 `/api/config` 同规格（要收紧就给整组裸接口统一加网关）。前端在「配置方案」页点「导出运行数据库」触发，**仅后端模式可用**（数据库在后端服务器上） |
 | `GET` | `/shots/*` | 事件快照 JPEG（带防目录穿越校验） |
 | `*` | `/dingtalk-robot/**` | 反向代理 → `oapi.dingtalk.com` |
 | `*` | `/wecom-bot/**` | 反向代理 → `qyapi.weixin.qq.com` |
