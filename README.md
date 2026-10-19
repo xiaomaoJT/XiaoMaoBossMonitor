@@ -563,7 +563,7 @@ analyzer.mjs（每路一个实例）
 2. **必须在白名单**（`from.id ∈ allowUserIds`）；
 3. **必须以 `/` 开头**。
 
-危险指令（`/reboot`、`/hardreboot`）额外要 `allowReboot` 开关，且默认关闭。每条指令都写一行审计日志（时间 / 来源 id / 指令 / 结果）。
+危险指令（`/reboot`、`/stop`、`/hardreboot`、`/shutdown`）额外要 `allowReboot` 开关，且默认关闭。`/reboot` 与 `/stop` 只需这一道开关（只动服务、不动机器）；`/hardreboot` 与 `/shutdown` 还要再多开 `systemReboot.enabled`。每条指令都写一行审计日志（时间 / 来源 id / 指令 / 结果）。
 
 ### 5.12 启动重放与积压（为什么「一启动就反复重启」）
 
@@ -2240,6 +2240,7 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 
 | 指令 | 作用 |
 |---|---|
+| `/help` | 查看全部指令。**常用指令平铺展示**；系统操作类（关机 / 重启 / 终止服务等危险动作）单独收进一块，只给概览 + 引导「发送对应指令看详情」，不堆完整说明。输入 `/` 也能唤起命令菜单 |
 | `/silent <小时数> [渠道]` | 开启临时静默，如 `/silent 2`（开启与结束都会推送提醒，期间报警收存、结束时汇总）。不写渠道就走设置页那份默认（钉钉 + 企微）；也可临时指定：`/silent 2 wecom`、`/silent 2 ding,tg` |
 | `/until <HH:MM> [渠道]` | 静默到指定时刻（今天已过则顺延到明天），如 `/until 08:00`，同样可跟渠道 |
 | `/resume` | 立刻结束临时静默，并推结束提醒 + 已收存报警汇总 |
@@ -2251,10 +2252,16 @@ npm run build:all -- --mp-url=https://x/           # 顺手把 H5 地址写进�
 | `/hits [T\|Y] [img]` | **人脸库概览 + 人脸命中记录**：先给「待录入 N 张未建档 + 已录入名单（当前实时状态）」，再列命中**已录入人脸**的记录（陌生人脸不算），给出命中次数 / 涉及人数 / 通道数 / 逐条明细（时刻 · 通道 · 姓名 · 相似度）。例：`/hits Y`。默认答案就是回执本身（不另推汇总、不占查岗的串行锁）；末尾加 `img` 才把该时段**全部命中**的截图推过来（那时会占串行锁，回执只回摘要）—— 见 §5.27、§5.42 |
 | `/check duty` | **静默查岗**：推静默期间积压事件的汇总 + 全部截图；再发一次只看增量 |
 | `/duty` | 同上（短别名，**也单独注册进了命令菜单**，手机上手打更省事） |
-| `/reboot` | 重启检测服务（需另开 `allowReboot`） |
+| `/reboot` | 重启检测服务（需另开 `allowReboot` + 回复 `confirm`） |
+| `/stop` | 终止监控服务（仅退出本进程，机器仍开机，需手动重启服务才能恢复；需 `allowReboot` + 回复 `confirm`）。与 `/reboot`（重启服务）、`/hardreboot`（重启机器）、`/shutdown`（关机器）构成四级生命周期动作 —— 门槛比关机轻，**不需** `systemReboot.enabled` |
 | `/hardreboot` | 重启整台电脑（需 `allowReboot` + `systemReboot.enabled` + 回复 `confirm`） |
+| `/shutdown` | 关闭整台电脑（比硬重启更彻底：断电后需人工开机或主板通电自启才回得来；同样需 `allowReboot` + `systemReboot.enabled` + 回复 `confirm`）。`systemReboot.enabled` 这个开关同时解锁 `/hardreboot` 与 `/shutdown` 两条电源指令 |
+| `/db` | **导出运行数据库**：把当前运行的 `monitor.db`（含报警 / 人脸 / 统计 / 待录入）用 `db.backup()` 在线热备成自包含单文件，直接发到发指令的这个私聊。还原：把下载的 `.db` 拷回 `server/data/monitor.db`（已含 WAL，无需 `-wal` 文件） |
+| `/config` | **导出当前生效配置**：把后端现在实际在用的那份配置（通道 / 区域 / 推送 / 人脸库，含 `configRev`）打包成 JSON 发到本私聊；与设置页「配置方案 → 导出当前配置」同构，但导出的是**运行中**的，不是 config.json 旧快照 |
 
 `/checkduty` 与 `/check duty`、`/duty` 三者等效。
+
+> **`/db` 与 `/config` 的安全口径**：与既有的裸 LAN 接口（`/api/config` 等）一致 —— 仅在**私聊 + 白名单**内可用（`tg-remote.mjs` 的 `checkPermission` 已拦住群聊与非授权来源，且非白名单用户**连回执都不给**，避免探测机器人能力）。文件通过 Telegram 私聊直接发回「发指令的那个人」，不经过任何 web 路径、不生成临时下载链接。导出的是整库 / 整份配置，敏感信息（推送凭据、人脸数据）随文件一起走 Telegram 加密通道 —— 和 `/api/config` 同等信任级别，若要给整组 HTTP 接口统一加网关，这两个指令一并被覆盖。
 
 ### `/collect`、`/check duty`、`/hits` 的分工（最容易混的一对）
 

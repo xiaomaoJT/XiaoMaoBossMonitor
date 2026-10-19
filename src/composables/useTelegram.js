@@ -244,6 +244,56 @@ export async function sendTelegramText(cfg, html, opts = {}) {
   throw lastErr
 }
 
+/**
+ * 发送一个文件（数据库 / 配置等）给指定会话。
+ *
+ * ⚠️ 入参 `file` 是「内容」而不是「磁盘路径」—— 这样同一份实现既能跑在后端
+ * （读文件成 Buffer 传进来），也能跑在前端（用 Blob）。useTelegram.js 被前后端
+ * 共用，不能静态 import `node:fs`，否则前端打包会挂。
+ *
+ * @param {object} cfg  Telegram 配置（token / chatId / silent）
+ * @param {{content:Blob|Buffer|Uint8Array|ArrayBuffer, filename?:string, mime?:string}} file
+ * @param {string} [caption]  文件说明（Telegram 文档 caption，纯文本，≤1024 字符）
+ * @param {object} [opts]     { silent?:boolean }
+ * @returns {Promise<object>}  Telegram 返回的 message 对象
+ */
+export async function sendTelegramDocument(cfg, file, caption = '', opts = {}) {
+  const { token, chatId } = assertReady(cfg)
+  const content = file && file.content
+  if (!content) throw new Error('缺少文件内容')
+  const filename = (file && file.filename) || 'file.bin'
+  const mime = (file && file.mime) || 'application/octet-stream'
+  const blob = content instanceof Blob ? content : new Blob([content], { type: mime })
+  let lastErr
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const form = new FormData()
+      form.append('chat_id', String(chatId))
+      form.append('document', blob, filename)
+      if (caption) form.append('caption', caption.slice(0, 1024))
+      form.append('disable_notification', opts.silent !== undefined ? !!opts.silent : !!cfg.silent)
+      const res = await fetch(apiUrl(token, 'sendDocument'), {
+        method: 'POST',
+        body: form,
+        signal: timeoutSignal(UPLOAD_TIMEOUT_MS)
+      })
+      return await parse(res)
+    } catch (e) {
+      lastErr = e
+      if (e && e.retryAfter != null) {
+        await sleep((e.retryAfter + attempt) * 1000)
+        continue
+      }
+      if (attempt < 1) {
+        await sleep(400)
+        continue
+      }
+      throw e
+    }
+  }
+  throw lastErr
+}
+
 /* ==================== 长文本分条 ==================== */
 
 /** 单条消息字符上限（Telegram 硬限 4096，留出转义与余量） */

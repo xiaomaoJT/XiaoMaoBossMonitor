@@ -701,18 +701,22 @@
 
           <div class="divider"></div>
 
-          <h3>系统级硬重启（最后手段）</h3>
+          <h3>系统级电源操作（重启 / 关机，最后手段）</h3>
           <div class="opt col">
             <span>
-              <strong>允许重启整台电脑</strong>
+              <strong>允许控制整台电脑的电源</strong>
               <em>
-                ⚠️ 这不是重启 BossMonitor 进程，而是<strong>重启整台机器</strong>：会下线几分钟，
-                且<strong>重启后服务不会自己回来</strong>——除非你另配了开机自启
+                ⚠️ 这不是重启 BossMonitor 进程，而是<strong>动整台机器的电</strong>，会下线几分钟，
+                且<strong>之后服务不会自己回来</strong>——除非你另配了开机自启
                 （Windows 任务计划程序 / NSSM、macOS launchd、Linux systemd）。
                 另外需要管理员 / root 权限（Windows 走 shutdown、Linux 走 systemctl、
                 macOS 走 osascript 需「辅助功能」授权）。
+                本开关同时解锁远程指令 <code>/hardreboot</code>（重启）与 <code>/shutdown</code>（关闭，比重启更彻底——断电后需人工开机或主板通电自启），两条都需二次确认。
                 <template v-if="restartInfo && restartInfo.hardReboot">
-                  <br />本机将执行：<code>{{ restartInfo.hardReboot.command }}</code>
+                  <br />本机重启将执行：<code>{{ restartInfo.hardReboot.command }}</code>
+                </template>
+                <template v-if="restartInfo && restartInfo.systemShutdown">
+                  <br />本机关机将执行：<code>{{ restartInfo.systemShutdown.command }}</code>
                 </template>
               </em>
             </span>
@@ -7374,8 +7378,20 @@ const TG_COMMANDS = [
    * `/check duty` 会收到「未知指令」。列表跟着**真正能用的指令**走。
    */
   { cmd: 'duty', usage: '/duty', desc: '静默查岗：把静默期间积压的事件汇总推过来（含全部截图）；旧写法 /checkduty 仍可用' },
-  { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）' },
-  { cmd: 'hardreboot', usage: '/hardreboot', desc: '重启整台电脑（最后手段，需两次开启 + 二次确认）' }
+  {
+    cmd: 'db',
+    usage: '/db',
+    desc: '导出当前运行的数据库（monitor.db，含报警/人脸/统计/待录入），热备成自包含文件发到本私聊'
+  },
+  {
+    cmd: 'config',
+    usage: '/config',
+    desc: '导出当前生效的完整配置（通道 / 区域 / 推送 / 人脸库），发到本私聊'
+  },
+  { cmd: 'reboot', usage: '/reboot', desc: '重启检测服务（需二次确认，且要单独开启）', cat: 'system' },
+  { cmd: 'stop', usage: '/stop', desc: '终止监控服务（仅退进程，机器仍开机，需手动重启；需单独开启 + 二次确认）', cat: 'system' },
+  { cmd: 'hardreboot', usage: '/hardreboot', desc: '重启整台电脑（最后手段，需两次开启 + 二次确认）', cat: 'system' },
+  { cmd: 'shutdown', usage: '/shutdown', desc: '关闭整台电脑（比硬重启更彻底，需开启电源操作 + 二次确认）', cat: 'system' }
 ]
 
 const newAllowId = ref('')
