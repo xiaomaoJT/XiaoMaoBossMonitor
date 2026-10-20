@@ -93,6 +93,17 @@ let writeChain = Promise.resolve()
  */
 let faceDbPromise = null
 
+/* ==================== 人脸库写失败的类型码 ====================
+ * 为什么用 error.code 而不是比对错误文本：文案随时会改，文本判定一改就错；
+ * 而且 UI 需要**区分**「卡住了（可重试 / 可能已写入）」和「真的写失败」，
+ * 这两种要给的下一步动作完全不同。判定只有一份 —— faceWriteErrKind()。
+ */
+const FACE_ERR_WRITE_TIMEOUT = 'FACE_WRITE_TIMEOUT'
+const FACE_ERR_OPEN_TIMEOUT = 'FACE_OPEN_TIMEOUT'
+const FACE_ERR_BLOCKED = 'FACE_DB_BLOCKED'
+const FACE_ERR_OPEN_FAIL = 'FACE_OPEN_FAIL'
+const FACE_ERR_NO_IDB = 'FACE_NO_IDB'
+
 /** 关掉并丢弃人脸连接（写超时兜底 / 需要重开时用）。下一次调用会重新 open。 */
 export function resetFaceDB() {
   const p = faceDbPromise
@@ -113,19 +124,24 @@ function openFaceDB() {
   if (faceDbPromise) return faceDbPromise
   faceDbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') {
-      reject(new Error('当前环境不支持 IndexedDB'))
+      const err = new Error('当前环境不支持 IndexedDB')
+      err.code = FACE_ERR_NO_IDB
+      reject(err)
       return
     }
     let settled = false
     let timer = null
-    const fail = (msg) => {
+    const fail = (msg, code) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
       faceDbPromise = null
-      reject(msg instanceof Error ? msg : new Error(msg))
+      const err = msg instanceof Error ? msg : new Error(msg)
+      // 带上类型码：UI 靠它挑文案（见 faceWriteErrKind），不要去 grep 错误文本
+      if (code && !err.code) err.code = code
+      reject(err)
     }
-    timer = setTimeout(() => fail('打开本地人脸数据库超时（10s），请关闭本应用的其它标签页后重试'), 10000)
+    timer = setTimeout(() => fail('打开本地人脸数据库超时（10s），请关闭本应用的其它标签页后重试', FACE_ERR_OPEN_TIMEOUT), 10000)
 
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     /*
@@ -158,7 +174,7 @@ function openFaceDB() {
         db.createObjectStore(FACE_BLOCK_STORE, { keyPath: 'id', autoIncrement: true })
       }
     }
-    req.onblocked = () => fail(new Error('本地人脸数据库正被本应用的其它标签页占用，请关掉其它标签页后重试'))
+    req.onblocked = () => fail(new Error('本地人脸数据库正被本应用的其它标签页占用，请关掉其它标签页后重试'), FACE_ERR_BLOCKED)
     req.onsuccess = () => {
       if (settled) {
         try {
@@ -170,7 +186,7 @@ function openFaceDB() {
       if (timer) clearTimeout(timer)
       resolve(req.result)
     }
-    req.onerror = () => fail('打开本地人脸数据库失败：' + ((req.error && req.error.message) || req.error || '未知原因'))
+    req.onerror = () => fail('打开本地人脸数据库失败：' + ((req.error && req.error.message) || req.error || '未知原因'), FACE_ERR_OPEN_FAIL)
   })
   return faceDbPromise
 }
@@ -191,6 +207,43 @@ function openFaceDB() {
  */
 const WRITE_TIMEOUT_MS = 15000
 
+/*
+ * 连续超时次数（写成功一次就归零）。
+ * 用途只有一个：**同一句话不要重复说给用户听**。第一次超时按"偶发、重试一下"处理；
+ * 连着两次以上就说明不是偶发，而是连接真被占住了 —— 这时提示必须升级成
+ * "完全退出应用再打开"，因为只关设置面板并不会释放连接（用户试过才知道）。
+ */
+let writeTimeoutStreak = 0
+
+/** 当前连续超时次数（UI 拼文案用；0 = 上次写是成功的） */
+export function faceWriteTimeoutStreak() {
+  return writeTimeoutStreak
+}
+
+/**
+ * 人脸库写失败的**类型判定（唯一一份）**。
+ *
+ * @param {any} err 捕获到的错误
+ * @returns {'timeout'|'blocked'|'unsupported'|'other'}
+ *   timeout     —— 卡住了：写事务 15s 没回来 / 打开连接 10s 没回来。
+ *                  ⚠️ 注意"超时"并不等于"没写进去"，事务可能已提交（见 withWatchdog）。
+ *   blocked     —— 数据库被本应用的其它标签页占着（升级受阻，open 被 blocked）。
+ *   unsupported —— 环境没有 IndexedDB（老 WebView / 隐私模式）。
+ *   other       —— 其它真失败（配额、事务被中止、请求错误）。
+ */
+export function faceWriteErrKind(err) {
+  const code = (err && err.code) || ''
+  if (code === FACE_ERR_WRITE_TIMEOUT || code === FACE_ERR_OPEN_TIMEOUT) return 'timeout'
+  if (code === FACE_ERR_BLOCKED) return 'blocked'
+  if (code === FACE_ERR_NO_IDB) return 'unsupported'
+  // 兜底：没有 code 的原生错误（别的浏览器/旧代码路径）才退回文本判定
+  const msg = String((err && err.message) || err || '')
+  if (/超时/.test(msg)) return 'timeout'
+  if (/占用|blocked/i.test(msg)) return 'blocked'
+  if (/不支持 IndexedDB/i.test(msg)) return 'unsupported'
+  return 'other'
+}
+
 function withWatchdog(fn) {
   let timer = null
   const guard = new Promise((_, reject) => {
@@ -202,14 +255,23 @@ function withWatchdog(fn) {
        * 重置只关人脸连接，不影响事件写（那是另一个连接）。
        */
       resetFaceDB()
-      reject(new Error(`本地数据库写入超时（${WRITE_TIMEOUT_MS / 1000}s）：请关闭本应用的其它标签页后重试`))
+      writeTimeoutStreak += 1
+      const err = new Error(`本地数据库写入超时（${WRITE_TIMEOUT_MS / 1000}s）：请关闭本应用的其它标签页后重试`)
+      err.code = FACE_ERR_WRITE_TIMEOUT
+      reject(err)
     }, WRITE_TIMEOUT_MS)
     // Node（探针）里别为它吊住事件循环；浏览器返回数字，没有 unref
     if (timer && typeof timer.unref === 'function') timer.unref()
   })
-  return Promise.race([Promise.resolve().then(fn), guard]).finally(() => {
-    if (timer) clearTimeout(timer)
-  })
+  return Promise.race([Promise.resolve().then(fn), guard])
+    .then((res) => {
+      // 写成功了 → 之前的超时是偶发的，连续计数归零（下次超时重新从"偶发"说起）
+      writeTimeoutStreak = 0
+      return res
+    })
+    .finally(() => {
+      if (timer) clearTimeout(timer)
+    })
 }
 
 function runExclusive(fn) {

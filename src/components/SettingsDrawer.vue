@@ -4314,6 +4314,8 @@ import {
   faceRowsVersion,
   faceSplitsOpen,
   faceSplitsVersion,
+  faceWriteErrKind,
+  faceWriteTimeoutStreak,
   faces as faceLib,
   getAllFaces,
   groupFaces,
@@ -5598,8 +5600,8 @@ async function doFixHit(h) {
       return
     }
     alertDialog({
-      title: '修正失败',
-      message: '写入本地人脸库时出错：' + ((e && e.message) || e) + '\n这条样本还在列表里，可以稍后重试。',
+      title: faceWriteErrKind(e) === 'timeout' ? '修正超时' : '修正失败',
+      message: faceWriteFailMessage(e, '这条样本还在列表里，可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -5671,8 +5673,8 @@ async function doMarkStranger(h) {
     delete fixingHit[h.id] // 落库即解锁，不等网络
   } catch (e) {
     alertDialog({
-      title: '标记失败',
-      message: '写入反例时出错：' + ((e && e.message) || e) + '\n这条样本还在列表里，可以稍后重试。',
+      title: faceWriteErrKind(e) === 'timeout' ? '标记超时' : '标记失败',
+      message: faceWriteFailMessage(e, '这条样本还在列表里，可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6273,8 +6275,8 @@ async function commitSampleAssign(it) {
     sampleCustom[it.id] = ''
   } catch (e) {
     alertDialog({
-      title: '归入失败',
-      message: '改名时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      title: faceWriteErrKind(e) === 'timeout' ? '归入超时' : '归入失败',
+      message: faceWriteFailMessage(e, '这条样本没有改名，可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6317,8 +6319,8 @@ async function doGroupAssign(g, name) {
     if (selectedGroupKey.value === g.key) selectedGroupKey.value = ''
   } catch (e) {
     alertDialog({
-      title: '归入失败',
-      message: '归入时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      title: faceWriteErrKind(e) === 'timeout' ? '归入超时' : '归入失败',
+      message: faceWriteFailMessage(e, '这张卡没有归入到目标人名下，可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6344,6 +6346,67 @@ function onPendingShotKey(e) {
 // 灯箱靠窗口级 Esc 关闭（div 上 @keydown 没焦点不会触发）
 onMounted(() => window.addEventListener('keydown', onPendingShotKey))
 onUnmounted(() => window.removeEventListener('keydown', onPendingShotKey))
+
+/**
+ * 人脸库写失败时的**统一提示文案**（录入 / 修正 / 删除 / 改名 / 合并 / 清空 共用）。
+ *
+ * 为什么值得单独写一个：以前每个 catch 都只给一句「××时出错：<原始报错>」，
+ * 用户看到的是「本地数据库写入超时（15s）：请关闭本应用的其它标签页后重试」——
+ * 这句话有三个问题：
+ *   1. 没说**具体**要关什么（设置面板？窗口？整个应用？），用户猜不出来；
+ *   2. 把"超时"说成了"失败"，于是用户以为没录上、反复点（这正是重复入库的来源）；
+ *   3. 连撞很多次也不升级提示，用户就一直撞同一堵墙。
+ * 所以这里按 faceWriteErrKind 分类给"下一步做什么"，并在连续超时（streak ≥ 2）时
+ * 升级成"完全退出应用再打开"—— 只关设置面板并不会释放数据库连接（实测如此）。
+ *
+ * @param {any} e 捕获到的错误
+ * @param {string} [tail] 这次操作额外要说的一句（比如"这张脸还在待录入里"）
+ */
+function faceWriteFailMessage(e, tail) {
+  const kind = faceWriteErrKind(e)
+  const detail = (e && e.message) || String(e || '未知原因')
+  const lines = []
+  if (kind === 'timeout') {
+    lines.push(
+      '本地人脸库 15 秒内没有返回，这次写入被中止了（连接已自动重建，直接重试通常就恢复）。',
+      '',
+      '常见原因：',
+      '· 本应用在另一个窗口 / 标签页里正在批量读写（录入、导入、导出、清空），把连接占住了；',
+      '· 页面被切到后台 / 手机锁屏，浏览器把数据库连接挂起了；',
+      '· 上一次写入卡住还没清完（会连带后面每一次都超时）。',
+      '',
+      '请这样处理：',
+      '1. 关掉本应用的其它窗口和标签页（尤其是正在录入 / 导入的那个）；',
+      '2. 回到这里再操作一次。'
+    )
+    if (faceWriteTimeoutStreak() >= 2) {
+      lines.push(
+        '',
+        `已经连续 ${faceWriteTimeoutStreak()} 次超时了，说明连接确实卡死了 —— 只关设置面板不够，请完全退出本应用（关掉所有窗口 / 手机端结束后台进程）再重新打开。`
+      )
+    }
+  } else if (kind === 'blocked') {
+    lines.push(
+      '本地人脸数据库正被本应用的其它窗口 / 标签页占用（它可能正在打开或升级数据库）。',
+      '',
+      '请关掉本应用的其它窗口和标签页（只留当前这一个），然后重试。'
+    )
+  } else if (kind === 'unsupported') {
+    lines.push(
+      '当前环境不支持本地数据库（IndexedDB），人脸库无法读写。',
+      '',
+      '请换用新版 Chrome / Edge，或退出浏览器的无痕模式后再试。'
+    )
+  } else {
+    lines.push('写入本地人脸库时出错：' + detail)
+  }
+  if (kind === 'timeout' || kind === 'blocked') {
+    // 这句很重要：用户上次就是被"超时"骗了，以为没写进去又点了一遍
+    lines.push('（超时不一定等于没写进去 —— 上面这条是核对过库之后的结果，确实没有落库。）')
+  }
+  if (tail) lines.push('', tail)
+  return lines.join('\n')
+}
 
 /**
  * 写操作报超时后核实：这张脸的向量是不是**其实已经入库**了。
@@ -6414,8 +6477,8 @@ async function doAddPending(pf) {
      * 用户只能反复点。宁可明确告诉他"没录上、为什么没录上"。
      */
     alertDialog({
-      title: '录入失败',
-      message: '写入本地人脸库时出错：' + ((e && e.message) || e) + '\n这张脸还在待录入里，可以稍后重试。',
+      title: faceWriteErrKind(e) === 'timeout' ? '录入超时' : '录入失败',
+      message: faceWriteFailMessage(e, '这张脸还在待录入里，可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6570,8 +6633,8 @@ async function doDeleteGroup(g) {
     if (selectedGroupKey.value === g.key) selectedGroupKey.value = ''
   } catch (e) {
     alertDialog({
-      title: '删除失败',
-      message: '删除时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      title: faceWriteErrKind(e) === 'timeout' ? '删除超时' : '删除失败',
+      message: faceWriteFailMessage(e, '这张卡片还在列表里（没有删掉），可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6594,7 +6657,11 @@ async function doDeleteSample(it) {
   try {
     await deleteFaces([it.id])
   } catch (e) {
-    alertDialog({ title: '删除失败', message: '删除时出错：' + ((e && e.message) || e), variant: 'danger' })
+    alertDialog({
+      title: faceWriteErrKind(e) === 'timeout' ? '删除超时' : '删除失败',
+      message: faceWriteFailMessage(e, '这张样本还在库里（没有删掉），可以稍后重试。'),
+      variant: 'danger'
+    })
   } finally {
     delete deletingSample[it.id]
     // 样本没了，勾选集合里别留 stale id（否则头部"全选"计数对不上）
@@ -6649,8 +6716,8 @@ async function doMergeGroup(g) {
     selectedGroupKey.value = ''
   } catch (e) {
     alertDialog({
-      title: '合并失败',
-      message: '合并时出错：' + ((e && e.message) || e) + '\n可以稍后重试；如果一直失败，试试关掉本应用的其它标签页。',
+      title: faceWriteErrKind(e) === 'timeout' ? '合并超时' : '合并失败',
+      message: faceWriteFailMessage(e, '这一组没有变动（没有合并），可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6711,8 +6778,8 @@ async function commitRenameGroup() {
      */
     faceRenameKey.value = null
     alertDialog({
-      title: '改名失败',
-      message: '保存时出错：' + ((e && e.message) || e) + '\n名字没有改动。如果一直失败，试试关掉本应用的其它标签页再试。',
+      title: faceWriteErrKind(e) === 'timeout' ? '改名超时' : '改名失败',
+      message: faceWriteFailMessage(e, '名字没有改动，可以稍后重试。'),
       variant: 'danger'
     })
   } finally {
@@ -6733,7 +6800,11 @@ async function doClearFaces() {
     await clearFaces()
   } catch (e) {
     // 同 doAddPending：写库失败必须说出来，不能让按钮点下去毫无反应
-    alertDialog({ title: '清空失败', message: '清空本地人脸库时出错：' + ((e && e.message) || e), variant: 'danger' })
+    alertDialog({
+      title: faceWriteErrKind(e) === 'timeout' ? '清空超时' : '清空失败',
+      message: faceWriteFailMessage(e, '人脸库没有被清空，可以稍后重试。'),
+      variant: 'danger'
+    })
   }
 }
 
@@ -8166,7 +8237,11 @@ async function ensureLibMaxRoom() {
       return false
     }
   } catch (e) {
-    await alertDialog({ title: '淘汰失败', message: '删除旧样本时出错：' + ((e && e.message) || e), variant: 'danger' })
+    await alertDialog({
+      title: faceWriteErrKind(e) === 'timeout' ? '淘汰超时' : '淘汰失败',
+      message: faceWriteFailMessage(e, '旧样本没有被删除，人脸库容量没变。'),
+      variant: 'danger'
+    })
     return false
   }
   return true

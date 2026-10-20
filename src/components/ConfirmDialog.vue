@@ -108,6 +108,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   position: relative;
   width: 364px;
   max-width: 100%;
+  /*
+   * 长文案（人脸库写入超时那类"原因 + 怎么做"的说明）在手机窄屏上会超过一屏，
+   * 不限制高度就会被裁掉下面的按钮 —— 只能靠滚动兜住，不能靠"文案写短点"。
+   * 40px = mask 上下各 20px 的 padding。
+   */
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 22px 22px 18px;
   border-radius: 14px;
   background: linear-gradient(
