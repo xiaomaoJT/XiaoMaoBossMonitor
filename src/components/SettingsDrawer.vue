@@ -233,8 +233,8 @@
                   :key="e.key"
                   class="tag mini ext"
                   :class="{
-                    on: camExtOn(cam, e.key) && extGlobalOn(e.key),
-                    preset: camExtOn(cam, e.key) && !extGlobalOn(e.key)
+                    on: camExtOn(cam, e.key) && extGlobalOn(e.key, cam),
+                    preset: camExtOn(cam, e.key) && !extGlobalOn(e.key, cam)
                   }"
                   :disabled="!cam.ai"
                   :title="camExtTitle(cam, e)"
@@ -1477,6 +1477,9 @@
               <strong>已圈定区域（{{ zoneRows.length }}）</strong>
               <em>在画面上点「更多操作 → 进出 / 徘徊区域」，拖拽即可新增；这里可以改名和逐项开关</em>
             </span>
+            <p class="hint tight">
+              通道级「走入/走」总闸在各路画面的「更多操作 → 走入/走」里 —— 关掉它即整路不再捕获进出事件（这里的「进出」是逐区域细调）。
+            </p>
             <div class="zone-list" v-if="zoneRows.length">
               <div class="zone-row" v-for="r in zoneRows" :key="r.camId + ':' + r.zone.id">
                 <span class="zone-cam" :title="r.camName">{{ r.camName }}</span>
@@ -1811,20 +1814,27 @@
                 <em>最近 {{ backendFaceHits.length }} 条命中样本（带原图）；认错了就按正确名字修正，提升后续识别精准度</em>
               </span>
 
-              <div class="face-grid" v-if="hitReviewOpen && backendFaceHits.length">
+              <!-- 命中卡片比待录入/人脸库复杂（图 + 4 行信息 + 下拉 + 3 个按钮），
+                   用 hit-grid 放宽到 200px、内部改成「图在左、信息在右」的横排，
+                   底部按钮行允许换行、绝不裁成半个字 -->
+              <div class="face-grid hit-grid" v-if="hitReviewOpen && backendFaceHits.length">
                 <div class="face-card hit" v-for="h in backendFaceHits" :key="h.id">
-                  <img
-                    :src="h.thumb"
-                    alt="命中人脸"
-                    class="pending-thumb"
-                    :class="{ clickable: h.full }"
-                    :title="h.full ? '点击查看命中时的原图' : ''"
-                    @click="h.full && openPendingShot(h)"
-                  />
-                  <span class="hit-cur" :title="h.name || '未识别'">认成：{{ h.name || '未识别' }}</span>
-                  <span class="face-meta">相似度 {{ (h.score * 100).toFixed(0) }}%</span>
-                  <span class="face-meta">{{ h.camName || '未知通道' }}</span>
-                  <span class="face-time" v-if="h.at">{{ fmtPendingAt(h.at) }}</span>
+                  <div class="hit-top">
+                    <img
+                      :src="h.thumb"
+                      alt="命中人脸"
+                      class="pending-thumb"
+                      :class="{ clickable: h.full }"
+                      :title="h.full ? '点击查看命中时的原图' : ''"
+                      @click="h.full && openPendingShot(h)"
+                    />
+                    <div class="hit-info">
+                      <span class="hit-cur" :title="h.name || '未识别'">认成：{{ h.name || '未识别' }}</span>
+                      <span class="face-meta">相似度 {{ (h.score * 100).toFixed(0) }}%</span>
+                      <span class="face-meta">{{ h.camName || '未知通道' }}</span>
+                      <span class="face-time" v-if="h.at">{{ fmtPendingAt(h.at) }}</span>
+                    </div>
+                  </div>
                   <!-- 正确名字：选库里已有的人，或选「自定义」填一个；修正 = 按这个名字把样本录进人脸库 -->
                   <div class="face-assign" v-if="faceNameOptions.length">
                     <FaceAssignSelect
@@ -1864,9 +1874,17 @@
                 </div>
               </div>
 
-              <div class="face-acts" v-if="hitReviewOpen">
+              <div class="face-acts hit-toolbar" v-if="hitReviewOpen">
                 <button class="mini-btn ghost" :disabled="hitRefreshing" @click="refreshBackendFaceHits">
                   {{ hitRefreshing ? '刷新中…' : '刷新命中' }}
+                </button>
+                <button
+                  class="mini-btn ghost danger"
+                  :disabled="hitRefreshing || !backendFaceHits.length"
+                  title="忽略当前列出的全部命中样本（不修正、也不标记反例，仅从列表移除）"
+                  @click="doIgnoreAllHits"
+                >
+                  全部忽略
                 </button>
                 <span class="muted" v-if="!hitRefreshNote">来自后端检测服务</span>
                 <span class="muted pending-refresh-note" v-if="hitRefreshNote">{{ hitRefreshNote }}</span>
@@ -5589,6 +5607,29 @@ function doIgnoreHit(h) {
 }
 
 /**
+ * 忽略当前列出的全部命中样本（不修正、不标记反例，仅从列表移除）。
+ * 危险操作（批量删样本、不可撤销），先二次确认。
+ * dropBackendFaceHit 内部会按 backendId 过滤掉列表项并后台发删除请求，
+ * 这里用进入循环前的快照遍历，避免边删边迭代响应式数组出问题。
+ */
+async function doIgnoreAllHits() {
+  const list = backendFaceHits.value
+  if (!list.length) return
+  const ok = await confirmDialog({
+    title: '全部忽略？',
+    message: `将忽略当前列出的 ${list.length} 条命中样本（不修正、也不标记反例，仅从列表移除）。忽略后这些样本即被删掉，要再修正就得等新的命中进来。`,
+    okText: '全部忽略',
+    variant: 'danger'
+  })
+  if (!ok) return
+  for (const h of list) dropBackendFaceHit(opts.backend.url, h.backendId)
+  // 清掉本地选择态，避免留下 stale key
+  for (const k of Object.keys(hitAssign)) delete hitAssign[k]
+  for (const k of Object.keys(hitCustom)) delete hitCustom[k]
+  hitRefreshNote.value = `已忽略全部（${list.length} 条）`
+}
+
+/**
  * 把一条命中样本标成「不是本人」（陌生人反例）。
  *
  * 为什么「忽略」不够：忽略只是把样本从列表删掉，库内样本与这张陌生脸的
@@ -5744,11 +5785,14 @@ const behindBackend = computed(() => localRev.value > 0 && syncRev.value > local
 const EXT_ITEMS = [
   { key: 'face', label: '人脸', globalLabel: '人脸识别' },
   { key: 'pose', label: '姿态', globalLabel: '人形姿态' },
-  { key: 'zone', label: '区域', globalLabel: '区域规则' }
+  { key: 'zone', label: '区域', globalLabel: '区域规则' },
+  { key: 'enterExit', label: '进出', globalLabel: '走入/走出' }
 ]
 
 /** 区域规则没有单一总开关（由进出 / 徘徊 / 计数几个子项决定），只有人脸和姿态要看全局 */
-function extGlobalOn(key) {
+function extGlobalOn(key, cam) {
+  // 走入/走出 与区域规则同族：通道先开区域规则才谈得上进出捕获
+  if (key === 'enterExit') return camExtOn(cam, 'zone')
   if (key === 'zone') return true
   const g = opts[key]
   return !!(g && g.enabled)
@@ -5757,7 +5801,11 @@ function extGlobalOn(key) {
 function camExtTitle(cam, e) {
   if (!cam.ai) return `先开启这一路的「人形识别」——${e.globalLabel}建立在人形检测之上`
   if (!camExtOn(cam, e.key)) return `这一路目前不参与${e.globalLabel}，点击恢复`
-  if (!extGlobalOn(e.key)) return `「${e.globalLabel}」的全局总开关还没开（在「检测识别」页），这里只是预设这一路是否参与`
+  if (!extGlobalOn(e.key, cam)) {
+    return e.key === 'enterExit'
+      ? `先开启这一路的「区域规则」（更多操作 → 区域规则），走入/走」才会生效`
+      : `「${e.globalLabel}」的全局总开关还没开（在「检测识别」页），这里只是预设这一路是否参与`
+  }
   return `点击让这一路不再跑${e.globalLabel}（省这一路的算力）`
 }
 
@@ -5769,6 +5817,7 @@ function toggleCamExt(cam, key) {
     face: cur.face !== false,
     pose: cur.pose !== false,
     zone: cur.zone !== false,
+    enterExit: cur.enterExit !== false,
     // 保留历史 aiExt.hit 字段（旧存档可能有），它现在是无害的残留，不再参与推送判定
     hit: cur.hit === true,
     [key]: cur[key] === false
@@ -6831,7 +6880,7 @@ function clone(list) {
     roi: c.roi ? { ...c.roi } : null,
     rect: c.rect ? { ...c.rect } : null,
     channels: c.channels ? { ...c.channels } : { ding: true, wecom: true, tg: true },
-    aiExt: c.aiExt ? { ...c.aiExt } : { face: true, pose: true, zone: true },
+    aiExt: c.aiExt ? { ...c.aiExt } : { face: true, pose: true, zone: true, enterExit: true },
     /*
      * 通道静默必须**深拷贝**（slots 是数组）。只靠上面的 `...c` 会与外面的
      * cam.silent 共享同一个对象 —— 在抽屉里改时段会立刻写进真实配置，
@@ -6954,7 +7003,7 @@ function addCamera() {
     ai: false,
     // 附加能力与区域列表要一起给，否则新通道的 cam.aiExt 是 undefined，
     // 后面按「!== false」判断时看着像开着，开关列却渲染不出正确状态
-    aiExt: { face: true, pose: true, zone: true },
+    aiExt: { face: true, pose: true, zone: true, enterExit: true },
     blind: false,
     roi: null,
     rect: null,
@@ -8247,8 +8296,8 @@ function importConfig(e) {
           // 否则导入配置后"圈好的区域全没了、通道开关也回到默认"
           aiExt:
             c.aiExt && typeof c.aiExt === 'object'
-              ? { face: c.aiExt.face !== false, pose: c.aiExt.pose !== false, zone: c.aiExt.zone !== false }
-              : { face: true, pose: true, zone: true },
+              ? { face: c.aiExt.face !== false, pose: c.aiExt.pose !== false, zone: c.aiExt.zone !== false, enterExit: c.aiExt.enterExit !== false }
+              : { face: true, pose: true, zone: true, enterExit: true },
           zones: Array.isArray(c.zones)
             ? c.zones.map((z) => ({ ...z, rect: z && z.rect ? { ...z.rect } : z.rect }))
             : []
@@ -8842,7 +8891,67 @@ function loadHidden() {
  * 这些是**已经认出是谁**的命中，列出来是为了人工复核「有没有认错」。
  */
 .face-card.hit {
+  width: 200px;
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* 命中卡片网格：比 88px 的待录入/人脸库宽，给「图 + 信息 + 下拉 + 3 按钮」留足空间 */
+.hit-grid {
+  grid-template-columns: repeat(auto-fill, 200px);
+}
+
+/* 卡片内横排：图在左、信息在右，信息多也不会把卡片挤变形 */
+.face-card.hit .hit-top {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.face-card.hit .hit-top img {
+  width: 60px;
+  height: 60px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  object-fit: cover;
+  display: block;
+  background: #0a0f18;
+}
+
+.face-card.hit .hit-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 横排后信息左对齐更易读（原本在竖排卡片里是居中） */
+.face-card.hit .hit-info .hit-cur,
+.face-card.hit .hit-info .face-meta,
+.face-card.hit .hit-info .face-time {
+  text-align: left;
+}
+
+/* 命中卡片底部按钮：允许换行、不裁字 —— 杜绝「只能看到一个字」
+   （覆盖 .face-card .face-acts .mini-btn 的 nowrap + ellipsis） */
+.face-card.hit .face-acts {
+  flex-wrap: wrap;
+}
+
+.face-card.hit .face-acts .mini-btn {
+  flex: 1 1 auto;
+  min-width: 56px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.25;
+  padding: 4px 6px;
+}
+
+/* 命中管理工具条（刷新命中 / 全部忽略）与卡片网格拉开点距离 */
+.face-acts.hit-toolbar {
+  margin-top: 8px;
+  flex-wrap: wrap;
 }
 
 /*

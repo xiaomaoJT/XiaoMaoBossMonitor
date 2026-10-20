@@ -865,11 +865,14 @@ const extCounts = extras.counts
 const EXT_ROWS = [
   { key: 'face', label: '人脸识别', icon: '☺' },
   { key: 'pose', label: '人形姿态', icon: '⋔' },
-  { key: 'zone', label: '区域规则', icon: '▤' }
+  { key: 'zone', label: '区域规则', icon: '▤' },
+  { key: 'enterExit', label: '走入/走出', icon: '⇄' }
 ]
 
 /** 区域规则没有单一总开关（由进出 / 徘徊 / 计数几个子项决定），只有人脸和姿态要看全局 */
 function extGlobalOn(key) {
+  // 走入/走出 与区域规则同属「区域」能力族：通道先参与区域分析，才谈得上进出捕获
+  if (key === 'enterExit') return camExtOn(props.cam, 'zone')
   if (key === 'zone') return true
   const g = props.options[key]
   return !!(g && g.enabled)
@@ -882,13 +885,17 @@ function extOn(key) {
 
 function extLabel(e) {
   if (!camExtOn(props.cam, e.key)) return '已关闭'
-  if (!extGlobalOn(e.key)) return '全局未开启'
+  if (!extGlobalOn(e.key)) return e.key === 'enterExit' ? '需先开区域规则' : '全局未开启'
   return '已开启'
 }
 
 function extTitle(e) {
   if (!camExtOn(props.cam, e.key)) return `这一路不参与${e.label}，点击恢复`
-  if (!extGlobalOn(e.key)) return '总开关在「检测识别」页，开启后这一路才会生效'
+  if (!extGlobalOn(e.key)) {
+    return e.key === 'enterExit'
+      ? '先在该路「更多操作 → 区域规则」开启区域分析，走入/走出才会生效'
+      : '总开关在「检测识别」页，开启后这一路才会生效'
+  }
   return `点击关闭这一路的${e.label}`
 }
 
@@ -904,16 +911,21 @@ function setExt(key, on) {
   emit('update-camera', {
     id: props.cam.id,
     patch: {
-      // hit（人脸命中）同属 aiExt，重建时必须原样带上，否则点一下别的能力就把它抹掉了
+      // hit（人脸命中）与 enterExit 同属 aiExt，重建时必须原样带上，否则点一下别的能力就把它抹掉了
       aiExt: {
         face: cur.face !== false,
         pose: cur.pose !== false,
         zone: cur.zone !== false,
+        enterExit: cur.enterExit !== false,
         hit: cur.hit === true,
         [key]: !!on
       }
     },
-    notice: needGlobal ? `「${row ? row.label : key}」总开关在 设置 → 检测识别页，需先打开才会生效` : ''
+    notice: needGlobal
+      ? key === 'enterExit'
+        ? '「走入/走」依赖该路「区域规则」先开启（更多操作 → 区域规则），开启后才会生效'
+        : `「${row ? row.label : key}」总开关在 设置 → 检测识别页，需先打开才会生效`
+      : ''
   })
 }
 

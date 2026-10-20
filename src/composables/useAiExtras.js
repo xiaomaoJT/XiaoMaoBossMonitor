@@ -220,7 +220,12 @@ export function useAiExtras(options) {
      * 虚拟区域带 virtual 标记：只喂流向引擎，不当报警、不计入人员计数。
      */
     const list = camExtOn(cam, 'zone') ? (cam && cam.zones) || [] : []
-    const zones = getFlowEngine().hasFullZoneNode(cam && cam.id) ? [...list, fullFrameZone()] : list
+    let zones = getFlowEngine().hasFullZoneNode(cam && cam.id) ? [...list, fullFrameZone()] : list
+    // 通道级「走入/走」捕获总闸：关掉时把这一路所有区域（含虚拟全区域）的 enterExit 剥掉，
+    // tracker 便不会产出进入/离开事件 —— 既不报报警，也不喂流向引擎（彻底"关闭捕获"语义）
+    if (!camExtOn(cam, 'enterExit')) {
+      zones = zones.map((z) => ({ ...z, enterExit: false }))
+    }
     const key = JSON.stringify(zones.map((z) => [z.id, z.rect, z.enterExit, z.loiter, z.loiterSec, z.loiterRadius, !!z.virtual]))
     if (key === zonesKey) return
     zonesKey = key

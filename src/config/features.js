@@ -18,7 +18,7 @@
  * 老配置里没有这个字段 → undefined → 视为参与，行为与升级前一致。
  *
  * @param {object} cam 通道配置
- * @param {'face'|'pose'|'zone'} key 能力名
+ * @param {'face'|'pose'|'zone'|'enterExit'} key 能力名
  */
 export function camExtOn(cam, key) {
   const ext = (cam && cam.aiExt) || {}

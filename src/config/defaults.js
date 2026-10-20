@@ -151,6 +151,13 @@ function makeCamera(preset) {
       pose: preset.pose !== false,
       zone: preset.zone !== false,
       /**
+       * 走入 / 走出捕获（通道级总闸）：这一路是否产出"进入 / 离开区域"事件。
+       * 与区域规则（zone）同属区域能力族 —— 通道没开区域规则时它无意义，故默认跟随。
+       * 区域规则里每个区域还能单独细调（zone.enterExit），二者是"通道总闸 + 区域细调"关系。
+       * undefined → 视为开启（向后兼容：旧存档没有这一项时仍按"捕获开"运行）。
+       */
+      enterExit: preset.enterExit !== false,
+      /**
        * 人脸命中（aiExt.hit）：历史残留字段。
        *
        * ⚠️ 已废弃，不再参与任何推送收窄。人脸识别的"识别到人脸就推"由 face 事件类型
@@ -1699,6 +1706,8 @@ export function normalizeCameraChannels(cam) {
     face: ext.face !== false,
     pose: ext.pose !== false,
     zone: ext.zone !== false,
+    // 走入/走」通道级总闸：旧存档没有这一项 → 视为开启（向后兼容）
+    enterExit: ext.enterExit !== false,
     // 历史残留字段 aiExt.hit：原样保留（已不参与推送收窄），避免旧存档迁移丢失
     hit: ext.hit === true
   }
@@ -2380,6 +2389,14 @@ export function flowValid(flow, cameras) {
         type: 'cam-zone-off',
         text: `第 ${i + 1} 个节点：摄像头「${cam.name || cam.id}」未开启区域监测`
       })
+    } else if (cam.aiExt && cam.aiExt.enterExit === false) {
+      prereqIssues.push({
+        nodeIndex: i,
+        cam: node.cam,
+        zone: node.zone,
+        type: 'cam-enterExit-off',
+        text: `第 ${i + 1} 个节点：摄像头「${cam.name || cam.id}」未开启「走入/走出」捕获（更多操作 → 走入/走出）`
+      })
     } else if (z && z.enterExit === false) {
       prereqIssues.push({
         nodeIndex: i,
@@ -2410,6 +2427,7 @@ export function flowValid(flow, cameras) {
 /**
  * 让「已启用的流向」自动保活其检测前提（解耦的补强）：
  * 路径上每个节点的摄像头必须参与区域分析（aiExt.zone 不为 false），
+ * 且通道级「走入/走」捕获（aiExt.enterExit 不为 false），
  * 且节点所在区域必须开启「进出」（enterExit 不为 false）。
  * 否则该流向会因拿不到 enter/exit 事件而静默失效。
  *
@@ -2440,6 +2458,11 @@ export function enforceFlowZonePrerequisites(flows, cameras) {
       if (cam.aiExt && cam.aiExt.zone === false) {
         cam.aiExt = { ...(cam.aiExt || {}), zone: true }
         changes.push({ cam: node.cam, zone: node.zone, type: 'cam-zone-on' })
+      }
+      // 摄像头未开启「走入/走」捕获 → 强制开启（否则流向拿不到进出事件，静默失效）
+      if (cam.aiExt && cam.aiExt.enterExit === false) {
+        cam.aiExt = { ...(cam.aiExt || {}), enterExit: true }
+        changes.push({ cam: node.cam, zone: node.zone, type: 'cam-enterExit-on' })
       }
       // 区域未开启进出 → 强制开启
       const zone = Array.isArray(cam.zones) ? cam.zones.find((z) => z && z.id === node.zone) : null

@@ -2163,6 +2163,26 @@ A 机昨天开过、能看到昨天的；B 机今天第一次打开、列表一�
 
 ---
 
+### 5.58 通道级「走入 / 走出」捕获总闸（与画面变动等平级）
+
+**背景**：走入 / 走出事件原先只有**区域级**开关（`zone.enterExit`，在「圈选区域」里逐区域勾）和**全局报警开关**（`options.zone.enterAlarm` / `exitAlarm`，管事件要不要作为报警上抛）。没有"这一路到底参不参与进出捕获"的开关——想省某几路的算力只能去逐区域关，通道多了很烦。
+
+**现在**新增**通道级总闸** `cam.aiExt.enterExit`（缺省 `undefined` → 视为开启，旧存档无此字段照常按"捕获开"运行，向后兼容）：
+
+- **监控框「更多操作」菜单**里新增一项「⇄ 走入/走出」，与 画面变动 / 人形识别 / 人脸 / 姿态 / 区域 **平级**（同一 `.mi` 按钮族，不是子项）；
+- **设置页「检测识别」→ 通道卡片**下也多了一个「进出」标签（与 人脸 / 姿态 / 区域 同属 `.tag.mini.ext` 渲染族），逐通道切换；
+- 两层控制语义不变：通道先"参与区域分析"（`aiExt.zone` 开），再"这一路捕不捕进出"（`aiExt.enterExit` 开），最后才是区域级 `zone.enterExit` 细调。关掉通道 enterExit 时，引擎在同步区域时（`syncZones`）会把这一路**所有区域（含虚拟全区域）的 `enterExit` 一起剥成 false**——tracker 不再产出 enter/exit，**连人员流向引擎也一起断**（彻底关闭捕获，不是只不报警）。
+
+**与报警开关解耦**：`options.zone.enterAlarm` / `exitAlarm` 只决定 enter/exit 事件**上不上抛为报警**；走入/走出事件**无论报警开关如何都照常喂给人员流向引擎**（流向靠的是进入/离开的事实，不靠报警）。所以"关掉报警"≠"关掉捕获"，别混。
+
+**人员流向保活**：流向节点的前提是"这一路在跑进出捕获"。保存流向时 `enforceFlowZonePrerequisites` 会**自动强制开启**该节点的 `aiExt.zone` 与 `aiExt.enterExit`（以及区域 `zone.enterExit`），避免流向因通道闸门被静默而失效；`flowValid` 相应新增 `cam-enterExit-off` 前提校验，配置里某节点通道关了进出捕获会直接标红提示。
+
+> 落点：`src/config/defaults.js`（`normalizeCameraChannels` / `flowValid` / `enforceFlowZonePrerequisites` / 新通道默认值）、`src/composables/useAiExtras.js` 与 `server/analyzer.mjs` 的 `syncZones`（前端 + 后端同一道闸门）、`src/components/CameraTile.vue` 与 `src/components/SettingsDrawer.vue` 的开关 UI。
+>
+> 回归：`/tmp/enterExit-probe/probe.mjs` —— 逻辑 **16/16**（camExtOn 判定 / 通道闸门抑制 Tracker 直产 enter / 虚拟全区域同样受闸门约束 / flowValid 标记 / enforce 强制开启 / 白名单防丢 / 旧存档默认）。UI 验收 `/tmp/ui-enterexit-probe/probe.mjs` —— **15/15**（菜单平级 + 切换 + 设置页「进出」标签 + 落盘 + 控制台干净）。
+
+---
+
 ## 六、各端运行方式
 
 ### 0. 通用准备
