@@ -219,6 +219,40 @@ function runExclusive(fn) {
   return next
 }
 
+/**
+ * 写事务提交后，在**看门狗之外**统一刷新缓存。
+ *
+ * ⚠️ 为什么必须挪出去（这是「写入超时但其实已入库 → 重复入库」的根因）：
+ *   refreshFaces 只是「读库 + 更新缓存」，此时写事务**已经提交**。
+ *   以前 refresh 写在 runExclusive 内部 `await`，于是把「读全库 + 拆分清理 +
+ *   反例清理 + 连接重建」的时间一起算进 15s 看门狗。而 withWatchdog 是
+ *   `Promise.race([fn, guard])`：超时只会让 race 先 reject，**fn 不会被取消**，
+ *   写事务照样跑完并提交。结果就是——
+ *     用户看到「写入超时」→ 以为没录上 → 再点一次 → 库里出现两条。
+ *   把 refresh 放到写结果 resolve 之后调用（fire-and-forget），它再慢再卡，
+ *   都不会把「已经落盘的成功」误报成「超时」。
+ *
+ * @param {Promise} promise runExclusive(...) 的写结果
+ * @param {...Function} refreshers 提交成功后要跑的刷新函数（失败一律吞掉）
+ */
+function withRefresh(promise, ...refreshers) {
+  return promise.then((res) => {
+    // 只有真正成功（没有 ok:false）才刷新；校验类失败不碰缓存
+    const ok = !res || res.ok !== false
+    if (ok) {
+      for (const fn of refreshers) {
+        try {
+          const p = fn()
+          if (p && typeof p.catch === 'function') p.catch(() => {})
+        } catch (e) {
+          /* 刷新失败不该影响写入结果；下次刷新会补上 */
+        }
+      }
+    }
+    return res
+  })
+}
+
 function reqAsPromise(req) {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result)
@@ -367,42 +401,46 @@ export async function refreshFaceSplits() {
  * @returns {Promise<{ok:boolean, added:number, reason?:string}>}
  */
 export function addFaceSplits(pairs) {
-  return runExclusive(async () => {
-    const want = normalizeFaceSplits(pairs)
-    if (!want.length) return { ok: false, reason: '没有要拆分的对象' }
-    const exist = await getAllFaceSplits()
-    const seen = new Set(exist.map((s) => `${s.aId}|${s.bId}|${s.aName}|${s.bName}`))
-    const fresh = want.filter((w) => !seen.has(`${w.aId}|${w.bId}|${w.aName}|${w.bName}`))
-    if (!fresh.length) return { ok: true, added: 0 }
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
-      const os = tx.objectStore(FACE_SPLIT_STORE)
-      const now = Date.now()
-      for (const w of fresh) os.add({ ...w, createdAt: now })
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('拆分声明写入事务被中止'))
-    })
-    await refreshFaceSplits()
-    return { ok: true, added: fresh.length }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const want = normalizeFaceSplits(pairs)
+      if (!want.length) return { ok: false, reason: '没有要拆分的对象' }
+      const exist = await getAllFaceSplits()
+      const seen = new Set(exist.map((s) => `${s.aId}|${s.bId}|${s.aName}|${s.bName}`))
+      const fresh = want.filter((w) => !seen.has(`${w.aId}|${w.bId}|${w.aName}|${w.bName}`))
+      if (!fresh.length) return { ok: true, added: 0 }
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+        const os = tx.objectStore(FACE_SPLIT_STORE)
+        const now = Date.now()
+        for (const w of fresh) os.add({ ...w, createdAt: now })
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('拆分声明写入事务被中止'))
+      })
+      return { ok: true, added: fresh.length }
+    }),
+    refreshFaceSplits
+  )
 }
 
 /** 解除一条拆分声明（之后恢复自动归类：相似度仍会把他们并回去） */
 export function removeFaceSplit(id) {
-  return runExclusive(async () => {
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
-      tx.objectStore(FACE_SPLIT_STORE).delete(id)
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('拆分声明删除事务被中止'))
-    })
-    await refreshFaceSplits()
-    return { ok: true }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+        tx.objectStore(FACE_SPLIT_STORE).delete(id)
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('拆分声明删除事务被中止'))
+      })
+      return { ok: true }
+    }),
+    refreshFaceSplits
+  )
 }
 
 /**
@@ -410,22 +448,24 @@ export function removeFaceSplit(id) {
  * 与 replaceFaces 同理：明确送来数组才替换；送空数组 = 用户/后端确实没有拆分。
  */
 export function replaceFaceSplits(list) {
-  return runExclusive(async () => {
-    const want = normalizeFaceSplits(list)
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
-      const os = tx.objectStore(FACE_SPLIT_STORE)
-      os.clear()
-      const now = Date.now()
-      for (const w of want) os.add({ ...w, createdAt: now })
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('拆分声明替换事务被中止'))
-    })
-    await refreshFaceSplits()
-    return { ok: true, count: want.length }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const want = normalizeFaceSplits(list)
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
+        const os = tx.objectStore(FACE_SPLIT_STORE)
+        os.clear()
+        const now = Date.now()
+        for (const w of want) os.add({ ...w, createdAt: now })
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('拆分声明替换事务被中止'))
+      })
+      return { ok: true, count: want.length }
+    }),
+    refreshFaceSplits
+  )
 }
 
 /* ==================== 陌生人反例（「不是本人」标记） ====================
@@ -481,47 +521,57 @@ export async function refreshFaceBlocks() {
  * @returns {Promise<{ok:boolean, id?:number, reason?:string}>}
  */
 export function addFaceBlock({ vector, thumb, name } = {}) {
-  return runExclusive(async () => {
-    const vec = Array.isArray(vector) ? vector.slice() : null
-    if (!vec || !vec.length || !vec.every((n) => Number.isFinite(n))) {
-      return { ok: false, reason: '这条样本没有可用的特征向量' }
-    }
-    const db = await openFaceDB()
-    const rec = {
-      vector: vec,
-      thumb: String(thumb || ''),
-      name: String(name || '').trim(),
-      at: Date.now()
-    }
-    const id = await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
-      const os = tx.objectStore(FACE_BLOCK_STORE)
-      const rq = os.add(rec)
-      rq.onsuccess = () => resolve(rq.result)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('反例写入事务被中止'))
-    })
-    // 滚动清理：超上限按 at 留最新 BLOCK_KEEP 条（与后端探针同一口径）
-    await pruneFaceBlocks()
-    await refreshFaceBlocks()
-    return { ok: true, id }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const vec = Array.isArray(vector) ? vector.slice() : null
+      if (!vec || !vec.length || !vec.every((n) => Number.isFinite(n))) {
+        return { ok: false, reason: '这条样本没有可用的特征向量' }
+      }
+      const db = await openFaceDB()
+      const rec = {
+        vector: vec,
+        thumb: String(thumb || ''),
+        name: String(name || '').trim(),
+        at: Date.now()
+      }
+      const id = await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+        const rq = tx.objectStore(FACE_BLOCK_STORE).add(rec)
+        tx.oncomplete = () => resolve(rq.result)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('反例写入事务被中止'))
+      })
+      return { ok: true, id }
+    }),
+    // 滚动清理（写）→ 刷缓存（读），按序在后台跑；清理失败不影响"反例已写入"
+    () =>
+      (async () => {
+        try {
+          await pruneFaceBlocks()
+        } catch (e) {
+          /* 清理失败下次还会试 */
+        }
+        await refreshFaceBlocks()
+      })()
+  )
 }
 
 /** 解除一条反例（之后这张脸重新参与正常匹配） */
 export function removeFaceBlock(id) {
-  return runExclusive(async () => {
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
-      tx.objectStore(FACE_BLOCK_STORE).delete(id)
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('反例删除事务被中止'))
-    })
-    await refreshFaceBlocks()
-    return { ok: true }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+        tx.objectStore(FACE_BLOCK_STORE).delete(id)
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('反例删除事务被中止'))
+      })
+      return { ok: true }
+    }),
+    refreshFaceBlocks
+  )
 }
 
 /**
@@ -529,37 +579,41 @@ export function removeFaceBlock(id) {
  * 与 replaceFaceSplits 同理：明确送来数组才替换；送空数组 = 后端确实没有反例。
  */
 export function replaceFaceBlocks(list) {
-  return runExclusive(async () => {
-    const want = normalizeFaceBlocks(list)
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
-      const os = tx.objectStore(FACE_BLOCK_STORE)
-      os.clear()
-      for (const w of want) os.add({ ...w })
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('反例替换事务被中止'))
-    })
-    await refreshFaceBlocks()
-    return { ok: true, count: want.length }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const want = normalizeFaceBlocks(list)
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+        const os = tx.objectStore(FACE_BLOCK_STORE)
+        os.clear()
+        for (const w of want) os.add({ ...w })
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('反例替换事务被中止'))
+      })
+      return { ok: true, count: want.length }
+    }),
+    refreshFaceBlocks
+  )
 }
 
 /** 清空全部反例 */
 export function clearFaceBlocks() {
-  return runExclusive(async () => {
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
-      tx.objectStore(FACE_BLOCK_STORE).clear()
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('反例清空事务被中止'))
-    })
-    await refreshFaceBlocks()
-    return { ok: true }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+        tx.objectStore(FACE_BLOCK_STORE).clear()
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('反例清空事务被中止'))
+      })
+      return { ok: true }
+    }),
+    refreshFaceBlocks
+  )
 }
 
 /** 滚动清理：超过 BLOCK_KEEP 条时删最旧的（按 at） */
@@ -641,37 +695,73 @@ export function nextFaceName(existing) {
 }
 
 /**
+ * 两条特征向量是否「同一张脸」（逐元素近似相等）。
+ *
+ * 用途：录入**幂等**。同一张「待录入」卡被重复点击 / 超时后用户重试时，
+ * 传进来的是**同一份向量**，命中即视为"已经入过"，直接返回已有那条，不再新建
+ * —— 这是「超时但其实已写入 → 重复入库」的最后一道保险。
+ * 不同照片拍同一个人 → 向量不同 → 不会被挡（那本来就该作为新样本）。
+ */
+function sameVector(a, b, eps = 1e-6) {
+  if (!a || !b || a.length !== b.length || !a.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (Math.abs((Number(a[i]) || 0) - (Number(b[i]) || 0)) > eps) return false
+  }
+  return true
+}
+
+/**
  * 录入一张人脸。
  * @param {Float32Array|number[]} vector 已归一化的特征向量
  * @param {string} thumb 缩略图 dataURL
  * @param {string} [name] 留空则自动编号
  * @param {number} [max] 上限
- * @returns {Promise<{ok:boolean, id?:number, name?:string, reason?:string}>}
+ * @returns {Promise<{ok:boolean, id?:number, name?:string, duplicate?:boolean, reason?:string}>}
  */
 export function addFace(vector, thumb, name, max = DEFAULT_FACE_MAX) {
-  return runExclusive(async () => {
-    if (!vector || !vector.length) return { ok: false, reason: '人脸特征为空' }
-    const list = await getAllFaces()
-    const cap = Math.max(1, Number(max) || DEFAULT_FACE_MAX)
-    if (list.length >= cap) {
-      return { ok: false, reason: `人脸库已满（上限 ${cap} 人），请先删除不再需要的人脸` }
-    }
-    const finalName = (name && String(name).trim()) || nextFaceName(list)
-    const now = Date.now()
-    const os = await store('readwrite')
-    const record = {
-      name: finalName,
-      // 统一转成普通数组存：TypedArray 在部分老 WebView 的 IndexedDB 里克隆不可靠
-      vector: Array.from(vector),
-      thumb: thumb || '',
-      createdAt: now,
-      updatedAt: now,
-      samples: 1
-    }
-    const id = await reqAsPromise(os.add(record))
-    await refreshFaces()
-    return { ok: true, id, name: finalName }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      if (!vector || !vector.length) return { ok: false, reason: '人脸特征为空' }
+      const list = await getAllFaces()
+      /*
+       * 幂等去重（必须在容量判断**之前**）：库里已有完全相同的向量 =
+       * 这次是重复点击 / 超时重试，直接返回已有那条，绝不再建第二条。
+       * 否则会出现「点三次 → 三个人脸 1/2/3」。
+       */
+      const dup = list.find((r) => sameVector(r.vector, vector))
+      if (dup) return { ok: true, id: dup.id, name: dup.name, duplicate: true }
+      const cap = Math.max(1, Number(max) || DEFAULT_FACE_MAX)
+      if (list.length >= cap) {
+        return { ok: false, reason: `人脸库已满（上限 ${cap} 人），请先删除不再需要的人脸` }
+      }
+      const finalName = (name && String(name).trim()) || nextFaceName(list)
+      const now = Date.now()
+      const db = await openFaceDB()
+      const record = {
+        name: finalName,
+        // 统一转成普通数组存：TypedArray 在部分老 WebView 的 IndexedDB 里克隆不可靠
+        vector: Array.from(vector),
+        thumb: thumb || '',
+        createdAt: now,
+        updatedAt: now,
+        samples: 1
+      }
+      /*
+       * 以**事务提交**（oncomplete）为准，而不是请求成功（req.onsuccess）：
+       * onsuccess 只代表请求被接受，那时事务可能还没真正落盘；oncomplete 才是已提交。
+       * 这样"返回成功"就等价于"数据确实在库里"，不会出现"报成功却没写进去"。
+       */
+      const id = await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+        const rq = tx.objectStore(FACE_STORE_NAME).add(record)
+        tx.oncomplete = () => resolve(rq.result)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('录入事务被中止'))
+      })
+      return { ok: true, id, name: finalName }
+    }),
+    refreshFaces
+  )
 }
 
 /**
@@ -688,41 +778,51 @@ export function addFace(vector, thumb, name, max = DEFAULT_FACE_MAX) {
  * @returns {Promise<{ok:boolean, name?:string, count?:number, reason?:string}>}
  */
 export function renameFaces(ids, name) {
-  return runExclusive(async () => {
-    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
-    const finalName = String(name == null ? '' : name).trim()
-    if (!list.length) return { ok: false, reason: '没有要改名的记录' }
-    if (!finalName) return { ok: false, reason: '名字不能为空' }
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      // 同一事务里改完：要么全改要么全不改（否则会出现"同一个人一半新名字一半旧名字"）
-      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
-      const os = tx.objectStore(FACE_STORE_NAME)
-      const now = Date.now()
-      let hit = 0
-      list.forEach((id) => {
-        const g = os.get(id)
-        g.onsuccess = () => {
-          const cur = g.result
-          if (!cur) return
-          hit += 1
-          cur.name = finalName
-          cur.updatedAt = now
-          os.put(cur)
-        }
+  const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
+  const finalName = String(name == null ? '' : name).trim()
+  return withRefresh(
+    runExclusive(async () => {
+      if (!list.length) return { ok: false, reason: '没有要改名的记录' }
+      if (!finalName) return { ok: false, reason: '名字不能为空' }
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        // 同一事务里改完：要么全改要么全不改（否则会出现"同一个人一半新名字一半旧名字"）
+        const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+        const os = tx.objectStore(FACE_STORE_NAME)
+        const now = Date.now()
+        let hit = 0
+        list.forEach((id) => {
+          const g = os.get(id)
+          g.onsuccess = () => {
+            const cur = g.result
+            if (!cur) return
+            hit += 1
+            cur.name = finalName
+            cur.updatedAt = now
+            os.put(cur)
+          }
+        })
+        tx.oncomplete = () => resolve(hit)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('改名事务被中止'))
       })
-      tx.oncomplete = () => resolve(hit)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('改名事务被中止'))
-    })
+      return { ok: true, name: finalName, count: list.length }
+    }),
     /*
-     * 先维护拆分声明再刷缓存：两侧被改名成同一个名字 = 用户已把两人统一，
-     * 声明必须在这里退休（否则归入/改名统一会被旧拆分挡着，见该函数说明）。
+     * 改名后维护拆分声明、再刷缓存，两者**按序**在后台跑（写在前面 await 已完成）：
+     * 两侧被改成同一个名字 = 用户把两人统一了，声明必须退休；顺序反了会让
+     * refreshFaces 先读到旧声明、界面短暂显示"还分着"。整段失败不影响改名结果。
      */
-    await maintainSplitsAfterRename(list)
-    await refreshFaces()
-    return { ok: true, name: finalName, count: list.length }
-  })
+    () =>
+      (async () => {
+        try {
+          await maintainSplitsAfterRename(list)
+        } catch (e) {
+          /* 声明维护失败只是"拆分暂未同步"，下次刷新会纠正 */
+        }
+        await refreshFaces()
+      })()
+  )
 }
 
 /** 改名（单条）—— 与 renameFaces 同一实现，只是包一层，别再写第二套 */
@@ -736,21 +836,23 @@ export function renameFace(id, name) {
  * 所以必须支持批量；单条删除（样本人脸墙里删一张）也走这里。
  */
 export function deleteFaces(ids) {
-  return runExclusive(async () => {
-    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
-    if (!list.length) return { ok: false, reason: '没有要删除的记录' }
-    const db = await openFaceDB()
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
-      const os = tx.objectStore(FACE_STORE_NAME)
-      list.forEach((id) => os.delete(id))
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('删除事务被中止'))
-    })
-    await refreshFaces()
-    return { ok: true, count: list.length }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
+      if (!list.length) return { ok: false, reason: '没有要删除的记录' }
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+        const os = tx.objectStore(FACE_STORE_NAME)
+        list.forEach((id) => os.delete(id))
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('删除事务被中止'))
+      })
+      return { ok: true, count: list.length }
+    }),
+    refreshFaces
+  )
 }
 
 export function deleteFace(id) {
@@ -809,59 +911,63 @@ export function averageVectors(recs) {
  * @returns {Promise<{ok:boolean, id?:number, samples?:number, count?:number, reason?:string}>}
  */
 export function mergeFaces(ids, keepId) {
-  return runExclusive(async () => {
-    const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
-    if (list.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
-    const db = await openFaceDB()
-    const recs = await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_STORE_NAME, 'readonly')
-      const os = tx.objectStore(FACE_STORE_NAME)
-      const out = []
-      list.forEach((id) => {
-        const g = os.get(id)
-        g.onsuccess = () => {
-          if (g.result) out.push(g.result)
-        }
+  return withRefresh(
+    runExclusive(async () => {
+      const list = (Array.isArray(ids) ? ids : [ids]).filter((x) => x != null)
+      if (list.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
+      const db = await openFaceDB()
+      const recs = await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readonly')
+        const os = tx.objectStore(FACE_STORE_NAME)
+        const out = []
+        list.forEach((id) => {
+          const g = os.get(id)
+          g.onsuccess = () => {
+            if (g.result) out.push(g.result)
+          }
+        })
+        tx.oncomplete = () => resolve(out)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('读取人脸记录被中止'))
       })
-      tx.oncomplete = () => resolve(out)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('读取人脸记录被中止'))
-    })
-    if (recs.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
-    const keep = recs.find((r) => r.id === keepId) || recs[0]
-    const avg = averageVectors(recs)
-    if (!avg) return { ok: false, reason: '这些记录都没有可用的特征向量' }
+      if (recs.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
+      const keep = recs.find((r) => r.id === keepId) || recs[0]
+      const avg = averageVectors(recs)
+      if (!avg) return { ok: false, reason: '这些记录都没有可用的特征向量' }
 
-    const now = Date.now()
-    keep.vector = avg.vector
-    keep.samples = avg.weight
-    keep.updatedAt = now
-    // 创建时间取最早那条：卡片排序沿用"这个人第一次出现的时间"，合并后不会乱跳
-    keep.createdAt = Math.min(...recs.map((r) => Number(r.createdAt) || now))
-    // 缩略图沿用保留那条（不另造）：它是这人最早录入的那张，风格与其它卡片一致
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
-      const os = tx.objectStore(FACE_STORE_NAME)
-      os.put(keep)
-      recs.forEach((r) => {
-        if (r.id !== keep.id) os.delete(r.id)
+      const now = Date.now()
+      keep.vector = avg.vector
+      keep.samples = avg.weight
+      keep.updatedAt = now
+      // 创建时间取最早那条：卡片排序沿用"这个人第一次出现的时间"，合并后不会乱跳
+      keep.createdAt = Math.min(...recs.map((r) => Number(r.createdAt) || now))
+      // 缩略图沿用保留那条（不另造）：它是这人最早录入的那张，风格与其它卡片一致
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+        const os = tx.objectStore(FACE_STORE_NAME)
+        os.put(keep)
+        recs.forEach((r) => {
+          if (r.id !== keep.id) os.delete(r.id)
+        })
+        tx.oncomplete = () => resolve(true)
+        tx.onerror = () => reject(tx.error)
+        tx.onabort = () => reject(tx.error || new Error('合并事务被中止'))
       })
-      tx.oncomplete = () => resolve(true)
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error || new Error('合并事务被中止'))
-    })
-    await refreshFaces()
-    return { ok: true, id: keep.id, samples: avg.weight, count: recs.length }
-  })
+      return { ok: true, id: keep.id, samples: avg.weight, count: recs.length }
+    }),
+    refreshFaces
+  )
 }
 
 export function clearFaces() {
-  return runExclusive(async () => {
-    const os = await store('readwrite')
-    await reqAsPromise(os.clear())
-    await refreshFaces()
-    return { ok: true }
-  })
+  return withRefresh(
+    runExclusive(async () => {
+      const os = await store('readwrite')
+      await reqAsPromise(os.clear())
+      return { ok: true }
+    }),
+    refreshFaces
+  )
 }
 
 /**
@@ -891,7 +997,8 @@ export function clearFaces() {
  * @returns {Promise<{ok:true, count:number, skipped?:boolean}>} count = 替换后的人数
  */
 export function replaceFaces(list, { force = false } = {}) {
-  return runExclusive(async () => {
+  return withRefresh(
+    runExclusive(async () => {
     const items = (Array.isArray(list) ? list : []).filter(
       (f) => f && f.name && Array.isArray(f.vector) && f.vector.length
     )
@@ -906,7 +1013,6 @@ export function replaceFaces(list, { force = false } = {}) {
       })
       if (cur > 0) {
         console.warn(`👤 收到一份空的人脸库，本机已有 ${cur} 人 —— 已忽略（不清空底库）`)
-        await refreshFaces()
         return { ok: true, count: cur, skipped: true }
       }
     }
@@ -932,9 +1038,10 @@ export function replaceFaces(list, { force = false } = {}) {
       tx.onerror = () => reject(tx.error)
       tx.onabort = () => reject(tx.error)
     })
-    await refreshFaces()
-    return { ok: true, count: items.length }
-  })
+      return { ok: true, count: items.length }
+    }),
+    refreshFaces
+  )
 }
 
 /**
@@ -943,7 +1050,8 @@ export function replaceFaces(list, { force = false } = {}) {
  * 又不需要长期保存全部历史样本。
  */
 export function mergeFace(id, vector, thumb) {
-  return runExclusive(async () => {
+  return withRefresh(
+    runExclusive(async () => {
     if (!vector || !vector.length) return { ok: false, reason: '人脸特征为空' }
     const os = await store('readwrite')
     const cur = await reqAsPromise(os.get(id))
@@ -965,9 +1073,10 @@ export function mergeFace(id, vector, thumb) {
     cur.updatedAt = Date.now()
     if (thumb) cur.thumb = thumb
     await reqAsPromise(os.put(cur))
-    await refreshFaces()
     return { ok: true }
-  })
+    }),
+    refreshFaces
+  )
 }
 
 /**

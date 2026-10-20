@@ -4315,6 +4315,7 @@ import {
   faceSplitsOpen,
   faceSplitsVersion,
   faces as faceLib,
+  getAllFaces,
   groupFaces,
   GROUP_SIM_KEY,
   hitReviewOpen,
@@ -5589,6 +5590,13 @@ async function doFixHit(h) {
     dropBackendFaceHit(opts.backend.url, h.backendId) // 故意不 await
     delete fixingHit[h.id] // 落库即解锁，不等网络
   } catch (e) {
+    // 同 doAddPending：超时可能只是"已写入、刷新没跟上"，先核实这张脸是否已入库
+    const landed = await verifyVectorLanded(h.vector)
+    if (landed) {
+      clearHitAssign(h)
+      dropBackendFaceHit(opts.backend.url, h.backendId) // 故意不 await
+      return
+    }
     alertDialog({
       title: '修正失败',
       message: '写入本地人脸库时出错：' + ((e && e.message) || e) + '\n这条样本还在列表里，可以稍后重试。',
@@ -6337,6 +6345,36 @@ function onPendingShotKey(e) {
 onMounted(() => window.addEventListener('keydown', onPendingShotKey))
 onUnmounted(() => window.removeEventListener('keydown', onPendingShotKey))
 
+/**
+ * 写操作报超时后核实：这张脸的向量是不是**其实已经入库**了。
+ *
+ * 背景（真实故障）：本地写事务可能已经提交，只是随后的缓存刷新没在 15s 看门狗内完成，
+ * 于是 addFace 被判定"写入超时"抛错。旧逻辑把它当失败 → 卡片留在待录入 →
+ * 用户再点一次 → 同一个人被重复录入。这里在报错前先查一次库，命中就当成功。
+ *
+ * 带 4s 上限：核实本身不能再把界面卡住。
+ * @returns {Promise<object|null>} 命中则返回已存在的那条记录（含 id/name）
+ */
+async function verifyVectorLanded(vector) {
+  if (!vector || !vector.length) return null
+  try {
+    const all = await Promise.race([
+      getAllFaces(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('verify-timeout')), 4000))
+    ])
+    return (
+      (all || []).find(
+        (r) =>
+          Array.isArray(r.vector) &&
+          r.vector.length === vector.length &&
+          r.vector.every((v, i) => Math.abs((Number(v) || 0) - (Number(vector[i]) || 0)) < 1e-6)
+      ) || null
+    )
+  } catch (e) {
+    return null
+  }
+}
+
 async function doAddPending(pf) {
   // 已经在录这张了：连点直接拦掉（addFace 是 runExclusive，再点会排队，
   // 等上一张建完再建一张 → 自动编号出「人物2」，纯属重复建档）。
@@ -6359,7 +6397,19 @@ async function doAddPending(pf) {
     delete enrollingPending[pf.id] // 落库即解锁，不等网络
   } catch (e) {
     /*
-     * 必须接住异常：写入会超时报错（本地库卡死 / 被别的标签页占住），
+     * 超时 ≠ 没写进去：写事务可能**已提交**，只是刷新没在时限内完成（旧实现把两者
+     * 算在一起，是"超时但其实已入库 → 重试重复入库"的根因）。报错前先核实这张脸
+     * 是不是其实已经在库里：在 → 按成功处理，静默清掉卡片，不弹"失败"误导用户。
+     */
+    const landed = await verifyVectorLanded(pf.vector)
+    if (landed) {
+      clearPendingAssign(pf)
+      if (pf.fromBackend) dropBackendPendingFace(opts.backend.url, pf.backendId) // 故意不 await
+      else removePendingFace(pf.id)
+      return
+    }
+    /*
+     * 确实没写进去：必须接住异常（本地库卡死 / 被别的标签页占住），
      * 以前这里没有 catch —— 于是卡片就停在「录入中」，界面上一条提示都没有，
      * 用户只能反复点。宁可明确告诉他"没录上、为什么没录上"。
      */
