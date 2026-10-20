@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <rect width="960" height="620" fill="#0b1220"/>
+
+  <!-- 顶栏 -->
+  <rect x="0" y="0" width="960" height="48" fill="#0f1a2e"/>
+  <text x="20" y="30" font-size="15" font-weight="700" fill="#e2e8f0">BossMonitor</text>
+  <text x="140" y="30" font-size="11.5" fill="#64748b">多路实时预览大屏</text>
+  <circle cx="806" cy="24" r="4" fill="#22c55e"/>
+  <text x="816" y="29" font-size="11.5" fill="#94a3b8">后端在线</text>
+  <text x="898" y="29" font-size="11.5" fill="#94a3b8">7 通道</text>
+
+  <!-- 6 路瓦片 -->
+  <g>
+    <rect x="46" y="64" width="280" height="185" rx="8" fill="#111c30" stroke="#1e293b"/>
+    <text x="58" y="88" font-size="12" fill="#cbd5e1">CAM 01</text>
+    <circle cx="256" cy="82" r="4" fill="#22c55e"/><text x="266" y="87" font-size="11" fill="#22c55e">LIVE</text>
+    <text x="150" y="160" font-size="12" fill="#334155">画面占位</text>
+    <text x="58" y="236" font-size="10.5" fill="#64748b">人形 2 · 区域 A</text>
+
+    <rect x="340" y="64" width="280" height="185" rx="8" fill="#111c30" stroke="#1e293b"/>
+    <text x="352" y="88" font-size="12" fill="#cbd5e1">CAM 02</text>
+    <circle cx="550" cy="82" r="4" fill="#22c55e"/><text x="560" y="87" font-size="11" fill="#22c55e">LIVE</text>
+    <text x="444" y="160" font-size="12" fill="#334155">画面占位</text>
+    <text x="352" y="236" font-size="10.5" fill="#64748b">区域 B（流入）</text>
+
+    <rect x="634" y="64" width="280" height="185" rx="8" fill="#111c30" stroke="#1e293b"/>
+    <text x="646" y="88" font-size="12" fill="#cbd5e1">CAM 03</text>
+    <circle cx="844" cy="82" r="4" fill="#22c55e"/><text x="854" y="87" font-size="11" fill="#22c55e">LIVE</text>
+    <text x="738" y="160" font-size="12" fill="#334155">画面占位</text>
+    <text x="646" y="236" font-size="10.5" fill="#64748b">区域 C（流出）</text>
+
+    <rect x="46" y="263" width="280" height="185" rx="8" fill="#111c30" stroke="#1e293b"/>
+    <text x="58" y="287" font-size="12" fill="#cbd5e1">CAM 04</text>
+    <circle cx="256" cy="281" r="4" fill="#22c55e"/><text x="266" y="286" font-size="11" fill="#22c55e">LIVE</text>
+    <text x="150" y="359" font-size="12" fill="#334155">画面占位</text>
+    <text x="58" y="435" font-size="10.5" fill="#64748b">人脸命中</text>
+
+    <rect x="340" y="263" width="280" height="185" rx="8" fill="#111c30" stroke="#1e293b"/>
+    <text x="352" y="287" font-size="12" fill="#cbd5e1">CAM 05</text>
+    <circle cx="550" cy="281" r="4" fill="#22c55e"/><text x="560" y="286" font-size="11" fill="#22c55e">LIVE</text>
+    <text x="444" y="359" font-size="12" fill="#334155">画面占位</text>
+    <text x="352" y="435" font-size="10.5" fill="#64748b">徘徊告警</text>
+
+    <rect x="634" y="263" width="280" height="185" rx="8" fill="#111c30" stroke="#1e293b"/>
+    <text x="646" y="287" font-size="12" fill="#cbd5e1">CAM 06</text>
+    <circle cx="844" cy="281" r="4" fill="#22c55e"/><text x="854" y="286" font-size="11" fill="#22c55e">LIVE</text>
+    <text x="738" y="359" font-size="12" fill="#334155">画面占位</text>
+    <text x="646" y="435" font-size="10.5" fill="#64748b">拉流正常</text>
+  </g>
+
+  <!-- 底部操作条 -->
+  <rect x="0" y="486" width="960" height="96" fill="#0f1a2e"/>
+
+  <!-- 盲视入口：最左眼睛图标 -->
+  <rect x="22" y="504" width="300" height="58" rx="10" fill="#13233d" stroke="#1f3b5c"/>
+  <ellipse cx="52" cy="533" rx="13" ry="8" fill="none" stroke="#7dd3fc" stroke-width="1.8"/>
+  <circle cx="52" cy="533" r="3.6" fill="#7dd3fc"/>
+  <text x="76" y="529" font-size="12.5" font-weight="600" fill="#e2e8f0">盲视（隐藏画面）</text>
+  <text x="76" y="548" font-size="10.5" fill="#64748b">画面藏起来 · 解码与检测照常跑</text>
+
+  <rect x="340" y="514" width="90" height="38" rx="8" fill="#16304e"/>
+  <text x="360" y="538" font-size="12" fill="#cbd5e1">区域</text>
+  <rect x="444" y="514" width="90" height="38" rx="8" fill="#16304e"/>
+  <text x="464" y="538" font-size="12" fill="#cbd5e1">更多</text>
+  <rect x="548" y="514" width="90" height="38" rx="8" fill="#16304e"/>
+  <text x="568" y="538" font-size="12" fill="#cbd5e1">全屏</text>
+
+  <text x="700" y="529" font-size="11" fill="#64748b">界面布局示意图 · 画面为占位，非真实视频</text>
+  <text x="700" y="548" font-size="11" fill="#64748b">盲视入口固定在操作条最左</text>
+
+  <text x="22" y="606" font-size="10.5" fill="#475569">※ 示意图：仅表达大屏布局与按钮位置，不含任何真实摄像头画面或数据。</text>
+</svg>

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <rect width="960" height="460" fill="#f8fafc"/>
+  <text x="40" y="40" font-size="19" font-weight="700" fill="#0f172a">人脸库全流程</text>
+  <text x="40" y="60" font-size="11.5" fill="#94a3b8">示意图 · 非真实截图</text>
+
+  <defs>
+    <marker id="arf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <!-- 节点 1 -->
+  <rect x="30" y="100" width="140" height="96" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="44" y="126" font-size="12.5" font-weight="600" fill="#0f172a">待录入队列</text>
+  <text x="44" y="150" font-size="11" fill="#64748b">认不出的脸</text>
+  <text x="44" y="169" font-size="11" fill="#64748b">自动进队列</text>
+
+  <!-- 节点 2 -->
+  <rect x="200" y="100" width="150" height="96" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+  <text x="214" y="126" font-size="12.5" font-weight="600" fill="#1d4ed8">① 录入</text>
+  <text x="214" y="150" font-size="11" fill="#3b4a63">队列一键 / 上传</text>
+  <text x="214" y="169" font-size="11" fill="#3b4a63">/ 合并多角度</text>
+
+  <!-- 节点 3 -->
+  <rect x="390" y="100" width="160" height="96" rx="8" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="404" y="126" font-size="12.5" font-weight="600" fill="#047857">② 归类</text>
+  <text x="404" y="150" font-size="11" fill="#3b4a63">同名 ∨ 余弦 ≥ 0.38</text>
+  <text x="404" y="169" font-size="11" fill="#3b4a63">groupFaces 并查集</text>
+
+  <!-- 节点 4 -->
+  <rect x="590" y="100" width="150" height="96" rx="8" fill="#fffbeb" stroke="#fde68a"/>
+  <text x="604" y="126" font-size="12.5" font-weight="600" fill="#b45309">③ 命中判定</text>
+  <text x="604" y="150" font-size="11" fill="#3b4a63">isFaceHit(rec)</text>
+  <text x="604" y="169" font-size="11" fill="#3b4a63">= !!rec.faceName</text>
+
+  <!-- 节点 5 -->
+  <rect x="780" y="100" width="150" height="96" rx="8" fill="#f5f3ff" stroke="#ddd6fe"/>
+  <text x="794" y="126" font-size="12.5" font-weight="600" fill="#6d28d9">④ 命中</text>
+  <text x="794" y="150" font-size="11" fill="#3b4a63">推送 · 命中修正</text>
+  <text x="794" y="169" font-size="11" fill="#3b4a63">· 反例拦截</text>
+
+  <!-- 主流程箭头 -->
+  <line x1="170" y1="148" x2="196" y2="148" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arf)"/>
+  <line x1="350" y1="148" x2="386" y2="148" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arf)"/>
+  <line x1="550" y1="148" x2="586" y2="148" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arf)"/>
+  <line x1="740" y1="148" x2="776" y2="148" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arf)"/>
+
+  <!-- 未命中回流 -->
+  <polyline points="665,196 665,250 100,250 100,200" fill="none" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#arf)"/>
+  <text x="330" y="243" font-size="11" fill="#64748b">未命中 → 回待录入队列（不计命中）</text>
+
+  <!-- 注释卡 -->
+  <rect x="30" y="300" width="290" height="104" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="44" y="324" font-size="12.5" font-weight="600" fill="#0f172a">反例（不是本人）</text>
+  <text x="44" y="348" font-size="11" fill="#64748b">命中卡一键把误认的陌生脸标反例，</text>
+  <text x="44" y="367" font-size="11" fill="#64748b">之后同一张脸直接判未录入（见 5.54）</text>
+  <text x="44" y="390" font-size="10.5" fill="#94a3b8">face-blocks 表 · 200 条上限</text>
+
+  <rect x="335" y="300" width="290" height="104" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="349" y="324" font-size="12.5" font-weight="600" fill="#0f172a">容量管理</text>
+  <text x="349" y="348" font-size="11" fill="#64748b">库满按「人」淘汰最旧（planEvictOldest）；</text>
+  <text x="349" y="367" font-size="11" fill="#64748b">save 前容量判断弹警告（见 5.57）</text>
+  <text x="349" y="390" font-size="10.5" fill="#94a3b8">单一排序点，避免假绿</text>
+
+  <rect x="640" y="300" width="290" height="104" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
+  <text x="654" y="324" font-size="12.5" font-weight="600" fill="#0f172a">命中修正 · 远程四指令</text>
+  <text x="654" y="348" font-size="11" fill="#64748b">列最近 20 条已入库命中可改；</text>
+  <text x="654" y="367" font-size="11" fill="#64748b">/hit /hitfix /hitblock /hitignore</text>
+  <text x="654" y="390" font-size="10.5" fill="#94a3b8">见 5.53、5.56</text>
+
+  <text x="30" y="440" font-size="10.5" fill="#94a3b8">※ 流程图示意，非真实系统截图；「见 5.x」指《使用手册》附录对应小节。</text>
+</svg>
