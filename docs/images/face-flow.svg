@@ -51,7 +51,7 @@
 
   <!-- 注释卡 -->
   <rect x="30" y="300" width="290" height="104" rx="8" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="44" y="324" font-size="12.5" font-weight="600" fill="#0f172a">反例（不是本人）</text>
+  <text x="44" y="324" font-size="12.5" font-weight="600" fill="#0f172a">反例（认错）</text>
   <text x="44" y="348" font-size="11" fill="#64748b">命中卡一键把误认的陌生脸标反例，</text>
   <text x="44" y="367" font-size="11" fill="#64748b">之后同一张脸直接判未录入（见 5.54）</text>
   <text x="44" y="390" font-size="10.5" fill="#94a3b8">face-blocks 表 · 200 条上限</text>

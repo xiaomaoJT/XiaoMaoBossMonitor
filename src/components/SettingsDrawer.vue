@@ -1815,7 +1815,7 @@
               </span>
 
               <!-- 命中卡片比待录入/人脸库复杂（图 + 4 行信息 + 下拉 + 3 个按钮），
-                   用 hit-grid 放宽到 200px、内部改成「图在左、信息在右」的横排，
+                   用 hit-grid 固定 3 列摊满宽度，内部改成「图在左、信息在右」的横排，
                    底部按钮行允许换行、绝不裁成半个字 -->
               <div class="face-grid hit-grid" v-if="hitReviewOpen && backendFaceHits.length">
                 <div class="face-card hit" v-for="h in backendFaceHits" :key="h.id">
@@ -1850,15 +1850,17 @@
                     <button class="mini-btn" :disabled="fixingHit[h.id]" @click="doFixHit(h)">
                       {{ fixingHit[h.id] ? '修正中' : '修正' }}
                     </button>
-                    <!-- 「不是本人」= 陌生人被误认成了库里某人：忽略只删样本不治本，
-                         标记成反例后，匹配时反例更相似即判未录入，同一张脸不再冒名 -->
+                    <!-- 「认错」= 陌生人被误认成了库里某人：忽略只删样本不治本，
+                         标记成反例后，匹配时反例更相似即判未录入，同一张脸不再冒名。
+                         ⚠️ 与「修正」的分工必须靠 title 说清：修正是「这人其实是库里的某个真人」，
+                         认错是「这人谁都不是，只是长得像」。标错会把真人拦成陌生人。 -->
                     <button
                       class="mini-btn ghost"
                       :disabled="fixingHit[h.id]"
-                      title="这条是陌生人被误认成了「{{ h.name || '未识别' }}」——标记后同一张脸再来会直接判未录入"
+                      title="这条其实是陌生人，被误认成了「{{ h.name || '未识别' }}」——标记后同一张脸再来会直接判未录入"
                       @click="doMarkStranger(h)"
                     >
-                      不是本人
+                      认错
                     </button>
                     <button class="mini-btn ghost" :disabled="fixingHit[h.id]" @click="doIgnoreHit(h)">忽略</button>
                   </div>
@@ -1910,7 +1912,10 @@
               <div class="face-grid" v-if="blockLibOpen && strangerMarks.length">
                 <div class="face-card block" v-for="b in strangerMarks" :key="b.id">
                   <img :src="b.thumb" alt="陌生人脸" class="pending-thumb" />
-                  <span class="hit-cur" :title="b.name">曾被认成：{{ b.name || '未知' }}</span>
+                  <!-- 标签与名字**分行**：名字是这里最该看清的结论（"拦的是谁"），
+                       以前和「曾被认成：」挤一行，名字稍长就被 ellipsis 切半 -->
+                  <span class="hit-cur">曾被认成</span>
+                  <strong class="block-name" :title="b.name">{{ b.name || '未知' }}</strong>
                   <span class="face-time" v-if="b.at">{{ fmtPendingAt(b.at) }}</span>
                   <div class="face-acts">
                     <button class="mini-btn ghost" @click="doUnmarkStranger(b)">解除</button>
@@ -1923,7 +1928,7 @@
                 <div class="pe-body">
                   <strong class="pe-title">还没有陌生人标记</strong>
                   <em class="pe-hint">
-                    在「命中修正」里看到陌生人被认成了某人，点卡片上的「不是本人」即可标记；之后同一张脸再来会直接走待录入/陌生人路径。
+                    在「命中修正」里看到陌生人被认成了某人，点卡片上的「认错」即可标记；之后同一张脸再来会直接走待录入/陌生人路径。
                   </em>
                 </div>
               </div>
@@ -5640,7 +5645,7 @@ async function doIgnoreAllHits() {
 }
 
 /**
- * 把一条命中样本标成「不是本人」（陌生人反例）。
+ * 把一条命中样本标成「认错」（陌生人反例）。
  *
  * 为什么「忽略」不够：忽略只是把样本从列表删掉，库内样本与这张陌生脸的
  * 余弦依然过高，下次照认。反例把这条脸的向量存下来（addFaceBlock），
@@ -5736,7 +5741,7 @@ const hitEmpty = computed(() => {
     title: '后端还没有命中样本',
     hint:
       '跑检测的是后端服务，识别到库里的人后，这里会出现最近 20 条样本（带原图）。刚启动或刚录完人脸库时，稍等一会儿点「刷新命中」。' +
-      '如果是陌生人被误认成了某人（而不是认错了人），点卡片上的「不是本人」把它标成反例，之后同一张脸再来会直接判未录入。'
+      '如果是陌生人被误认成了某人（而不是库里的真人被认错了名字），点卡片上的「认错」把它标成反例，之后同一张脸再来会直接判未录入。'
   }
 })
 
@@ -7954,26 +7959,26 @@ const TG_COMMANDS = [
   },
   {
     cmd: 'hit',
-    usage: '/hit [HH:MM:SS] [窗口秒数]',
-    desc: '按时刻查人脸命中样本（带编号）。省略时刻=看最近若干条；窗口默认±60秒，如 /hit 14:23:05 300',
-    detail: '从命中样本表里按时刻捞记录并给出编号，供下面三条修正指令指哪打哪。同一秒可能有多路通道各自命中，用编号认条才不会改错人。'
+    usage: '/hit [条数|时刻] [img]',
+    desc: '查最近的人脸命中样本（带编号，默认 20 条）。可写条数（/hit 50）或按时刻查（/hit 14:23:05 300）；末尾加 img 连命中截图一起推，如 /hit img 20',
+    detail: '从命中样本表里捞记录并给出编号，供下面三条修正指令指哪打哪。同一秒可能有多路通道各自命中，用编号认条才不会改错人。省略参数=最近 20 条；首个数当条数（1-200）；写成 HH:MM[:SS] 则按该时刻 ±窗口查。'
   },
   {
     cmd: 'hitfix',
     usage: '/hitfix <编号> <人名>',
-    desc: '把某条命中样本修正为指定人名：用该样本的特征+截图补录进人脸库（认错人时把脸录到正确的人名下）',
-    detail: '与设置页「命中修正」的录入同一套动作；库满时会拒绝并提示先删人或改用 /hitblock。改完后端立即生效，前端数秒内自动拉取新底库。'
+    desc: '把某条命中样本修正为指定人名：用该样本的特征+截图补录进人脸库（认错人时把脸录到正确的人名下）。不带参数=列人脸库现有人员名单',
+    detail: '与设置页「命中修正」的录入同一套动作；库满时会拒绝并提示先删人或改用 /hitblock。改完后端立即生效，前端数秒内自动拉取新底库。不带参数时列出人脸库现有人员（人名/样本条数/容量），免得猜不准名字。'
   },
   {
     cmd: 'hitblock',
     usage: '/hitblock <编号>',
-    desc: '把某条命中样本标记为「不是本人」（陌生人反例）：之后同一张脸再来直接判未录入，不再冒名',
-    detail: '即设置页命中卡片上的「不是本人」。反例不占人脸库容量；库里真人本人不受影响。'
+    desc: '把某条命中样本标记为陌生人反例（设置页上叫「认错」）：之后同一张脸再来直接判未录入，不再冒名',
+    detail: '即设置页命中卡片上的「认错」。反例不占人脸库容量；库里真人本人不受影响。'
   },
   {
     cmd: 'hitignore',
-    usage: '/hitignore <编号>',
-    desc: '忽略某条命中样本：从命中记录里删掉它（录错/不想留的样本）',
+    usage: '/hitignore <编号|all>',
+    desc: '忽略命中样本：从命中记录里删掉它（录错/不想留的样本）。写 all 一次清空当前全部样本',
     detail: '只删样本、不改人脸库；若这张脸是被认错了的陌生人，用 /hitblock 标反例才能阻止以后再被认错。'
   },
   {
@@ -9014,15 +9019,25 @@ function loadHidden() {
 /*
  * 命中样本卡片（「命中修正」）：与待录入（warn 边框）区分开 ——
  * 这些是**已经认出是谁**的命中，列出来是为了人工复核「有没有认错」。
+ * width:100% 而不是固定 200px：卡片现在填满 1fr 轨道（见 .hit-grid），
+ * 固定宽会在轨道里留下难看的右侧空隙。
  */
 .face-card.hit {
-  width: 200px;
+  width: 100%;
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
-/* 命中卡片网格：比 88px 的待录入/人脸库宽，给「图 + 信息 + 下拉 + 3 按钮」留足空间 */
+/*
+ * 命中卡片网格：**固定 3 列**（用户明确要求一行放 3 个）。
+ *
+ * 为什么不再用 repeat(auto-fill, 200px)：那样列数会随抽屉宽度在 2/3 之间跳，
+ * 而「一行放几个」在这里是**观感决策**，不该由窗口宽度决定 —— 同一个页面
+ * 拖一下窗口就从 3 个变 2 个，正是用户说「不好看」的原因。
+ * minmax(0, 1fr) 让卡片摊满可用宽度，同时把轨道最小尺寸钉在 0 而不是 min-content ——
+ * 否则一个超长人名就能把三列全撑宽、挤出容器。
+ */
 .hit-grid {
-  grid-template-columns: repeat(auto-fill, 200px);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 /* 卡片内横排：图在左、信息在右，信息多也不会把卡片挤变形 */
@@ -9085,6 +9100,25 @@ function loadHidden() {
  */
 .face-card.block {
   border-color: color-mix(in srgb, var(--err) 40%, transparent);
+}
+
+/*
+ * 陌生人卡片上「被认成的名字」：**单独一行**、比上面的「曾被认成」标签更醒目。
+ *
+ * 为什么单独一行：这个名字就是这张卡的全部意义 —— 「拦的是谁」。
+ * 以前写成「曾被认成：大刘」一行，88px 卡里名字稍长就被 ellipsis 切半，
+ * 而识别结论恰恰是最该看清的部分。分行后标签弱化、名字加重，一眼定位。
+ */
+.block-name {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 卡片上「当前认成的名字」：比通道名更醒目的正文色，一眼看到识别结论 */
@@ -11235,6 +11269,18 @@ function loadHidden() {
   .opt:not(.col) > .switch {
     align-self: center;
     margin-left: auto;
+  }
+
+  /* ---------- 4b. 命中修正网格：手机上 3 列会把卡片压到 ~110px，
+                   图 + 信息 + 下拉 + 3 个按钮摆不下 → 退回自适应（≥150px 才成列） ---------- */
+  .hit-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+
+  /* 命中卡片的图略缩小，把宽度让给信息与按钮 */
+  .face-card.hit .hit-top img {
+    width: 52px;
+    height: 52px;
   }
 
   /* ---------- 5. 摄像头卡：名称输入框独占一行，按钮排一行 ---------- */
