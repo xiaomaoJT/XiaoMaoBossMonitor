@@ -2109,6 +2109,14 @@
                     <button class="mini-btn" @click="triggerEnrollFile" :disabled="enrollState === 'loading'">
                       {{ enrollState === 'loading' ? '录入中…' : '上传照片录入' }}
                     </button>
+                    <button
+                      class="mini-btn ghost"
+                      :disabled="!mixedGroupNameCount || bulkSplitting"
+                      :title="mixedGroupNameCount ? `把 ${mixedGroupNameCount} 个混合名卡片按名字拆开` : '当前没有需要拆分的混合名卡片'"
+                      @click="doBulkSplitAll"
+                    >
+                      {{ bulkSplitting ? '拆分中…' : '一键拆分' }}
+                    </button>
                   </span>
                 </strong>
                 <em>报警推送里显示的就是这里的名字；同一个人的多个角度会归到一张卡片，共用一个名字</em>
@@ -2136,29 +2144,6 @@
                     觉得并错了就关掉，立刻恢复一张一条。
                   </em>
                 </span>
-              </div>
-
-              <!-- 手动拆分管理：已生效的「这两个不是同一人」声明，可随时解除。
-                   默认收起（占位置）；标题行常显带数量，点「展开」才铺开。 -->
-              <div class="face-splits" v-if="faceLibOpen && activeSplits.length">
-                <div class="face-splits-head">
-                  <strong>手动拆分（{{ activeSplits.length }}）</strong>
-                  <button class="mini-btn ghost" @click="faceSplitsOpen = !faceSplitsOpen">
-                    {{ faceSplitsOpen ? '收起' : '展开' }}
-                  </button>
-                </div>
-                <template v-if="faceSplitsOpen">
-                  <em>
-                    以下两组被显式声明为<b>不同的人</b>：不会因相似度被并到一起，推送也各叫各的名。
-                    解除后立即恢复自动归类。
-                  </em>
-                  <div class="face-split-row" v-for="s in activeSplits" :key="s.id">
-                    <span class="face-split-pair">{{ splitLabel(s) }}</span>
-                    <button class="mini-btn ghost" :disabled="!!removingSplit[s.id]" @click="doRemoveSplit(s)">
-                      {{ removingSplit[s.id] ? '解除中…' : '解除' }}
-                    </button>
-                  </div>
-                </template>
               </div>
 
               <div class="face-grid" v-if="faceLibOpen" ref="libGridEl">
@@ -2230,16 +2215,6 @@
                   </span>
                   <span class="fgp-tag ok" v-else>同名归为一组</span>
                   <span class="fgp-acts">
-                    <!-- 按名字拆分：这一组里其实是两个人（名字不同、只是长得像被并了）→ 显式拆开。
-                         拆分是持久声明，优先于相似度；之后新录入的同名样本也受同一条声明保护。 -->
-                    <button
-                      class="mini-btn"
-                      v-if="selectedGroup.sameName === false && splitNames(selectedGroup).length >= 2"
-                      :disabled="!!splittingGroup"
-                      @click="doSplitGroup(selectedGroup)"
-                    >
-                      {{ splittingGroup ? '拆分中…' : '按名字拆分' }}
-                    </button>
                     <!-- 合并勾选：默认全选，取消勾选可把某些角度排除在合并之外
                          （不同角度全并成一条平均脸会丢角度覆盖，见脚本注释） -->
                     <label class="fgp-allcheck" :title="mergeAllChecked ? '全部不选' : '全部选中'">
@@ -2295,7 +2270,7 @@
                   点卡片上的「改名」统一成一个名字后，不管哪个角度都推这个名字。
                   <template v-if="splitNames(selectedGroup).length >= 2">
                     <br />
-                    如果这其实是**两个人**（只是长得像被并到了一起）：点上方「按名字拆分」，
+                    如果这其实是**两个人**（只是长得像被并到了一起）：用人脸库标题处的「一键拆分（全部不同名）」，
                     两人会各自成卡、推送也各叫各的名；拆分后新录入的同名样本同样受保护。
                   </template>
                 </p>
@@ -4483,7 +4458,6 @@ import {
   faceBlocksVersion,
   faceLibOpen,
   faceRowsVersion,
-  faceSplitsOpen,
   faceSplitsVersion,
   faceWriteErrKind,
   faceWriteTimeoutStreak,
@@ -4502,7 +4476,6 @@ import {
   readGroupSim,
   refreshFaces,
   removeFaceBlock,
-  removeFaceSplit,
   removePendingFace,
   renameFace,
   renameFaces
@@ -6304,106 +6277,110 @@ function simPct(s) {
   return Math.round(Math.max(0, Math.min(1, Number(s) || 0)) * 100) + '%'
 }
 
-/* ---------- 手动拆分：「这两个不是同一人」 ----------
+/* ---------- 一键拆分：把全部「混合名」卡片按名字拆开 ----------
  * 归类判据是概率（相似度），用户的"这是两个人"是确定事实。这里把确定事实
  * 落成持久声明：id 对 + 名字对都记（见 useFaceLib.addFaceSplits 与
  * defaults.normalizeFaceSplits），链式合并也绕不过去（groupFaces 里是簇级检查）。
+ * 拆分后这两人各自成卡、推送各叫各的名；之后新录入的同名样本也受同一条声明保护。
+ * 撤销拆分 = 把两人归入同名（改名），maintainSplitsAfterRename 会自动让声明退休。
  */
 
-/** 组里去重后的名字列表（「按名字拆分」按它两两配对） */
+/** 组里去重后的名字列表（按名字拆分配对用） */
 function splitNames(g) {
   return [...new Set((g && Array.isArray(g.names) ? g.names : []).filter((x) => String(x || '').trim()))]
 }
 
-/** 拆分声明的展示文案：「大刘 ∿ 黎」 */
-function splitLabel(s) {
-  const a = (s && s.aName) || `样本 ${s && s.aId}`
-  const b = (s && s.bName) || `样本 ${s && s.bId}`
-  return `${a} ∿ ${b}`
-}
-
 /**
- * 仍然有效的拆分声明：两侧名字都还在库里的才显示。
- * （样本被删光 / 改名后维护逻辑已退休的声明不会出现在这，库里的惰性清理也会收掉。）
+ * 把一个混合名组按名字拆成不同的人：组内每两个不同名字之间记一条声明
+ * （名字对管新样本、id 对管改名）。纯逻辑、不含确认框 / UI 状态，
+ * 单组与库级「一键拆分」共用同一份配对规则。
  */
-const activeSplits = computed(() => {
-  void faceSplitsVersion.value
-  const names = new Set((faceNameOptions.value || []).map((n) => String(n || '').trim()))
-  return currentSplits().filter((s) => {
-    if (!s) return false
-    const aOk = (s.aName && names.has(String(s.aName).trim())) || !s.aName
-    const bOk = (s.bName && names.has(String(s.bName).trim())) || !s.bName
-    return aOk && bOk
-  })
-})
-
-const splittingGroup = ref('')
-const removingSplit = reactive({})
-
-/**
- * 按名字拆分一个混合名组：组内每两个不同的名字之间都记一条声明
- *（样本取两名字簇的笛卡尔积 —— id 对管改名，名字对管新样本）。
- */
-async function doSplitGroup(g) {
-  if (!g || splittingGroup.value) return
+async function splitMixedGroupByName(g) {
   const names = splitNames(g)
-  if (names.length < 2) return
-  const msg =
-    `把「${names.join('」「')}」拆成不同的人？\n\n` +
-    '拆分后：库里各自成卡，推送也各叫各的名；之后新录入的同名样本同样受保护。\n' +
-    // 后端模式（npm run server）下推送名是服务端定的，不同步过去服务端还按旧归类推
-    (faceBackendOn.value
-      ? '当前是后端模式：还需要点一次「同步到后端」，服务端才会按拆分后的名字推送。\n'
-      : '') +
-    '解除拆分（下方「手动拆分」列表）即可恢复自动归类。'
-  if (!(await confirmDialog({ title: '按名字拆分', message: msg }))) return
-  splittingGroup.value = g.key
-  try {
-    const byName = new Map()
-    for (const it of g.items || []) {
-      const nm = String(it.name || '').trim()
-      if (!nm) continue
-      if (!byName.has(nm)) byName.set(nm, [])
-      byName.get(nm).push(it)
-    }
-    const pairs = []
-    const ns = [...byName.keys()]
-    for (let i = 0; i < ns.length; i++) {
-      for (let j = i + 1; j < ns.length; j++) {
-        for (const a of byName.get(ns[i])) {
-          for (const b of byName.get(ns[j])) {
-            pairs.push({ aId: a.id, aName: ns[i], bId: b.id, bName: ns[j] })
-          }
+  if (names.length < 2) return { ok: true, added: 0 }
+  const byName = new Map()
+  for (const it of g.items || []) {
+    const nm = String(it.name || '').trim()
+    if (!nm) continue
+    if (!byName.has(nm)) byName.set(nm, [])
+    byName.get(nm).push(it)
+  }
+  const pairs = []
+  const ns = [...byName.keys()]
+  for (let i = 0; i < ns.length; i++) {
+    for (let j = i + 1; j < ns.length; j++) {
+      for (const a of byName.get(ns[i])) {
+        for (const b of byName.get(ns[j])) {
+          pairs.push({ aId: a.id, aName: ns[i], bId: b.id, bName: ns[j] })
         }
       }
     }
-    const r = await addFaceSplits(pairs)
-    if (!r.ok) {
-      alertDialog({ title: '拆分失败', message: r.reason || '拆分失败', variant: 'danger' })
-      return
+  }
+  return addFaceSplits(pairs)
+}
+
+/**
+ * 当前按「真实归类」（相似度 + 名字，与检测端一致，不受显示开关影响）算出来的
+ * 混合名组 —— 这些组里名字不止一个，是「一键拆分」要处理的对象。
+ * 用 bySimilarity:true 而不是显示用的 groupBySim：即使关掉"同一人归类显示"，
+ * 底层相似度合并仍然发生，混合名簇照样该被拆开。
+ */
+const realMixedGroups = computed(() => {
+  void faceRowsVersion.value
+  void faceSplitsVersion.value
+  return groupFaces(rawFaceRows(), {
+    threshold: groupThreshold.value,
+    bySimilarity: true,
+    splits: currentSplits()
+  }).filter((g) => g.sameName === false && splitNames(g).length >= 2)
+})
+
+/** 「一键拆分」按钮的可用性与数量提示 */
+const mixedGroupNameCount = computed(() => realMixedGroups.value.length)
+
+const bulkSplitting = ref(false)
+
+/**
+ * 「一键拆分（全部不同名）」：对当前所有混合名卡片按名字拆开。
+ * 幂等：已拆过的声明 addFaceSplits 会自动去重；重复点只补新的。
+ * 撤销 = 把两人归入同名（改名），maintainSplitsAfterRename 让对应的拆分声明退休。
+ */
+async function doBulkSplitAll() {
+  if (bulkSplitting.value) return
+  const groups = realMixedGroups.value
+  if (!groups.length) return
+  const namesUnion = [...new Set(groups.flatMap((g) => splitNames(g)))]
+  const msg =
+    `把 ${groups.length} 个「名字混在一起」的卡片按名字拆开？\n\n` +
+    `涉及名字：${namesUnion.join('、')}\n\n` +
+    '拆分后：各自成卡，推送也各叫各的名；之后新录入的同名样本同样受保护。\n' +
+    '撤销 = 把两人归入同名（改名），会自动解除对应的拆分声明。\n' +
+    (faceBackendOn.value
+      ? '当前是后端模式：拆完还需要点一次「同步到后端」，服务端才会按拆分后的名字推送。\n'
+      : '')
+  if (!(await confirmDialog({ title: '一键拆分', message: msg }))) return
+  bulkSplitting.value = true
+  try {
+    let total = 0
+    let done = 0
+    for (const g of groups) {
+      const r = await splitMixedGroupByName(g)
+      if (!r.ok) {
+        alertDialog({ title: '拆分失败', message: (r && r.reason) || '拆分失败', variant: 'danger' })
+        return
+      }
+      total += r.added || 0
+      done += 1
     }
-    // 组已按名字裂开：原来展开的面板自然收起（watch 兜底，这里显式更稳）
-    selectedGroupKey.value = ''
+    alertDialog({
+      title: '已拆分',
+      message: `已处理 ${done} 个混合名卡片${total > 0 ? `（新增 ${total} 条拆分声明）` : '（均已拆好，无新增）'}。`,
+      variant: 'success'
+    })
   } catch (e) {
     alertDialog({ title: '拆分失败', message: (e && e.message) || '拆分失败', variant: 'danger' })
   } finally {
-    splittingGroup.value = ''
-  }
-}
-
-/** 解除一条拆分声明（之后相似度会把他们并回去 —— 这正是"解除"的语义） */
-async function doRemoveSplit(s) {
-  if (!s || removingSplit[s.id]) return
-  removingSplit[s.id] = true
-  try {
-    const r = await removeFaceSplit(s.id)
-    if (!r.ok) {
-      alertDialog({ title: '解除失败', message: r.reason || '解除失败', variant: 'danger' })
-    }
-  } catch (e) {
-    alertDialog({ title: '解除失败', message: (e && e.message) || '解除失败', variant: 'danger' })
-  } finally {
-    delete removingSplit[s.id]
+    bulkSplitting.value = false
   }
 }
 
@@ -9531,53 +9508,6 @@ function loadHidden() {
 .face-group-toggle .switch {
   flex: 0 0 auto;
   margin-top: 1px;
-}
-
-/* ---------------- 手动拆分声明管理 ---------------- */
-.face-splits {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  width: 100%;
-  margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-soft));
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
-}
-.face-splits strong {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-.face-splits-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.face-splits em {
-  font-size: 12px;
-  font-style: normal;
-  line-height: 1.5;
-  color: var(--text-dim-2);
-}
-.face-splits em b {
-  color: var(--text);
-}
-.face-split-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 4px 8px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--tint) 5%, transparent);
-}
-.face-split-pair {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
 }
 
 /* ---------------- 一个人的角度样本面板 ---------------- */
