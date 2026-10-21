@@ -1590,6 +1590,118 @@
               </div>
             </div>
 
+            <!-- 命中确认（默认关 = 见到在库人脸就推）。
+                 判定收口在 defaults.hitConfirmStep，与后端 analyzer 共用同一份状态机。 -->
+            <label class="opt">
+              <span>
+                <strong>命中需重复出现才报警</strong>
+                <em>
+                  关闭（默认）：见到在库人脸就推。开启：同一个人在窗口内重复出现够次数才推，
+                  可挡掉"背影/侧脸像了一下"的偶发误命中
+                </em>
+              </span>
+              <span
+                class="switch"
+                :class="{ on: opts.face.hitConfirm }"
+                @click="opts.face.hitConfirm = !opts.face.hitConfirm"
+              ></span>
+            </label>
+
+            <div class="opt" v-if="opts.face.hitConfirm">
+              <span>
+                <strong>确认窗口</strong>
+                <em>窗口内每见到一次就刷新计时；够次数即报警，然后重新开始数</em>
+              </span>
+              <div class="test-row">
+                <input class="field mini" type="number" min="10" max="3600" v-model.number="opts.face.hitConfirmSec" />
+                <span class="unit">秒</span>
+              </div>
+            </div>
+
+            <div class="opt" v-if="opts.face.hitConfirm">
+              <span>
+                <strong>确认次数</strong>
+                <em>窗口内需要重复出现几次才报警</em>
+              </span>
+              <div class="test-row">
+                <input class="field mini" type="number" min="2" max="20" v-model.number="opts.face.hitConfirmTimes" />
+                <span class="unit">次</span>
+              </div>
+            </div>
+
+            <!-- 命中分差门槛（默认 0.08）：判定收口在 vecMatch.hitMarginThreshold / hitMarginPassed，
+                 酒店长相相似度高时，最像的人必须明显比第二像的人高出 margin 才确认命中，
+                 差得不够远就当没认出，从根上砍掉"长得像就乱认"的误命中。 -->
+            <div class="opt">
+              <span>
+                <strong>命中分差门槛</strong>
+                <em>
+                  最像的人必须比第二像的人高出该差值才确认命中（酒店长相相似度高时尤其有用）。
+                  填 0 = 关闭，回到"只看最像分 ≥ 阈值"的历史行为
+                </em>
+              </span>
+              <div class="range-row">
+                <input
+                  type="range"
+                  min="0"
+                  max="0.5"
+                  step="0.01"
+                  v-model.number="opts.face.hitMargin"
+                />
+                <b>{{ Number(opts.face.hitMargin) > 0 ? Number(opts.face.hitMargin).toFixed(2) : '关' }}</b>
+              </div>
+            </div>
+
+            <!-- 命中质量门槛（默认关）：判定收口在 defaults.faceQualityConf / faceQualityPassed / yawFromKps，
+                 没有独立的模糊/遮挡模型，用三个可量化代理：检测分、框占比、侧脸偏航。 -->
+            <label class="opt">
+              <span>
+                <strong>命中质量门槛</strong>
+                <em>
+                  关闭（默认）：历史行为，检测到的脸都参与命中判定。
+                  开启：检测分过低 / 脸太小 / 侧脸转太多 的帧不判命中，减少低质量误认
+                </em>
+              </span>
+              <span
+                class="switch"
+                :class="{ on: opts.face.quality.enabled }"
+                @click="opts.face.quality.enabled = !opts.face.quality.enabled"
+              ></span>
+            </label>
+
+            <template v-if="opts.face.quality.enabled">
+              <div class="opt">
+                <span>
+                  <strong>最低检测分</strong>
+                  <em>检测置信度低于该值的脸不判命中（默认 0.70；识别阈值应高于检测阈值）</em>
+                </span>
+                <div class="range-row">
+                  <input type="range" min="0.3" max="1" step="0.01" v-model.number="opts.face.quality.minScore" />
+                  <b>{{ Number(opts.face.quality.minScore).toFixed(2) }}</b>
+                </div>
+              </div>
+              <div class="opt">
+                <span>
+                  <strong>最小框占比</strong>
+                  <em>脸框占画面面积低于该比例不判命中（默认 0.010）；太小的人脸容易误认</em>
+                </span>
+                <div class="range-row">
+                  <input type="range" min="0.001" max="0.3" step="0.001" v-model.number="opts.face.quality.minBoxRatio" />
+                  <b>{{ Number(opts.face.quality.minBoxRatio).toFixed(3) }}</b>
+                </div>
+              </div>
+              <div class="opt">
+                <span>
+                  <strong>最大侧脸偏航</strong>
+                  <em>侧脸转角超过该值（鼻尖相对眼连线的归一化偏航）不判命中（默认 0.40；0=不卡）</em>
+                </span>
+                <div class="range-row">
+                  <input type="range" min="0.1" max="1.5" step="0.05" v-model.number="opts.face.quality.maxYaw" />
+                  <b>{{ Number(opts.face.quality.maxYaw).toFixed(2) }}</b>
+                </div>
+              </div>
+            </template>
+
             <div class="opt">
               <span>
                 <strong>人脸库容量</strong>
@@ -1906,7 +2018,7 @@
                     {{ blockLibOpen ? '收起' : '管理' }}
                   </button>
                 </strong>
-                <em>被误认成库里某人的陌生脸；标记后同一张脸再来会直接判「未录入」，不再冒名</em>
+                <em>被误认成库里某人的陌生脸；按被认错次数从高到低排序，最常被冒名的排最前、最该录入人脸库。标记后同一张脸再来会直接判「未录入」，不再冒名</em>
               </span>
 
               <div class="face-grid" v-if="blockLibOpen && strangerMarks.length">
@@ -1916,10 +2028,61 @@
                        以前和「曾被认成：」挤一行，名字稍长就被 ellipsis 切半 -->
                   <span class="hit-cur">曾被认成</span>
                   <strong class="block-name" :title="b.name">{{ b.name || '未知' }}</strong>
+                  <!-- 合并计数：同一个陌生人被"认错"了多少回（>1 才显示）。
+                       库的大小只跟"撞过脸的陌生人有多少个"有关，与点了多少次认错无关。 -->
+                  <span class="block-count" v-if="b.count > 1" :title="`同一个人已被认错 ${b.count} 次（已合并为一条）`">
+                    ×{{ b.count }}
+                  </span>
                   <span class="face-time" v-if="b.at">{{ fmtPendingAt(b.at) }}</span>
                   <div class="face-acts">
                     <button class="mini-btn ghost" @click="doUnmarkStranger(b)">解除</button>
                   </div>
+                </div>
+              </div>
+
+              <!-- 反例合并阈值：见 vecMatch.blockMergeThreshold 的注释 -->
+              <div class="opt" v-if="blockLibOpen">
+                <span>
+                  <strong>同一个人合并阈值</strong>
+                  <em>
+                    同一张陌生人脸再次被认错时，相似度高于该值就合并进已有那条（计数 +1），不再新增记录。
+                    填 0 = 关闭合并，每次认错都单独存一条
+                  </em>
+                </span>
+                <div class="range-row">
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.95"
+                    step="0.05"
+                    :value="mergeThresholdShown"
+                    @input="opts.face.blockMergeThreshold = Number($event.target.value)"
+                  />
+                  <b>{{ mergeThresholdShown > 0 ? Number(mergeThresholdShown).toFixed(2) : '关' }}</b>
+                </div>
+              </div>
+
+              <!-- 反例保留期限（默认 0 = 永不过期）：判定收口在 defaults.blockMaxAgeDays +
+                   normalizeFaceBlocks 的"时间上限"，与 BLOCK_KEEP"容量上限"是两套独立口径。
+                   超过 N 天没再被认错的陌生人反例会自动过期剔除，库只留近期还在撞脸的。 -->
+              <div class="opt" v-if="blockLibOpen">
+                <span>
+                  <strong>反例保留期限</strong>
+                  <em>
+                    超过该天数没再被认错的陌生人反例会自动过期剔除（默认 0 = 永不过期）。
+                    与上面「最多保留条数」是两套口径：先按过期删，再按容量滚
+                  </em>
+                </span>
+                <div class="test-row">
+                  <input
+                    class="field mini"
+                    type="number"
+                    min="0"
+                    max="365"
+                    step="1"
+                    v-model.number="opts.face.blockMaxAgeDays"
+                  />
+                  <span class="unit">天</span>
                 </div>
               </div>
 
@@ -4215,6 +4378,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   BRAND,
+  BLOCK_MAX_AGE,
   camDigestState,
   camSilentState,
   clampDigestMinutes,
@@ -4230,6 +4394,7 @@ import {
   DIGEST_INTERVAL_CHOICES,
   DIGEST_INTERVAL_MAX,
   DIGEST_INTERVAL_MIN,
+  FACE_QUALITY,
   digestCfgOf,
   digestIntervalLabel,
   silentYieldSlots,
@@ -4293,6 +4458,7 @@ import { estimateUsage, formatBytes } from '../composables/useEventStore'
 import { EVENT_DEFAULTS, EVENT_GROUPS } from '../composables/useAlarmText'
 import { aiSlotBackend, aiSlotState } from '../composables/useAiDetector'
 import { camExtOn } from '../composables/useAiExtras'
+import { blockMergeThreshold, BLOCK_MERGE, HIT_MARGIN, hitMarginThreshold } from '../composables/vecMatch'
 import {
   DEFAULT_FACE_MAX,
   DEFAULT_FACE_THRESHOLD,
@@ -5667,7 +5833,14 @@ async function doMarkStranger(h) {
   }
   fixingHit[h.id] = true
   try {
-    const res = await addFaceBlock({ vector: h.vector, thumb: h.thumb, name: h.name || '' })
+    // 传合并阈值（options.face.blockMergeThreshold）：同一个人反复被认错时
+    // 只给已有那条 count+1，不再往库里插新条
+    const res = await addFaceBlock({
+      vector: h.vector,
+      thumb: h.thumb,
+      name: h.name || '',
+      mergeThreshold: blockMergeThreshold(opts.face)
+    })
     if (!res.ok) {
       alertDialog({ title: '标记失败', message: res.reason || '写入反例失败', variant: 'danger' })
       return
@@ -5700,15 +5873,36 @@ async function doUnmarkStranger(b) {
 /**
  * 「陌生人标记」列表（轻量，去掉向量）。
  * 依赖 faceBlocksVersion：反例增删后缓存刷新会自增它，这里才会重算。
+ * 按误认次数（count）从高到低排序 ——×N 不再是装饰，而是「待处理优先级」：
+ * 一个陌生人被反复误认成库里某人，说明它制造的误命中噪声最大，越靠前越该处理
+ * （确认是常客就录入人脸库、确是陌生人就保持反例拦截）。
  */
 const strangerMarks = computed(() => {
   void faceBlocksVersion.value
-  return currentFaceBlocks().map((b) => ({
-    id: b.id,
-    thumb: b.thumb || '',
-    name: b.name || '',
-    at: b.at || 0
-  }))
+  return currentFaceBlocks()
+    .map((b) => ({
+      id: b.id,
+      thumb: b.thumb || '',
+      name: b.name || '',
+      at: b.at || 0,
+      // 合并计数：同一个陌生人被"认错"了多少回（老存档没有这个字段 → 1）
+      count: Math.max(1, Math.round(Number(b.count)) || 1)
+    }))
+    .sort((a, b) => b.count - a.count)
+})
+
+/**
+ * 反例合并阈值的滑杆显示值。
+ * 只读解析、**不回写配置**：老存档没有 `blockMergeThreshold` 字段时，
+ * 滑杆显示默认 0.6，但配置里仍然是「没配」—— 由 blockMergeThreshold()
+ * 在真正用到的前端后两端各自解析。用户拖一下滑杆才落成具体数字。
+ */
+const mergeThresholdShown = computed(() => {
+  const raw = opts.face.blockMergeThreshold
+  if (raw === undefined || raw === null || raw === '') return BLOCK_MERGE.th.def
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return BLOCK_MERGE.th.def
+  return Math.max(0, Math.min(BLOCK_MERGE.th.max, n))
 })
 
 /**
@@ -7973,7 +8167,7 @@ const TG_COMMANDS = [
     cmd: 'hitblock',
     usage: '/hitblock <编号>',
     desc: '把某条命中样本标记为陌生人反例（设置页上叫「认错」）：之后同一张脸再来直接判未录入，不再冒名',
-    detail: '即设置页命中卡片上的「认错」。反例不占人脸库容量；库里真人本人不受影响。'
+    detail: '即设置页命中卡片上的「认错」。反例不占人脸库容量；库里真人本人不受影响。同一张脸已经标过会自动合并（计数 +1，不再新增），阈值见「同一个人合并阈值」。'
   },
   {
     cmd: 'hitignore',
@@ -9119,6 +9313,26 @@ function loadHidden() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 合并计数徽标：「×N」= 同一个陌生人被认错了 N 回、已合并成这一条。
+ * 用 warn 色系小药丸：一眼看出"这条不是第一次"，又不抢名字的视觉重心。
+ * 只有 count > 1 才渲染（模板里 v-if），所以这里只管样式不管有无。
+ */
+.block-count {
+  align-self: center;
+  margin-top: 1px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  white-space: nowrap;
+  cursor: help;
 }
 
 /* 卡片上「当前认成的名字」：比通道名更醒目的正文色，一眼看到识别结论 */

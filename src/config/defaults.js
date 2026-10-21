@@ -20,7 +20,7 @@ import { secretDigest } from '../composables/sha256.js'
  * 不在这里另写一份字面量，免得设置页显示的值与执行层真正用的值悄悄漂开。
  */
 import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
-import { PENDING_DEDUPE } from '../composables/vecMatch.js'
+import { PENDING_DEDUPE, BLOCK_MERGE, blockMergeThreshold, blockMergeTarget, HIT_MARGIN, hitMarginThreshold } from '../composables/vecMatch.js'
 
 const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
 const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
@@ -255,6 +255,219 @@ export const CHANNEL_ALIASES = {
  * 不是加密——拿到安装包的人理论上可以解包提取。适合"不让界面上直接看到"，
  * 不适合防有心人逆向。
  */
+/**
+ * 命中确认（「见到在库人脸要重复出现 N 次才报警」）的缺省值与上下限。
+ * ----------------------------------------------------------------------------
+ * 为什么默认关：命中推送是这套系统的核心价值，"见到在库人脸就推"是既有行为，
+ * 升级前后必须逐字节一致。开关打开后才受这套参数约束。
+ *
+ * ⚠️ 窗口是**滑窗**（每次见到都刷新窗口起点）：一个人每 20 秒路过一次、
+ *    窗口 60 秒、要 3 次 —— 第 3 次照样算数；若是"从第一次算死的窗口"，
+ *    间隔稍长就永远数不满，确认就成了摆设。
+ */
+export const HIT_CONFIRM = {
+  /** 开关：false = 见到在库人脸就推（历史行为） */
+  enabled: { def: false },
+  /** 确认窗口（秒） */
+  sec: { def: 120, min: 10, max: 3600 },
+  /** 窗口内要重复出现几次（≥2 才有"确认"的意义） */
+  times: { def: 2, min: 2, max: 20 }
+}
+
+/**
+ * 解析 `options.face` 里的命中确认旋钮（纯函数，前后端共用）。
+ * 「没配」与「配错」都回落默认值；开关本身只认显式真值。
+ * @returns {{enabled:boolean, sec:number, times:number}}
+ */
+export function hitConfirmConf(face) {
+  const c = face || {}
+  const rawSec = Number(c.hitConfirmSec)
+  const sec = Number.isFinite(rawSec) && rawSec > 0
+    ? Math.max(HIT_CONFIRM.sec.min, Math.min(HIT_CONFIRM.sec.max, Math.round(rawSec)))
+    : HIT_CONFIRM.sec.def
+  const rawTimes = Number(c.hitConfirmTimes)
+  const times = Number.isFinite(rawTimes) && rawTimes > 0
+    ? Math.max(HIT_CONFIRM.times.min, Math.min(HIT_CONFIRM.times.max, Math.round(rawTimes)))
+    : HIT_CONFIRM.times.def
+  return { enabled: !!c.hitConfirm, sec, times }
+}
+
+/**
+ * 命中「质量门槛」（前后端共用单一来源）。
+ * ----------------------------------------------------------------------------
+ * 酒店等高流动场景里，监控画面里很多脸是"远处的、侧着的、糊的、被挡的"——
+ * 这类脸提出来的特征不可靠，最容易把陌生人误认成熟人。质量门槛在"判命中"之前
+ * 先卡一道：检测置信度太低 / 脸在画面里太小 / 侧脸转太多，就不许它认成库内某人
+ * （落入未录入流程，而不是报一个不可信的"识别到 X"）。
+ *
+ * ⚠️ 这是"判命中"的门槛，不是"检测"门槛：检测照常进行，只是低质量脸不认人。
+ * ⚠️ 没有专门的模糊/遮挡模型，模糊与遮挡主要表现为"检测分下降 + 侧脸偏航"，
+ *    所以门槛用三个可量化的代理信号：检测分、框占比、侧脸偏航（见 faceQualityPassed）。
+ *
+ * 配置：options.face.quality = { enabled, minScore, minBoxRatio, maxYaw }。
+ *   - enabled 默认 false（历史行为不变：任何过了检测分的脸都参与识别）；
+ *   - minScore：识别用的最低检测置信（应高于检测阈值 face.score）；
+ *   - minBoxRatio：人脸框面积 / 画面面积下限（"脸太小"）；
+ *   - maxYaw：侧脸偏航代理上限（0 = 不卡侧脸）。
+ */
+export const FACE_QUALITY = {
+  enabled: { def: false },
+  minScore: { def: 0.7, min: 0.3, max: 1.0 },
+  minBoxRatio: { def: 0.01, min: 0.001, max: 0.3 },
+  maxYaw: { def: 0.4, min: 0.1, max: 1.5 }
+}
+
+/**
+ * 解析「命中质量门槛」旋钮（纯函数，前后端共用）。
+ * 「没配」回落默认值；开关本身只认显式真值；数值越界钳住。
+ * @returns {{enabled:boolean, minScore:number, minBoxRatio:number, maxYaw:number}}
+ */
+export function faceQualityConf(face) {
+  const c = face || {}
+  const num = (v, fb) => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : fb
+  }
+  return {
+    enabled: !!c.quality && !!c.quality.enabled,
+    minScore: Math.max(FACE_QUALITY.minScore.min, Math.min(FACE_QUALITY.minScore.max, num(c.quality && c.quality.minScore, FACE_QUALITY.minScore.def))),
+    minBoxRatio: Math.max(FACE_QUALITY.minBoxRatio.min, Math.min(FACE_QUALITY.minBoxRatio.max, num(c.quality && c.quality.minBoxRatio, FACE_QUALITY.minBoxRatio.def))),
+    maxYaw: Math.max(FACE_QUALITY.maxYaw.min, Math.min(FACE_QUALITY.maxYaw.max, num(c.quality && c.quality.maxYaw, FACE_QUALITY.maxYaw.def)))
+  }
+}
+
+/**
+ * 从 5 点关键点估算侧脸偏航（纯函数，前后端共用）。
+ * ----------------------------------------------------------------------------
+ * 5 点顺序 = [眼1, 眼2, 鼻尖, 嘴1, 嘴2]（与 alignFace 用的 ARC_DST 一致）。
+ * 偏航（绕竖直轴左右转头）表现为：鼻尖相对"两眼中点"沿眼连线方向偏移。
+ * 正脸时鼻尖在眼中点正下方、沿眼连线方向几乎无偏移 → ≈0；
+ * 侧脸时偏移增大。返回归一化偏移（除以眼间距），无关键点时回 null。
+ */
+export function yawFromKps(kps) {
+  if (!Array.isArray(kps) || kps.length < 3) return null
+  const e1 = kps[0]
+  const e2 = kps[1]
+  const nose = kps[2]
+  if (!e1 || !e2 || !nose) return null
+  const e1x = Number(e1.x)
+  const e1y = Number(e1.y)
+  const e2x = Number(e2.x)
+  const e2y = Number(e2.y)
+  const dx = e1x - e2x
+  const dy = e1y - e2y
+  const eyeDist = Math.hypot(dx, dy)
+  if (!(eyeDist > 0)) return null
+  const nx = Number(nose.x)
+  const ny = Number(nose.y)
+  const mx = (e1x + e2x) / 2
+  const my = (e1y + e2y) / 2
+  // 鼻尖相对眼中点的向量，在"眼连线方向"上的投影（归一化）
+  const proj = ((nx - mx) * dx + (ny - my) * dy) / eyeDist
+  return proj / eyeDist
+}
+
+/**
+ * 一张检测脸是否过了质量门槛（纯函数，前后端共用）—— **全项目唯一判定**。
+ * @param {{score?:number,w?:number,h?:number,kps?:Array}} face 检测脸（含 score/框/5点）
+ * @param {number} frameW 画面宽
+ * @param {number} frameH 画面高
+ * @param {{enabled:boolean,minScore:number,minBoxRatio:number,maxYaw:number}} conf faceQualityConf 返回值
+ * @returns {boolean} true = 质量过关，允许参与"判命中"
+ */
+export function faceQualityPassed(face, frameW, frameH, conf) {
+  const c = conf && conf.enabled ? conf : null
+  if (!c) return true
+  if (!face) return false
+  // ① 检测置信度太低
+  const sc = Number(face.score)
+  if (Number.isFinite(sc) && c.minScore > 0 && sc < c.minScore) return false
+  // ② 脸在画面里太小（框占比）
+  const bw = Number(face.w)
+  const bh = Number(face.h)
+  if (c.minBoxRatio > 0 && bw > 0 && bh > 0) {
+    // 检测框是归一化坐标（[0,1]，mapCropBack 的产出）时，w*h 本身就是面积占画面比例；
+    // 是像素坐标时才需要除以画面面积。两种坐标都兼容，避免"小脸被误判成达标"。
+    let areaRatio
+    if (bw <= 1 && bh <= 1) {
+      areaRatio = bw * bh
+    } else {
+      const fw = Number(frameW)
+      const fh = Number(frameH)
+      areaRatio = fw > 0 && fh > 0 ? (bw * bh) / (fw * fh) : 0
+    }
+    if (areaRatio < c.minBoxRatio) return false
+  }
+  // ③ 侧脸偏航太大
+  if (c.maxYaw > 0) {
+    const yaw = yawFromKps(face.kps)
+    if (yaw !== null && Math.abs(yaw) > c.maxYaw) return false
+  }
+  return true
+}
+
+/**
+ * 命中确认状态机（纯函数，前后端共用）—— **全项目唯一判定**。
+ * ----------------------------------------------------------------------------
+ * 位置很关键：必须放在**事件冷却之前**。若放在冷却之后，重复出现会被冷却
+ * 吞掉（key 相同 → 直接 continue），计数永远涨不上去，功能静默失效。
+ *
+ * @param {Map<string,{n:number,at:number}>} state 每摄像头一份的计数表
+ *        （前端 useAiExtras / 后端 analyzer 各自持一份，key 用命中人的身份）
+ * @param {string} key 身份键（命中人的 face id 或分组名）；空 = 不敢拦，直接放行
+ * @param {number} now 当前 ms 时间戳（可注入，便于测试）
+ * @param {{enabled:boolean,sec:number,times:number}} conf hitConfirmConf 的返回值
+ * @returns {{fire:boolean, count:number, confirmed:boolean}}
+ *          fire=true 才允许往下走冷却与 emit；false = 这次只计数不报警
+ */
+export function hitConfirmStep(state, key, now, conf) {
+  // ⚠️ 不能写 Number(now) || Date.now()：0 是合法时间戳（测试注入），会被 || 当成缺失
+  const n0 = Number(now)
+  const t = Number.isFinite(n0) ? n0 : Date.now()
+  const c = conf && conf.enabled ? conf : null
+  // 关闭态：直接放行，并顺手清掉残留计数（用户中途关开关不该留下"差一次就报"的旧账）
+  if (!c || !key) {
+    if (state && typeof state.delete === 'function') state.delete(key)
+    return { fire: true, count: 1, confirmed: true }
+  }
+  const prev = state.get(key)
+  const fresh = !!prev && (t - prev.at) <= c.sec * 1000
+  const n = fresh ? prev.n + 1 : 1
+  if (n >= c.times) {
+    // 报完就清零：下一轮重新数，否则同一个人会一直"满计数"秒推
+    state.delete(key)
+    return { fire: true, count: n, confirmed: true }
+  }
+  state.set(key, { n, at: t })
+  return { fire: false, count: n, confirmed: false }
+}
+
+/**
+ * 陌生人反例（「不是本人」标记）的「保留期限」：超过 N 天自动过期（按 at 时间戳）。
+ * ----------------------------------------------------------------------------
+ * 酒店这类高流动场景里，一个路人被误认成库里某人（点了「认错」）后，可能再也不来。
+ * 那条反例若永远留着，既占 200 条容量，又会在很久以后「拦下」长相偶尔相似的真正
+ * 陌生人（人本身在变，几个月前的特征不该一直生效）。所以加了「保留期限」：
+ * 超过 N 天没被再次认错的反例，下次归一化/清理时自动丢弃。
+ *
+ * ⚠️ 与 BLOCK_KEEP（按 at 留最新的 200 条）是两套独立口径：
+ *    BLOCK_KEEP 是"容量上限"，blockMaxAgeDays 是"时间上限"，两者都过才留。
+ * ⚠️ 默认 0 = 不按天过期（只受 BLOCK_KEEP 约束，历史行为）。
+ */
+export const BLOCK_MAX_AGE = { def: 0, min: 1, max: 365 }
+
+/**
+ * 解析反例保留期限（天）。与 pendingDedupeSec / blockMergeThreshold 同一约定：
+ * 「没配」或「≤0」回落 0（不按天过期），越界钳住 [1, 365]。
+ */
+export function blockMaxAgeDays(c) {
+  const raw = c && c.blockMaxAgeDays
+  if (raw === undefined || raw === null || raw === '') return BLOCK_MAX_AGE.def
+  const n = Math.round(Number(raw))
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.max(BLOCK_MAX_AGE.min, Math.min(BLOCK_MAX_AGE.max, n))
+}
+
 export const HIDDEN_OPTIONS = {
   /** 是否解码音频（枪机一般无音轨，关闭可降低 CPU 占用） */
   hasAudio: false,
@@ -430,7 +643,51 @@ export const HIDDEN_OPTIONS = {
      * 解析收口在 vecMatch.pendingDedupeSec，匹配判定在 vecMatch.pendingDedupeTarget
      * （前后端共用，避免"前端合并了、后端又插一条"）。
      */
-    pendingDedupeSec: PENDING_DEDUPE.sec.def
+    pendingDedupeSec: PENDING_DEDUPE.sec.def,
+    /**
+     * 「陌生人反例（认错标记）同一个人合并」的余弦阈值。酒店这类高流动场景里
+     * 同一个路人被误认 N 次就该只留一条（count+1），否则反例库按点击次数膨胀。
+     * 没配 → 0.6；配 0 → 关闭合并，每点一次都单独存。
+     * 解析收口在 vecMatch.blockMergeThreshold，匹配判定在 vecMatch.blockMergeTarget。
+     */
+    blockMergeThreshold: BLOCK_MERGE.th.def,
+    /**
+     * 命中确认：见到在库人脸不立刻报警，要求「在窗口内重复出现 N 次」才推。
+     * 默认关 = 见到在库人脸就推（历史行为，升级前后逐字节一致）。
+     * 解析与状态机收口在 defaults.hitConfirmConf / hitConfirmStep（前后端共用）。
+     */
+    hitConfirm: HIT_CONFIRM.enabled.def,
+    /** 确认窗口（秒）：从窗口内第一次见到这个人开始算，滑窗 */
+    hitConfirmSec: HIT_CONFIRM.sec.def,
+    /** 窗口内需要重复出现几次才报警（≥2 才有"确认"的意义） */
+    hitConfirmTimes: HIT_CONFIRM.times.def,
+    /**
+     * 命中「分差」门槛（余弦差）。最像的人必须比第二像的人高出这么多才敢确认命中，
+     * 否则当未录入处理 —— 酒店等长相相似度高的场景防止「长得像就乱认」的误命中。
+     * 没配 → 0.08；配 0 → 关闭（回到只看 top1 ≥ matchThreshold 的历史行为）。
+     * 解析收口在 vecMatch.hitMarginThreshold，判定在 vecMatch.hitMarginPassed
+     * （前后端共用，避免"前端认了、后端没认"的漂移）。
+     */
+    hitMargin: HIT_MARGIN.th.def,
+    /**
+     * 命中「质量门槛」：检测置信度太低 / 脸太小 / 侧脸转太多，就不许认成库内某人
+     * （落入未录入流程）。默认关（enabled:false）= 历史行为：任何过了检测分的脸都参与识别。
+     * 解析与判定收口在 defaults.faceQualityConf / faceQualityPassed / yawFromKps
+     * （前后端共用，避免"前端卡了、后端没卡"的漂移）。
+     */
+    quality: {
+      enabled: FACE_QUALITY.enabled.def,
+      minScore: FACE_QUALITY.minScore.def,
+      minBoxRatio: FACE_QUALITY.minBoxRatio.def,
+      maxYaw: FACE_QUALITY.maxYaw.def
+    },
+    /**
+     * 陌生人反例（「认错」标记）的保留期限（天）。超过 N 天没被再次认错的反例
+     * 自动过期（按 at 时间戳）。默认 0 = 不按天过期（只受 BLOCK_KEEP 容量约束）。
+     * 解析与判定收口在 defaults.blockMaxAgeDays，归一化口径在 normalizeFaceBlocks
+     * （前后端共用，避免"前端留着、后端删了"的漂移）。
+     */
+    blockMaxAgeDays: BLOCK_MAX_AGE.def
   },
   /**
    * 人形姿态（YOLOv8n-pose，17 关键点）。
@@ -1159,6 +1416,7 @@ export const HIDDEN_OPTIONS = {
  *
  * ⚠️ 通道列表不在这里 —— 走 DEFAULT_CAMERAS（空数组）。
  */
+
 export const DEFAULT_OPTIONS = (() => {
   const o = JSON.parse(JSON.stringify(HIDDEN_OPTIONS))
 
@@ -1545,19 +1803,26 @@ export const BLOCK_KEEP = 200
  * 匹配时同时算「库内最像分」与「反例最像分」，仅当反例分 ≥ 阈值且 ≥ 库内最像分
  * 才判未录入（blocked），保证库里真人本人不受影响（真人对己样本 ~0.9 > 对陌生人 ~0.4）。
  *
- * 一条反例记录：{ id, vector, name, at, thumb }
+ * 一条反例记录：{ id, vector, name, at, thumb, count }
  *   · vector —— 这张陌生脸的 512 维特征（判据本体，空向量整条作废）；
  *   · name   —— 当初被误认成的库内人名（展示用「曾被认成：小刘」，可空）；
- *   · at     —— 标记时间 ms（滚动清理按它留新）；
- *   · id     —— IndexedDB 自增 id（单条解除用；0 = 纯配置来源无 id）。
+ *   · at     —— 标记时间 ms（滚动清理按它留新；合并时刷新为最近一次）；
+ *   · id     —— IndexedDB 自增 id（单条解除用；0 = 纯配置来源无 id）；
+ *   · thumb  —— 最近一次那张脸的缩略图；
+ *   · count  —— 合并次数（同一个陌生人被"认错"了多少次；1 = 首次标记）。
+ *               只为展示「×N」，不参与任何判定 —— 库里存 200 条的意义是
+ *               "撞过脸的陌生人有多少个"，而不是"被点了几次认错"。
  *
  * 与 normalizeFaceSplits 同一套规格：容忍缺省形状、去重、跳过空向量、
  * 钳上限 BLOCK_KEEP（按 at 新者优先；同 at 保持原相对顺序）。
  *
- * @param {Array<{id?,vector?,name?,at?,thumb?}>} list 原始反例
- * @returns {Array<{id:number,vector:number[],name:string,at:number,thumb:string}>}
+ * @param {Array<{id?,vector?,name?,at?,thumb?,count?}>} list 原始反例
+ * @param {number} [maxAgeDays] 保留期限（天）；<=0 表示不按天过期（只受 BLOCK_KEEP 约束）
+ * @returns {Array<{id:number,vector:number[],name:string,at:number,thumb:string,count:number}>}
  */
-export function normalizeFaceBlocks(list) {
+export function normalizeFaceBlocks(list, maxAgeDays = 0) {
+  const maxAgeMs = Number(maxAgeDays) > 0 ? Number(maxAgeDays) * 86400000 : 0
+  const now = Date.now()
   const out = []
   const seen = new Set()
   for (const raw of Array.isArray(list) ? list : []) {
@@ -1569,13 +1834,18 @@ export function normalizeFaceBlocks(list) {
     const name = String(raw.name != null ? raw.name : '').trim()
     const at = Math.max(0, Math.round(Number(raw.at)) || 0)
     const thumb = String(raw.thumb != null ? raw.thumb : '')
+    // 合并计数：缺失 / 非法都当 1（老存档没有这个字段，等于"没合并过"）
+    const rawCount = Math.round(Number(raw.count))
+    const count = Number.isFinite(rawCount) && rawCount >= 1 ? rawCount : 1
+    // 保留期限：超过 N 天没被再次认错的反例直接丢弃（不进库、不拦截）
+    if (maxAgeMs > 0 && at > 0 && now - at > maxAgeMs) continue
     // 有 id 按 id 去重；无 id（配置来源）按「名字+时间+向量指纹」去重
     const key = id > 0
       ? `i${id}`
       : `v${name}|${at}|${vec.length}|${vec[0]}|${vec[vec.length - 1]}`
     if (seen.has(key)) continue
     seen.add(key)
-    out.push({ id, vector: vec.slice(), name, at, thumb })
+    out.push({ id, vector: vec.slice(), name, at, thumb, count })
   }
   if (out.length <= BLOCK_KEEP) return out
   // 超上限：按 at 新者优先截断，保留者在输出里维持原相对顺序（稳定）
@@ -1583,6 +1853,46 @@ export function normalizeFaceBlocks(list) {
   order.sort((a, b) => (out[b].at - out[a].at) || (a - b))
   const keep = new Set(order.slice(0, BLOCK_KEEP))
   return out.filter((_, i) => keep.has(i))
+}
+
+/**
+ * 把「同一个人」的多条反例折叠成一条（纯函数，前后端共用）。
+ * ----------------------------------------------------------------------------
+ * 为什么需要：本机点「认错」时 addFaceBlock 会合并，但远程 `/hitblock` 走的是
+ * 另一条路（id=0、纯配置来源，由 face-lib.setBlocks 归一化后落盘）。
+ * 同一个人在本机标过一次、又被远程标过一次时，拉取配置就会拿到两份 ——
+ * 不折叠的话库照样按「点击次数」而不是「不同陌生人」膨胀，合并就白做了。
+ *
+ * 折叠策略（保留者在原位，顺序稳定）：
+ *   · count 相加（这个人历史上一共被认错了多少次，展示用 ×N）；
+ *   · at / thumb 取更新的一方（要能看到最近那张脸）；
+ *   · name 取更新的一方（「曾被认成」反映最近一次误认）；
+ *   · id 优先留**有 id** 的那条 —— 本机记录才能在设置页单条解除，
+ *     纯配置来源的 id=0 记录只是远端快照，被吸收掉不损失功能。
+ *
+ * @param {Array<{id,vector,name,at,thumb,count}>} list normalizeFaceBlocks 的产物
+ * @param {number} [threshold] 合并阈值；<=0 关闭折叠（原样返回）
+ * @returns {Array} 折叠后的新数组（不改入参）
+ */
+export function foldFaceBlocks(list, threshold) {
+  if (!Array.isArray(list) || list.length < 2) return Array.isArray(list) ? list.slice() : []
+  const th = blockMergeThreshold({ blockMergeThreshold: threshold })
+  if (th <= 0) return list.slice()
+  const kept = []
+  for (const b of list) {
+    if (!b || !b.vector) continue
+    const hit = blockMergeTarget(kept, b, th)
+    if (!hit) {
+      kept.push({ ...b })
+      continue
+    }
+    hit.count = (Number(hit.count) || 1) + (Number(b.count) || 1)
+    hit.at = Math.max(Number(hit.at) || 0, Number(b.at) || 0)
+    if (b.thumb) hit.thumb = b.thumb
+    if (b.name) hit.name = b.name
+    if (!(hit.id > 0) && b.id > 0) hit.id = b.id
+  }
+  return kept
 }
 
 /**

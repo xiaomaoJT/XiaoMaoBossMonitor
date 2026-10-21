@@ -36,8 +36,8 @@ import {
   readGroupSim
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
-import { pendingDedupeSec } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone } from '../config/defaults.js'
+import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf } from '../config/defaults.js'
 
 /** COCO 17 关键点下标 */
 const KP = {
@@ -170,6 +170,12 @@ export function useAiExtras(options) {
 
   /** 同一张脸的重复事件冷却：key（faceId 或 unknown）→ 上次触发时间 */
   const faceEventAt = new Map()
+  /**
+   * 命中确认的计数表：归类名 → {n, at}（默认关时不写任何东西）。
+   * 与 faceEventAt 分开两张表：冷却键按样本 id（既有行为不动），
+   * 确认键必须按人（同一个人多条样本，按样本 id 计数永远数不满）。
+   */
+  const faceConfirmAt = new Map()
   let lastCountPushAt = 0
   let zonesKey = ''
 
@@ -189,7 +195,15 @@ export function useAiExtras(options) {
       // 待录入内存队列容量（= 满库阈值）：与 App.vue 的满库 watcher 共用同一份解析
       ...pendingFullConf(c, PENDING_MAX),
       // 重复捕获合并间隔（秒）：与后端 store.addPendingFace 共用同一份解析
-      dedupeWin: pendingDedupeSec(c)
+      dedupeWin: pendingDedupeSec(c),
+      // 命中确认（默认关）：判定收口在 defaults.hitConfirmStep，与后端 analyzer 共用
+      hitConfirm: hitConfirmConf(c),
+      // 命中分差门槛（默认 0.08）：判定收口在 vecMatch.hitMarginThreshold / hitMarginPassed，
+      // 与后端 analyzer 共用同一份口径
+      hitMargin: hitMarginThreshold(c),
+      // 命中质量门槛（默认关）：判定收口在 defaults.faceQualityConf / faceQualityPassed，
+      // 与后端 analyzer 共用同一份口径
+      quality: faceQualityConf(c)
     }
   }
 
@@ -442,13 +456,20 @@ export function useAiExtras(options) {
       track.faceOkAt = now
       const thumb = faceThumb(frame.canvas, face, FACE_SHOT_SIZE)
       // matchFaceGroup：把命中的样本映射到「归类名称」——库里归好类的人只报一个名字
-      const hit = await matchFaceGroup(vec, { threshold: fc.threshold, bySimilarity: readGroupSim() })
+      const hit = await matchFaceGroup(vec, { threshold: fc.threshold, bySimilarity: readGroupSim(), margin: fc.hitMargin })
       const slot = faces.value.find(
         (f) => Math.abs((f.x + f.w / 2) - (face.x + face.w / 2)) < 0.02 &&
                Math.abs((f.y + f.h / 2) - (face.y + face.h / 2)) < 0.02
       )
 
-      if (hit && !hit.miss) {
+      /*
+       * 命中质量门槛：检测置信度太低 / 脸太小 / 侧脸转太多，不许认成库内某人
+       * （落入下面的未录入分支，而不是报一个不可信的"识别到 X"）。
+       * 判定收口在 defaults.faceQualityPassed，与后端 analyzer 共用同一份口径。
+       * 默认关（fc.quality.enabled=false）→ 直接放行，历史行为不变。
+       */
+      const okQuality = faceQualityPassed(face, frame.canvas.width, frame.canvas.height, fc.quality)
+      if (hit && !hit.miss && okQuality) {
         const who = hit.groupName
         track.face = { id: hit.face.id, name: who, score: hit.score }
         if (slot) {
@@ -456,6 +477,18 @@ export function useAiExtras(options) {
           slot.known = true
         }
         if (!fc.eventOnKnown) continue
+        /*
+         * 命中确认闸门（可配置，默认关 = 见到在库人脸就推）。
+         * 判定收口在 defaults.hitConfirmStep，前后端共用同一份状态机。
+         *
+         * ⚠️ 必须放在冷却**之前**：放在后面的话重复出现会被 `faceEventAt` 冷却
+         *    吞掉（同 key 直接 continue），计数永远涨不上去，功能静默失效。
+         * ⚠️ 计数键用**归类名**而不是样本 id：同一个人有多条样本时，
+         *    `hit.face.id` 随角度变来变去，按它计数会把一个人拆成好几个，
+         *    永远数不满 `times`。冷却键保持样本 id 不变（改它会动到既有行为）。
+         */
+        const confirmKey = 'f' + (who || `#${hit.face.id}`)
+        if (!hitConfirmStep(faceConfirmAt, confirmKey, now, fc.hitConfirm).fire) continue
         const key = `f${hit.face.id}`
         if (now - (faceEventAt.get(key) || 0) < fc.cooldownSec * 1000) continue
         faceEventAt.set(key, now)
@@ -613,7 +646,7 @@ export function useAiExtras(options) {
               const aligned = alignFace(canvas, face.kps)
               const vec = aligned ? await faceEmbedding(aligned) : null
               if (vec) {
-                const hit = await matchFaceGroup(vec, { threshold: fc.threshold, bySimilarity: readGroupSim() })
+                const hit = await matchFaceGroup(vec, { threshold: fc.threshold, bySimilarity: readGroupSim(), margin: fc.hitMargin })
               out.faceThumb = faceThumb(canvas, face, FACE_SHOT_SIZE)
               if (hit && !hit.miss) {
                 out.faceName = hit.groupName

@@ -10,7 +10,7 @@
  */
 import { ref } from 'vue'
 import { DB_NAME, DB_VERSION, FACE_STORE_NAME, FACE_SPLIT_STORE, FACE_BLOCK_STORE } from './useEventStore.js'
-import { normalizeFaceSplits, normalizeFaceBlocks, BLOCK_KEEP } from '../config/defaults.js'
+import { normalizeFaceSplits, normalizeFaceBlocks, foldFaceBlocks, BLOCK_KEEP, blockMaxAgeDays as parseBlockMaxAge } from '../config/defaults.js'
 import {
   cosine,
   loadModel,
@@ -21,12 +21,32 @@ import {
   faceThumb
 } from './useAiDetector.js'
 import { netErrorText, timeoutReason } from './useNet.js'
-import { cosineOrRaw, looksSame, pendingDedupeTarget } from './vecMatch.js'
+import { cosineOrRaw, looksSame, pendingDedupeTarget, blockMergeTarget, hitMarginPassed } from './vecMatch.js'
 
 /** 默认比对阈值：余弦相似度高于它才认为是同一个人 */
 export const DEFAULT_FACE_THRESHOLD = 0.38
 /** 人脸库默认上限 */
 export const DEFAULT_FACE_MAX = 50
+
+/**
+ * 把 IndexedDB 事务的失败原因转成一个**真 Error**。
+ *
+ * ⚠️ 绝不能直接 `reject(tx.error)`：Chrome 在「请求错误冒泡导致事务中止」时
+ *    `transaction.error` 可能是 **null**，于是调用方收到的是一个 `null`，
+ *    上层 `(e && e.message) || e` 只能打印出 `"null"` —— 既看不出错在哪一类，
+ *    也没法靠它分流文案（历史症状：`⚠️ 陌生人反例拉取失败：null`，
+ *    以及「替换人脸库失败但控制台什么都不说」）。
+ *
+ * 本文件所有事务的 `onerror` / `onabort` 都必须走这里。新增事务时照抄旁边
+ * 那行的写法，不要手写 `reject(tx.error)`。
+ *
+ * @param {IDBTransaction} tx
+ * @param {string} what 人话说明，如「录入事务出错」「录入事务被中止」
+ * @returns {Error}
+ */
+function txFail(tx, what) {
+  return tx.error || new Error(what)
+}
 
 /** 人脸库列表（轻量：不含向量，向量只在比对时按需读） */
 export const faces = ref([])
@@ -443,8 +463,8 @@ export async function refreshFaceSplits() {
             if (!alive.includes(s)) os.delete(s.id)
           }
           tx.oncomplete = () => resolve(true)
-          tx.onerror = () => reject(tx.error)
-          tx.onabort = () => reject(tx.error || new Error('拆分声明清理事务被中止'))
+          tx.onerror = () => reject(txFail(tx, '拆分声明清理事务出错'))
+          tx.onabort = () => reject(txFail(tx, '拆分声明清理事务被中止'))
         })
         list = alive
       }
@@ -478,8 +498,8 @@ export function addFaceSplits(pairs) {
         const now = Date.now()
         for (const w of fresh) os.add({ ...w, createdAt: now })
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('拆分声明写入事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '拆分声明写入事务出错'))
+        tx.onabort = () => reject(txFail(tx, '拆分声明写入事务被中止'))
       })
       return { ok: true, added: fresh.length }
     }),
@@ -496,8 +516,8 @@ export function removeFaceSplit(id) {
         const tx = db.transaction(FACE_SPLIT_STORE, 'readwrite')
         tx.objectStore(FACE_SPLIT_STORE).delete(id)
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('拆分声明删除事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '拆分声明删除事务出错'))
+        tx.onabort = () => reject(txFail(tx, '拆分声明删除事务被中止'))
       })
       return { ok: true }
     }),
@@ -521,8 +541,8 @@ export function replaceFaceSplits(list) {
         const now = Date.now()
         for (const w of want) os.add({ ...w, createdAt: now })
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('拆分声明替换事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '拆分声明替换事务出错'))
+        tx.onabort = () => reject(txFail(tx, '拆分声明替换事务被中止'))
       })
       return { ok: true, count: want.length }
     }),
@@ -546,6 +566,17 @@ export function replaceFaceSplits(list) {
 /** 反例缓存（非响应式，与 splitCache 同模式）：匹配路径同步读 */
 let blockCache = []
 
+/**
+ * 反例保留期限（天）的当前生效值（模块级，随配置同步更新）。
+ * normalizeFaceBlocks / refreshFaceBlocks / pruneFaceBlocks 都以它为默认口径，
+ * 避免"前端留着过期反例、还在拦截"的漂移。setBlockMaxAgeDays 由 App.vue 在配置
+ * 应用时写入（解析收口在 defaults.blockMaxAgeDays）。
+ */
+let blockMaxAge = 0
+export function setBlockMaxAgeDays(face) {
+  blockMaxAge = parseBlockMaxAge(face || {})
+}
+
 /** 每次 refreshFaceBlocks 自增 —— 让设置页「陌生人标记」列表 computed 知道该重算了 */
 export const faceBlocksVersion = ref(0)
 
@@ -554,7 +585,10 @@ export function currentFaceBlocks() {
   return blockCache
 }
 
-/** 读全量反例（含向量），按 id 升序（= 标记时间先后） */
+/**
+ * 读全量反例（含向量），按 id 升序。
+ * ⚠️ 别再把它当成「按标记时间先后」：合并会刷新 at，id 与时间已经脱钩。
+ */
 export async function getAllFaceBlocks() {
   try {
     const os = await store('readonly', FACE_BLOCK_STORE)
@@ -568,21 +602,28 @@ export async function getAllFaceBlocks() {
 
 /** 刷新反例缓存（人脸库每次 refresh 都跟着刷一次，保证匹配拿到的是最新的） */
 export async function refreshFaceBlocks() {
-  const list = await getAllFaceBlocks()
+  const list = normalizeFaceBlocks(await getAllFaceBlocks(), blockMaxAge)
   blockCache = list
   faceBlocksVersion.value += 1
   return list
 }
 
 /**
- * 新增一条陌生人反例。
- * @param {{vector:number[], thumb?:string, name?:string}} rec
+ * 新增一条陌生人反例（同一个人已有时合并，不再插新条）。
+ * ----------------------------------------------------------------------------
+ * 为什么合并：酒店这类高流动场景里同一个路人被误认 N 次，老逻辑就是 N 条独立
+ * 反例 —— 库按「点击次数」而不是「不同陌生人」增长，很快占满 200 条容量。
+ * 判据收口在 vecMatch.blockMergeTarget（默认 0.6，可配；配 0 = 关闭合并）。
+ *
+ * @param {{vector:number[], thumb?:string, name?:string, mergeThreshold?:number}} rec
  *        vector：这张陌生脸的 512 维特征（判据本体）；
  *        thumb：缩略图（设置页要能看见"是谁被认错了"）；
- *        name：当初被误认成的库内人名（展示用，可空）。
- * @returns {Promise<{ok:boolean, id?:number, reason?:string}>}
+ *        name：当初被误认成的库内人名（展示用，可空）；
+ *        mergeThreshold：合并阈值（`options.face.blockMergeThreshold` 的解析值，
+ *                        没传走默认 0.6）。
+ * @returns {Promise<{ok:boolean, id?:number, merged?:boolean, count?:number, reason?:string}>}
  */
-export function addFaceBlock({ vector, thumb, name } = {}) {
+export function addFaceBlock({ vector, thumb, name, mergeThreshold } = {}) {
   return withRefresh(
     runExclusive(async () => {
       const vec = Array.isArray(vector) ? vector.slice() : null
@@ -590,20 +631,39 @@ export function addFaceBlock({ vector, thumb, name } = {}) {
         return { ok: false, reason: '这条样本没有可用的特征向量' }
       }
       const db = await openFaceDB()
+      const now = Date.now()
+      const incomingName = String(name || '').trim()
+      const incomingThumb = String(thumb || '')
+
+      // 合并判定：库里已有一条足够像的 → 只给它 count+1、刷新 at/thumb/name
+      const hit = blockMergeTarget(blockCache, { vector: vec }, mergeThreshold)
+      if (hit) {
+        const next = {
+          ...hit,
+          count: (Number(hit.count) || 1) + 1,
+          at: now,
+          thumb: incomingThumb || hit.thumb || '',
+          name: incomingName || hit.name || ''
+        }
+        await putFaceBlock(db, next)
+        return { ok: true, id: next.id, merged: true, count: next.count }
+      }
+
       const rec = {
         vector: vec,
-        thumb: String(thumb || ''),
-        name: String(name || '').trim(),
-        at: Date.now()
+        thumb: incomingThumb,
+        name: incomingName,
+        at: now,
+        count: 1
       }
       const id = await new Promise((resolve, reject) => {
         const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
         const rq = tx.objectStore(FACE_BLOCK_STORE).add(rec)
         tx.oncomplete = () => resolve(rq.result)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('反例写入事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '反例写入事务出错'))
+        tx.onabort = () => reject(txFail(tx, '反例写入事务被中止'))
       })
-      return { ok: true, id }
+      return { ok: true, id, merged: false, count: 1 }
     }),
     // 滚动清理（写）→ 刷缓存（读），按序在后台跑；清理失败不影响"反例已写入"
     () =>
@@ -618,6 +678,18 @@ export function addFaceBlock({ vector, thumb, name } = {}) {
   )
 }
 
+/** 覆盖写一条反例（合并计数、刷新 at/thumb 时用；id 已在库里，按 keyPath 覆盖） */
+function putFaceBlock(db, rec) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
+    tx.objectStore(FACE_BLOCK_STORE).put(rec)
+    tx.oncomplete = () => resolve(true)
+    // tx.error 在 Chrome 下可能为 null，必须兜真 Error（见 replaceFaceBlocks 的说明）
+    tx.onerror = () => reject(txFail(tx, '反例更新事务出错'))
+    tx.onabort = () => reject(txFail(tx, '反例更新事务被中止'))
+  })
+}
+
 /** 解除一条反例（之后这张脸重新参与正常匹配） */
 export function removeFaceBlock(id) {
   return withRefresh(
@@ -627,8 +699,8 @@ export function removeFaceBlock(id) {
         const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
         tx.objectStore(FACE_BLOCK_STORE).delete(id)
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('反例删除事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '反例删除事务出错'))
+        tx.onabort = () => reject(txFail(tx, '反例删除事务被中止'))
       })
       return { ok: true }
     }),
@@ -639,20 +711,46 @@ export function removeFaceBlock(id) {
 /**
  * 用一份反例**整体替换**本机的（从后端拉取配置时用，以后端为准）。
  * 与 replaceFaceSplits 同理：明确送来数组才替换；送空数组 = 后端确实没有反例。
+ *
+ * ⚠️ 修过的坑：后端远程 `/hitblock` 标的反例 id 一律是 0（「纯配置来源」），
+ *    而 face-blocks 表是 `keyPath:'id' + autoIncrement` —— 直接 `os.add({id:0})`
+ *    会抛 ConstraintError 让**整笔事务中止**（`os.clear()` 一起回滚），
+ *    症状是「从后端拉取配置」静默失败、本机数据看着没丢。所以 id<=0 的记录
+ *    必须重新分配自增位，绝不能原样写 0。
+ *
+ * @param {Array} list 后端下发的反例
+ * @param {number} [mergeThreshold] 合并阈值（`options.face.blockMergeThreshold`
+ *        的解析值）。同一个人在本机标过又被远程标过时，拉取会拿到两份，
+ *        这里按阈值折叠成一条（判据见 defaults.foldFaceBlocks）。
  */
-export function replaceFaceBlocks(list) {
+export function replaceFaceBlocks(list, mergeThreshold, maxAgeDays = blockMaxAge) {
   return withRefresh(
     runExclusive(async () => {
-      const want = normalizeFaceBlocks(list)
+      const want = foldFaceBlocks(normalizeFaceBlocks(list, maxAgeDays), mergeThreshold)
       const db = await openFaceDB()
       await new Promise((resolve, reject) => {
         const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
         const os = tx.objectStore(FACE_BLOCK_STORE)
         os.clear()
-        for (const w of want) os.add({ ...w })
+        // 自增位从「本批最大 id + 1」起：既不会和显式 id 撞，
+        // 也会把 IndexedDB 的键生成器顶上去，后续本机新增不会回落到已占用的 id
+        let nextId = want.reduce((m, w) => Math.max(m, Number(w.id) || 0), 0) + 1
+        for (const w of want) {
+          if (w.id > 0) {
+            os.add({ ...w })
+            continue
+          }
+          os.add({ ...w, id: nextId++ })
+        }
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('反例替换事务被中止'))
+        /*
+         * ⚠️ 不能直接 reject(tx.error)：Chrome 在「请求错误冒泡导致事务中止」时
+         *    transaction.error 可能是 null，于是调用方收到的是一个 null，
+         *    App.vue 的 `(e && e.message) || e` 只能打印出 "null" —— 既看不出
+         *    错在哪类，也没法靠它分流文案。所以这里必须兜一个真 Error。
+         */
+        tx.onerror = () => reject(txFail(tx, '反例替换事务出错'))
+        tx.onabort = () => reject(txFail(tx, '反例替换事务被中止'))
       })
       return { ok: true, count: want.length }
     }),
@@ -669,8 +767,8 @@ export function clearFaceBlocks() {
         const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
         tx.objectStore(FACE_BLOCK_STORE).clear()
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('反例清空事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '反例清空事务出错'))
+        tx.onabort = () => reject(txFail(tx, '反例清空事务被中止'))
       })
       return { ok: true }
     }),
@@ -678,19 +776,44 @@ export function clearFaceBlocks() {
   )
 }
 
-/** 滚动清理：超过 BLOCK_KEEP 条时删最旧的（按 at） */
+/**
+ * 滚动清理：超过 BLOCK_KEEP 条时删最旧的；另外超过保留期限（blockMaxAge 天）的也删。
+ * ⚠️ 两套口径独立：保留期限（时间上限）优先于 BLOCK_KEEP（容量上限）—— 过期的
+ *    无论是否超容量都丢，没过期的才参与容量滚动。
+ * ⚠️ 排序口径与 defaults.normalizeFaceBlocks 逐字一致（**按 at 新者优先**，
+ *    同 at 保持原相对顺序）。以前按 id 删是错的：合并会刷新 at 但不换 id，
+ *    「最近还在被认错」的老记录反而先被淘汰；更要命的是远程 `/hitblock`
+ *    来源的反例 id 全是 0，会永远排在头部被优先删掉 —— 与价值完全不相关。
+ */
 async function pruneFaceBlocks() {
   const all = await getAllFaceBlocks()
-  if (all.length <= BLOCK_KEEP) return 0
-  const drop = all.slice(0, all.length - BLOCK_KEEP) // at 升序存，前面最旧
+  const maxAgeMs = blockMaxAge > 0 ? blockMaxAge * 86400000 : 0
+  const now = Date.now()
+  const alive = []
+  const drop = []
+  for (const r of all) {
+    const at = Number(r && r.at) || 0
+    // 保留期限：过期的直接丢（与 BLOCK_KEEP 独立口径）
+    if (maxAgeMs > 0 && at > 0 && now - at > maxAgeMs) {
+      drop.push(r)
+      continue
+    }
+    alive.push(r)
+  }
+  if (alive.length > BLOCK_KEEP) {
+    const order = alive.map((_, i) => i)
+    order.sort((a, b) => (alive[b].at - alive[a].at) || (a - b))
+    const keep = new Set(order.slice(0, BLOCK_KEEP))
+    for (const i of order.slice(BLOCK_KEEP)) drop.push(alive[i])
+  }
   const db = await openFaceDB()
   await new Promise((resolve, reject) => {
     const tx = db.transaction(FACE_BLOCK_STORE, 'readwrite')
     const os = tx.objectStore(FACE_BLOCK_STORE)
     for (const r of drop) os.delete(r.id)
     tx.oncomplete = () => resolve(true)
-    tx.onerror = () => reject(tx.error)
-    tx.onabort = () => reject(tx.error || new Error('反例清理事务被中止'))
+    tx.onerror = () => reject(txFail(tx, '反例清理事务出错'))
+    tx.onabort = () => reject(txFail(tx, '反例清理事务被中止'))
   })
   return drop.length
 }
@@ -743,8 +866,8 @@ async function maintainSplitsAfterRename(ids) {
     for (const id of retire) os.delete(id)
     for (const s of update) os.put(s)
     tx.oncomplete = () => resolve(true)
-    tx.onerror = () => reject(tx.error)
-    tx.onabort = () => reject(tx.error || new Error('拆分声明维护事务被中止'))
+    tx.onerror = () => reject(txFail(tx, '拆分声明维护事务出错'))
+    tx.onabort = () => reject(txFail(tx, '拆分声明维护事务被中止'))
   })
 }
 
@@ -817,8 +940,8 @@ export function addFace(vector, thumb, name, max = DEFAULT_FACE_MAX) {
         const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
         const rq = tx.objectStore(FACE_STORE_NAME).add(record)
         tx.oncomplete = () => resolve(rq.result)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('录入事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '录入事务出错'))
+        tx.onabort = () => reject(txFail(tx, '录入事务被中止'))
       })
       return { ok: true, id, name: finalName }
     }),
@@ -865,8 +988,8 @@ export function renameFaces(ids, name) {
           }
         })
         tx.oncomplete = () => resolve(hit)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('改名事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '改名事务出错'))
+        tx.onabort = () => reject(txFail(tx, '改名事务被中止'))
       })
       return { ok: true, name: finalName, count: list.length }
     }),
@@ -908,8 +1031,8 @@ export function deleteFaces(ids) {
         const os = tx.objectStore(FACE_STORE_NAME)
         list.forEach((id) => os.delete(id))
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('删除事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '删除事务出错'))
+        tx.onabort = () => reject(txFail(tx, '删除事务被中止'))
       })
       return { ok: true, count: list.length }
     }),
@@ -989,8 +1112,8 @@ export function mergeFaces(ids, keepId) {
           }
         })
         tx.oncomplete = () => resolve(out)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('读取人脸记录被中止'))
+        tx.onerror = () => reject(txFail(tx, '读取人脸记录出错'))
+        tx.onabort = () => reject(txFail(tx, '读取人脸记录被中止'))
       })
       if (recs.length < 2) return { ok: false, reason: '至少需要两条记录才能合并' }
       const keep = recs.find((r) => r.id === keepId) || recs[0]
@@ -1012,8 +1135,8 @@ export function mergeFaces(ids, keepId) {
           if (r.id !== keep.id) os.delete(r.id)
         })
         tx.oncomplete = () => resolve(true)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error || new Error('合并事务被中止'))
+        tx.onerror = () => reject(txFail(tx, '合并事务出错'))
+        tx.onabort = () => reject(txFail(tx, '合并事务被中止'))
       })
       return { ok: true, id: keep.id, samples: avg.weight, count: recs.length }
     }),
@@ -1097,8 +1220,8 @@ export function replaceFaces(list, { force = false } = {}) {
         })
       })
       tx.oncomplete = () => resolve()
-      tx.onerror = () => reject(tx.error)
-      tx.onabort = () => reject(tx.error)
+      tx.onerror = () => reject(txFail(tx, '人脸库替换事务出错'))
+      tx.onabort = () => reject(txFail(tx, '人脸库替换事务被中止'))
     })
       return { ok: true, count: items.length }
     }),
@@ -1221,24 +1344,44 @@ export function readGroupSim() {
  *        threshold：识别/归类阈值（默认识别默认阈值）；
  *        bySimilarity：是否按相似度归类（与设置页「按相似度归类」开关一致）；
  *        splits：手动拆分声明；**不传则自动从库里读**（识别路径懒得每次显式传，
- *                但库里的声明必须生效，否则"库里分开了、推送还并着"）。
+ *                但库里的声明必须生效，否则"库里分开了、推送还并着"）；
+ *        margin：命中分差门槛（余弦差）；>0 时要求"最像的人"比"第二像的人"高出
+ *                这么多才敢确认命中，否则当未录入（ambiguous:true）。0=关闭。
  * @returns {Promise<{face:object, score:number, groupName:string}|null>}
  *          miss 情形仍回 `{face,score,miss:true,groupName}`（groupName 回样本本名）。
  *          被反例拦下的误命中回 `{face,score,miss:true,blocked:true,groupName:''}`。
+ *          top1 过了阈值但差 top2 不够远回 `{face,score,miss:true,ambiguous:true}`。
  */
-export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOLD, bySimilarity = true, splits } = {}) {
+export async function matchFaceGroup(vector, { threshold = DEFAULT_FACE_THRESHOLD, bySimilarity = true, splits, margin = 0 } = {}) {
   if (!vector || !vector.length) return null
   const list = await getAllFaces()
   if (!list.length) return null
   const q = vector instanceof Float32Array ? vector : Float32Array.from(vector)
   let best = null
+  let bestScore = -1
+  let secondScore = -1
   for (const f of list) {
     if (!f.vector || f.vector.length !== q.length) continue
     const s = cosine(q, f.vector)
-    if (!best || s > best.score) best = { face: f, score: s }
+    if (s > bestScore) {
+      secondScore = bestScore
+      bestScore = s
+      best = { face: f, score: s }
+    } else if (s > secondScore) {
+      secondScore = s
+    }
   }
   if (!best) return null
-  const hit = best.score >= threshold ? best : { face: best.face, score: best.score, miss: true }
+  /*
+   * 命中分差门槛（酒店等长相相似度高的场景防误认）：最像的人必须比第二像的人高出
+   * margin 才敢确认命中；差得不够远就当没认出（落入未录入流程）。判定收口在
+   * vecMatch.hitMarginPassed（前后端共用），margin<=0 关闭。
+   */
+  const marginOk = hitMarginPassed(bestScore, secondScore, margin)
+  const confident = bestScore >= threshold && marginOk
+  const hit = confident
+    ? best
+    : { face: best.face, score: bestScore, miss: true, ambiguous: bestScore >= threshold }
   /*
    * 陌生人反例拦截（「不是本人」标记）：
    * 本来要认成库里某人（过了阈值）时，再看反例里有没有更像的 —— 反例分 ≥ 阈值

@@ -339,9 +339,11 @@ import {
   PENDING_MAX,
   pendingFaces,
   readGroupSim,
+  refreshFaceBlocks,
   replaceFaceBlocks,
   replaceFaceSplits,
-  replaceFaces
+  replaceFaces,
+  setBlockMaxAgeDays
 } from './composables/useFaceLib'
 /*
  * 待录入满库提醒的状态机与后端**共用同一份**（server/pending-full.mjs）。
@@ -350,6 +352,7 @@ import {
  */
 import { createPendingFullWatcher } from '../server/pending-full.mjs'
 import { pendingFullConf } from './composables/useTracker.js'
+import { blockMergeThreshold } from './composables/vecMatch.js'
 import {
   clearWatch,
   onWatchCommand,
@@ -961,6 +964,15 @@ function persistNow() {
 
 watch([cameras, hiddenIds, layoutKey], schedulePersist, { deep: true })
 watch(options, schedulePersist)
+// 反例保留期限（天）随配置生效：更新模块级全局并刷新反例缓存（让过期的不再参与拦截）
+watch(
+  () => options.face && options.face.blockMaxAgeDays,
+  () => {
+    setBlockMaxAgeDays(options.face || {})
+    refreshFaceBlocks().catch(() => {})
+  },
+  { immediate: true }
+)
 
 /*
  * 「渠道级监听名单」的重算点全部集中在三处显式调用，**不额外挂监听**：
@@ -1106,7 +1118,10 @@ async function backendPayload() {
       vector: b.vector,
       thumb: b.thumb || '',
       name: b.name || '',
-      at: b.at || 0
+      at: b.at || 0,
+      // 合并计数：同一张脸被"认错"了几回。不参与任何判定，只为别让同步
+      // 把它洗回 1（否则另一台机器上"×N"会莫名其妙归零）
+      count: Math.max(1, Math.round(Number(b.count)) || 1)
     })),
     faceGroupSim: readGroupSim()
   }
@@ -1689,7 +1704,11 @@ async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
      */
     if (Array.isArray(data.faceBlocks)) {
       try {
-        await replaceFaceBlocks(data.faceBlocks)
+        // 反例保留期限随配置生效（解析收口在 defaults.blockMaxAgeDays，模块级全局）
+        setBlockMaxAgeDays(opts.face)
+        // 传合并阈值：同一个人在本机标过、又被远程 /hitblock 标过时，
+        // 拉取会拿到两份，replaceFaceBlocks 里按这个阈值折叠成一条
+        await replaceFaceBlocks(data.faceBlocks, blockMergeThreshold(opts.face))
       } catch (e) {
         console.warn('⚠️  陌生人反例拉取失败：', (e && e.message) || e)
       }
