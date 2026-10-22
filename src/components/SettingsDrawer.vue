@@ -1837,7 +1837,9 @@
                     {{ pendingLibOpen ? '收起' : '管理' }}
                   </button>
                 </strong>
-                <em>点「录入」建档并自动编号，之后可以在人脸库里改名</em>
+                <em
+                  >按「人脸尺寸 + 清晰度 + 正脸程度」排好序了：优先录「优 / 良」，侧脸和糊脸录进去会拉低整个名字的识别率</em
+                >
               </span>
 
                 <div class="face-grid" ref="pendingGridEl" v-if="pendingLibOpen && allPendingFaces.length">
@@ -1850,6 +1852,14 @@
                     :title="pf.full ? '点击查看捕获时的原图' : ''"
                     @click="pf.full && openPendingShot(pf)"
                   />
+                  <!-- 样本质量（尺寸 + 清晰度 + 正脸程度）：挑「哪张值得录」用。
+                       侧脸/糊脸录进去会拉低整个名字的匹配，所以先把好的排在前面 -->
+                  <span
+                    class="pf-score"
+                    :class="[pfQuality(pf).tone, { rec: pfRecommended(pf) }]"
+                    :title="pfScoreTip(pf)"
+                    >{{ pfQuality(pf).text }}</span
+                  >
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
                   <!-- 录入时手动归入：选已知的人（同名归到他那一堆）或自定义名字；留空=自动编号，保持旧行为 -->
@@ -1893,6 +1903,9 @@
                 <button class="mini-btn ghost" :disabled="pendingPage >= pendingPageCount" @click="pendingPage += 1">下一页</button>
               </div>
               <div class="face-acts" v-if="pendingLibOpen">
+                <button class="mini-btn ghost" @click="togglePendingSort">
+                  {{ pendingSort === 'score' ? '排序：质量优先' : '排序：时间优先' }}
+                </button>
                 <button class="mini-btn ghost" v-if="allPendingFaces.length && pendingPageCount > 1" @click="doIgnorePagePending">本页忽略</button>
                 <button class="mini-btn danger" v-if="allPendingFaces.length" @click="doIgnoreAllPending">全部忽略</button>
                 <button
@@ -2153,7 +2166,7 @@
                   v-for="g in pagedFaceGroups"
                   :key="g.key"
                 >
-                  <!-- 缩略图 = 这个人最早录入的那张（代表样本）；多条时可点开看全部角度 -->
+                  <!-- 缩略图 = 这个人最早录入的那张（代表样本）；设了主样本则用它当封面；多条时可点开看全部角度 -->
                   <div
                     class="face-thumb"
                     :class="{ clickable: g.count > 1 }"
@@ -2162,13 +2175,19 @@
                   >
                     <img v-if="g.thumb" :src="g.thumb" alt="人脸" />
                     <span class="face-count" v-if="g.count > 1">{{ g.count }}</span>
+                    <!-- 主样本（★）：用户指定的代表样本，只影响封面 / 挑样本基准，不影响匹配 -->
+                    <span
+                      class="face-primary-star"
+                      v-if="g.primaryId"
+                      title="主样本：这张卡片的封面与挑样本基准都是它（不影响识别匹配）"
+                      >★</span
+                    >
                     <span
                       class="face-warn"
                       v-if="g.count > 1 && g.sameName === false"
                       title="这一组里有多个名字，推送时会各按各的名字 —— 改名可统一"
                       >!</span
-                    >
-                  </div>
+                    >                  </div>
                   <div class="face-rename" v-if="faceRenameKey === g.key">
                     <input
                       class="field mini"
@@ -2198,6 +2217,17 @@
                     <button class="mini-btn face-busy" v-if="renamingFace[g.key]" disabled>保存中</button>
                     <template v-else>
                       <button class="mini-btn ghost" v-if="!deletingFace[g.key]" @click="startRenameGroup(g)">改名</button>
+                      <!-- 主样本：多角度时才有得选（单条样本本来就是它自己）。
+                           没设过 → 一键把封面样本设为代表；设过 → 点开面板换一张 -->
+                      <button
+                        class="mini-btn ghost primary-btn"
+                        v-if="g.count > 1 && !deletingFace[g.key]"
+                        :disabled="settingPrimary[g.id]"
+                        :title="g.primaryId ? '已设主样本 · 点开面板可更换' : '把封面样本（最早录入那张）设为主样本：卡片封面、挑样本基准都用它'"
+                        @click="g.primaryId ? toggleGroupPanel(g) : doSetPrimaryCard(g)"
+                      >
+                        {{ settingPrimary[g.id] ? '设置中' : g.primaryId ? '★ 主样本' : '设为主样本' }}
+                      </button>
                       <button class="mini-btn danger" :disabled="deletingFace[g.key]" @click="doDeleteGroup(g)">{{ deletingFace[g.key] ? '删除中' : '删除' }}</button>
                     </template>
                   </div>
@@ -2243,8 +2273,22 @@
                       <input type="checkbox" :value="it.id" v-model="mergeSelected" />
                     </label>
                     <img v-if="it.thumb" :src="it.thumb" alt="样本" />
-                    <span class="fgp-sim" :title="i === 0 ? '代表样本（最早录入的那张）' : '与代表样本的相似度'">{{ i === 0 ? '代表' : simPct(it.sim) }}</span>
+                    <span
+                      class="fgp-sim"
+                      :class="{ primary: it.primary }"
+                      :title="it.primary ? '主样本：卡片封面与挑样本基准' : i === 0 ? '代表样本（最早录入的那张）' : '与代表样本的相似度'"
+                      >{{ it.primary ? '★ 主样本' : i === 0 ? '代表' : simPct(it.sim) }}</span
+                    >
                     <span class="fgp-name" :title="it.name">{{ it.name }}</span>
+                    <!-- 主样本：这一条当代表（封面 / 挑样本基准）。不影响识别匹配 -->
+                    <button
+                      class="mini-btn ghost primary-btn"
+                      :disabled="settingPrimary[it.id]"
+                      :title="it.primary ? '取消主样本标记（回到默认：封面取最早录入那张）' : '把这一条设为主样本：卡片封面、挑样本基准都用它'"
+                      @click="it.primary ? doClearPrimarySample(it) : doSetPrimarySample(it)"
+                    >
+                      {{ settingPrimary[it.id] ? '…' : it.primary ? '取消' : '设为主样本' }}
+                    </button>
                     <!-- 手动归入：把这一条样本单独改名到某个人（修自动归类误并的问题） -->
                     <div class="fgp-assign">
                       <FaceAssignSelect
@@ -4478,7 +4522,9 @@ import {
   removeFaceBlock,
   removePendingFace,
   renameFace,
-  renameFaces
+  renameFaces,
+  setPrimaryFace,
+  clearPrimaryFace
 } from '../composables/useFaceLib'
 import { runtimeInfo, runtimeLine } from '../composables/useDeviceInfo'
 import {
@@ -4496,6 +4542,7 @@ import PushTemplatePanel from './PushTemplatePanel.vue'
 import SelectField from './SelectField.vue'
 import InfoTip from './InfoTip.vue'
 import StatsPanel from './StatsPanel.vue'
+import { sampleQualityLabel, SAMPLE_SCORE_RECOMMEND } from '../composables/faceSampleScore.js'
 
 /*
  * ---------------- 下拉选项 ----------------
@@ -5587,6 +5634,84 @@ const faceBackendOn = computed(() => !!(opts.backend && opts.backend.enabled && 
 const allPendingFaces = computed(() =>
   faceBackendOn.value ? [...backendPendingFaces.value, ...pendingFaces.value] : [...pendingFaces.value]
 )
+
+/**
+ * 待录入排序：「按样本质量」优先（默认）—— 用户要在这堆抓拍里挑「哪张值得录进
+ * 人脸库」，一张侧脸/糊脸录进去拉低的是整个名字的匹配（同人相似度被废样本摊薄，
+ * 真人反而认不出来）。所以默认把分高的排前面，未评分（老行，采集时没拿到几何量）
+ * 排最后 —— 「不知道」不该被摆在「知道很差」前面冒充好样本。
+ *
+ * 「按时间」保留旧行为（最近抓到的在前），给想按现场顺序核对的用户。
+ */
+const pendingSort = ref(
+  (() => {
+    try {
+      return localStorage.getItem('pendingSort') === 'time' ? 'time' : 'score'
+    } catch (e) {
+      return 'score'
+    }
+  })()
+)
+function togglePendingSort() {
+  pendingSort.value = pendingSort.value === 'score' ? 'time' : 'score'
+  try {
+    localStorage.setItem('pendingSort', pendingSort.value)
+  } catch (e) {}
+  // 排序换了，页码回到第一页（否则可能停在一个看起来没变的页上）
+  pendingPage.value = 1
+}
+
+const sortedPendingFaces = computed(() => {
+  const list = allPendingFaces.value.slice()
+  if (pendingSort.value !== 'score') {
+    /*
+     * 时间优先：显式按捕获时间倒序，别原样返回。
+     * 后端那份本来就是 ORDER BY at DESC、前端那份是 unshift（新的在前），
+     * 但后端模式下是「后端 + 前端」拼起来的，拼完并不全局有序 ——
+     * 原样返回会让「时间优先」在混合队列里变成"两段各自有序"，
+     * 用户看到的时间线是断的。排一次不贵（队列 ≤ 200）。
+     */
+    return list.sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0))
+  }
+  // 稳定排序：同分按时间倒序（新抓的在前）
+  return list.sort((a, b) => {
+    const sa = Number(a.score)
+    const sb = Number(b.score)
+    const ua = !Number.isFinite(sa) || sa < 0
+    const ub = !Number.isFinite(sb) || sb < 0
+    if (ua !== ub) return ua ? 1 : -1 // 未评分永远垫底
+    if (!ua && !ub && sa !== sb) return sb - sa
+    return (Number(b.at) || 0) - (Number(a.at) || 0)
+  })
+})
+
+/** 一条待录入的质量标签。score < 0 = 未评分（老行 / 采集时没拿到几何量），
+ *  不能显示成「差」—— 那是把「不知道」说成「很差」，用户会白扔一批好样本。 */
+function pfQuality(pf) {
+  const s = Number(pf && pf.score)
+  if (!Number.isFinite(s) || s < 0) return { key: 'unknown', text: '未评分', tone: 'muted' }
+  return sampleQualityLabel(s)
+}
+
+/** 评分明细（鼠标悬停看）：三个分项各自的物理量，不是只有一个黑箱分数 */
+function pfScoreTip(pf) {
+  const s = Number(pf && pf.score)
+  if (!Number.isFinite(s) || s < 0) return '这条是早期抓的，没记下画质指标 —— 按时间排序可找到它'
+  const parts = []
+  if (pf.boxW && pf.boxH) parts.push(`人脸 ${pf.boxW}×${pf.boxH}px`)
+  parts.push(`清晰度 ${Math.round(Number(pf.sharp) || 0)}`)
+  const yaw = Math.abs(Number(pf.yaw) || 0)
+  parts.push(`偏航 ${yaw.toFixed(2)}${yaw > 0.35 ? '（侧脸）' : ''}`)
+  if (pf.frameW && pf.frameH) parts.push(`原帧 ${pf.frameW}×${pf.frameH}`)
+  const q = pfQuality(pf)
+  return `样本质量 ${q.text}（${s.toFixed(2)}）· ${parts.join(' · ')}`
+}
+
+/** 是否达到「建议先录」线（低于它的大概率是侧脸/糊脸/太小） */
+function pfRecommended(pf) {
+  const s = Number(pf && pf.score)
+  return Number.isFinite(s) && s >= 0 && s >= SAMPLE_SCORE_RECOMMEND
+}
 
 /** 刷新待录入：加载态 + 结果提示（以前点下去毫无反馈，用户不知道有没有生效） */
 const pendingRefreshing = ref(false)
@@ -6845,6 +6970,71 @@ async function doDeleteSample(it) {
   }
 }
 
+/* ---------- 主样本（★）：每个名字下的代表样本，用户自己指定 ----------
+ * 用途：① 人脸库卡片封面；② 待录入打分时「最像谁」的对比基准；
+ *      ③ 清理废样本时「保留哪一张」的默认选项。
+ * 刻意不参与匹配数学（匹配对该名字下所有样本取最高相似度）——
+ * 让它加权会动摇 0.38 阈值 / 分差门槛那套已验证的体系。
+ * 唯一性（一个名字最多一条）由 useFaceLib.setPrimaryFace 的事务兜底，
+ * 这里只做「点哪张」的交互，不再自己判一遍（判两遍必漂）。 */
+
+/** 正在设主样本的记录 id（按钮置灰 + 「设置中」反馈，防连点） */
+const settingPrimary = reactive({})
+
+/** 卡片级快捷操作：把这张卡的封面样本（最早录入那条）设为主样本 */
+async function doSetPrimaryCard(g) {
+  if (!g || settingPrimary[g.id]) return
+  settingPrimary[g.id] = true
+  try {
+    const r = await setPrimaryFace(g.id)
+    if (!r.ok) alertDialog({ title: '设置失败', message: r.reason || '设置主样本失败', variant: 'danger' })
+  } catch (e) {
+    alertDialog({
+      title: faceWriteErrKind(e) === 'timeout' ? '设置超时' : '设置失败',
+      message: faceWriteFailMessage(e, '没有改成，可以稍后重试。'),
+      variant: 'danger'
+    })
+  } finally {
+    delete settingPrimary[g.id]
+  }
+}
+
+/** 组面板里把某条样本设为主样本 */
+async function doSetPrimarySample(it) {
+  if (!it || settingPrimary[it.id]) return
+  settingPrimary[it.id] = true
+  try {
+    const r = await setPrimaryFace(it.id)
+    if (!r.ok) alertDialog({ title: '设置失败', message: r.reason || '设置主样本失败', variant: 'danger' })
+  } catch (e) {
+    alertDialog({
+      title: faceWriteErrKind(e) === 'timeout' ? '设置超时' : '设置失败',
+      message: faceWriteFailMessage(e, '没有改成，可以稍后重试。'),
+      variant: 'danger'
+    })
+  } finally {
+    delete settingPrimary[it.id]
+  }
+}
+
+/** 组面板里取消某条样本的主样本标记（回到「没有主样本」的默认态） */
+async function doClearPrimarySample(it) {
+  if (!it || settingPrimary[it.id]) return
+  settingPrimary[it.id] = true
+  try {
+    const r = await clearPrimaryFace(it.id)
+    if (!r.ok) alertDialog({ title: '取消失败', message: r.reason || '取消主样本失败', variant: 'danger' })
+  } catch (e) {
+    alertDialog({
+      title: faceWriteErrKind(e) === 'timeout' ? '取消超时' : '取消失败',
+      message: faceWriteFailMessage(e, '没有取消成，可以稍后重试。'),
+      variant: 'danger'
+    })
+  } finally {
+    delete settingPrimary[it.id]
+  }
+}
+
 /**
  * 把这一组的多角度样本**合并成一条**。
  *
@@ -7073,7 +7263,7 @@ const pagedFaceGroups = computed(() => {
 })
 const pagedPending = computed(() => {
   const p = Math.min(Math.max(1, pendingPage.value), pendingPageCount.value)
-  return allPendingFaces.value.slice((p - 1) * pendingPageSize.value, p * pendingPageSize.value)
+  return sortedPendingFaces.value.slice((p - 1) * pendingPageSize.value, p * pendingPageSize.value)
 })
 
 /** 数据变短（删除 / 录入后）当前页可能越界，拉回最后一页，避免停在空白页 */
@@ -9184,6 +9374,8 @@ function loadHidden() {
 }
 
 .face-card.pending {
+  /* 质量徽标 .pf-score 是绝对定位，卡片得是定位上下文 */
+  position: relative;
   border-color: color-mix(in srgb, var(--warn-text) 40%, transparent);
 }
 
@@ -9446,7 +9638,7 @@ function loadHidden() {
 
 .face-warn {
   position: absolute;
-  left: 3px;
+  right: 3px;
   top: 3px;
   width: 15px;
   height: 15px;
@@ -9457,6 +9649,63 @@ function loadHidden() {
   font-weight: 700;
   line-height: 15px;
   text-align: center;
+}
+
+/*
+ * 主样本角标（★）：用户指定的「代表样本」。
+ * 放左上，与「名字不一致」的 ! （右上）、样本数（右下）错开，不会叠在一起。
+ * 颜色用 warn 系而不是 accent —— 它是「这一张被特别指定过」的标记，
+ * 不该和「选中/展开」那种交互态混成一个色。
+ */
+.face-primary-star {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--warn-text) 90%, #000);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 35%);
+}
+
+/* 「设为主样本」按钮：和普通操作区分开 */
+.primary-btn {
+  font-weight: 600;
+}
+
+/*
+ * 待录入卡片的「样本质量」徽标（优 / 良 / 一般 / 差 / 未评分）。
+ * 缩略图占满卡片宽，徽标浮在左上角。
+ * 色调沿用项目语义：ok=绿 / warn=黄 / bad=红 / muted=灰（未评分）。
+ */
+.pf-score {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  color: #fff;
+  background: color-mix(in srgb, var(--muted-text, #888) 88%, #000);
+}
+.pf-score.ok {
+  background: color-mix(in srgb, var(--ok-text, #2f9e44) 90%, #000);
+}
+.pf-score.warn {
+  background: color-mix(in srgb, var(--warn-text) 88%, #000);
+}
+.pf-score.bad {
+  background: color-mix(in srgb, var(--danger-text, #c92a2a) 88%, #000);
+}
+/* 达到「建议先录」线的加一圈细边，一眼扫过去先录这些 */
+.pf-score.rec {
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ok-text, #2f9e44) 55%, transparent);
 }
 
 /* 归到一组的卡片：描边稍重，提示"这不止一条记录" */
@@ -9580,6 +9829,11 @@ function loadHidden() {
 .fgp-sim {
   font-size: 10px;
   color: var(--text-dim-2);
+}
+/* 主样本那一行的标签：★ 主样本，加粗 + warn 色，和「代表 / 相似度」区分开 */
+.fgp-sim.primary {
+  font-weight: 700;
+  color: var(--warn-text);
 }
 .fgp-name {
   max-width: 100%;

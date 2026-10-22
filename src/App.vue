@@ -1096,7 +1096,12 @@ async function backendPayload() {
       name: f.name,
       vector: f.vector,
       thumb: f.thumb || '',
-      createdAt: f.createdAt || 0
+      createdAt: f.createdAt || 0,
+      /*
+       * 主样本标记（每个名字最多一条）。漏了它的话，前端设的主样本会在
+       * 下一次配置推送时被静默抹掉 —— 表现为「刚设完主样本，刷新又没了」。
+       */
+      primary: f.primary ? 1 : 0
     })),
     /*
      * 人脸库「手动拆分」声明 + 「按相似度归类」偏好也要推上去：

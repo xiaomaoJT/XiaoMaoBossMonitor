@@ -364,7 +364,8 @@ export async function refreshFaces() {
     thumb: f.thumb || '',
     createdAt: f.createdAt || 0,
     updatedAt: f.updatedAt || 0,
-    samples: f.samples || 1
+    samples: f.samples || 1,
+    primary: f.primary ? 1 : 0
   }))
   faceRowsVersion.value += 1
   facesReady.value = true
@@ -929,7 +930,10 @@ export function addFace(vector, thumb, name, max = DEFAULT_FACE_MAX) {
         thumb: thumb || '',
         createdAt: now,
         updatedAt: now,
-        samples: 1
+        samples: 1,
+        // 主样本标记（每个名字最多一条）。新录入默认不是主样本 ——
+        // 让它抢主样本位会覆盖用户已经挑好的那张。
+        primary: 0
       }
       /*
        * 以**事务提交**（oncomplete）为准，而不是请求成功（req.onsuccess）：
@@ -944,6 +948,87 @@ export function addFace(vector, thumb, name, max = DEFAULT_FACE_MAX) {
         tx.onabort = () => reject(txFail(tx, '录入事务被中止'))
       })
       return { ok: true, id, name: finalName }
+    }),
+    refreshFaces
+  )
+}
+
+/**
+ * 把某一条设为主样本（同名的其它条自动取消）。
+ * ----------------------------------------------------------------------------
+ * 「主样本」是什么：这个人的**代表样本**。用途有三 ——
+ *   ① 人脸库卡片的封面；
+ *   ② 待录入打分时「最像谁」的对比基准（拿最稳的那张去比，而不是被废样本摊薄）；
+ *   ③ 清理废样本时「保留哪一张」的默认选项。
+ *
+ * ⚠️ 刻意**不**让它参与匹配数学：匹配始终对该名字下所有样本取最高相似度。
+ *    一旦让主样本加权，就等于动摇了 0.38 阈值 / 分差门槛那套已经调过的体系，
+ *    而它带来的收益（多几个同人样本的分数变化）远小于风险。
+ *
+ * 唯一性（一个名字最多一条）在这里由事务保证：先同名全体清零，再点亮目标。
+ * 放在应用层判断再写的话，两次快速点击就能钻空子留下两条主样本，
+ *    于是"封面取哪张"取决于遍历顺序 —— 那是漂移的来源。
+ *
+ * @param {number} id
+ * @returns {Promise<{ok:boolean, id?:number, name?:string, reason?:string}>}
+ */
+export async function setPrimaryFace(id) {
+  const target = Number(id)
+  if (!Number.isFinite(target)) return { ok: false, reason: '记录不存在' }
+  return withRefresh(
+    runExclusive(async () => {
+      const list = await getAllFaces()
+      const rec = list.find((r) => r.id === target)
+      if (!rec) return { ok: false, reason: '记录不存在' }
+      // 已经是主样本：幂等返回，不写库（避免无谓的 updatedAt 变动）
+      if (rec.primary) return { ok: true, id: target, name: rec.name }
+      const now = Date.now()
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+        const os = tx.objectStore(FACE_STORE_NAME)
+        for (const r of list) {
+          if (r.id !== target && r.name === rec.name && r.primary) {
+            os.put({ ...r, primary: 0, updatedAt: now })
+          }
+        }
+        os.put({ ...rec, primary: 1, updatedAt: now })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(txFail(tx, '设主样本事务出错'))
+        tx.onabort = () => reject(txFail(tx, '设主样本事务被中止'))
+      })
+      return { ok: true, id: target, name: rec.name }
+    }),
+    refreshFaces
+  )
+}
+
+/**
+ * 取消某一条的主样本标记（同名的其它条不动 —— 本来也只有一条能是）。
+ * 用途：用户选了一圈想回到「没有主样本」的默认态（封面回退到最早录入那张）。
+ * @param {number} id
+ * @returns {Promise<{ok:boolean, id?:number, reason?:string}>}
+ */
+export async function clearPrimaryFace(id) {
+  const target = Number(id)
+  if (!Number.isFinite(target)) return { ok: false, reason: '记录不存在' }
+  return withRefresh(
+    runExclusive(async () => {
+      const list = await getAllFaces()
+      const rec = list.find((r) => r.id === target)
+      if (!rec) return { ok: false, reason: '记录不存在' }
+      if (!rec.primary) return { ok: true, id: target, name: rec.name }
+      const now = Date.now()
+      const db = await openFaceDB()
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
+        const os = tx.objectStore(FACE_STORE_NAME)
+        os.put({ ...rec, primary: 0, updatedAt: now })
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => reject(txFail(tx, '取消主样本事务出错'))
+        tx.onabort = () => reject(txFail(tx, '取消主样本事务被中止'))
+      })
+      return { ok: true, id: target, name: rec.name }
     }),
     refreshFaces
   )
@@ -970,6 +1055,32 @@ export function renameFaces(ids, name) {
       if (!list.length) return { ok: false, reason: '没有要改名的记录' }
       if (!finalName) return { ok: false, reason: '名字不能为空' }
       const db = await openFaceDB()
+      /*
+       * 主样本唯一性（一个名字最多一条 ★）。
+       *
+       * 改名是**唯一**能在应用层制造"同名两条主样本"的入口：把 A 的样本改名成
+       * B，而 B 名下已经有一条 ★。不拦的话两张卡都挂 ★，「封面取哪张」取决于
+       * 遍历顺序 —— 那是漂移的来源。
+       *
+       * 规矩：目标名字已有的主样本（不在本次改名集合里）**优先保留** ——
+       * 用户并没有动那张卡，没道理让它失去代表样本；本次带过来的 ★ 让位。
+       * 集合内部多条 ★ 时只留 id 最小的那条（= 最早录入的，与"封面默认取最早"
+       * 的既有口径一致）。
+       */
+      const all = await getAllFaces()
+      const idSet = new Set(list.map(Number))
+      const existingPrimary = all.find((r) => r.primary && r.name === finalName && !idSet.has(r.id))
+      let keepRenamed = null
+      if (!existingPrimary) {
+        keepRenamed = all
+          .filter((r) => r.primary && idSet.has(r.id))
+          .sort((a, b) => a.id - b.id)[0]
+      }
+      const primaryFix = new Map()
+      for (const r of all) {
+        if (!r.primary || !idSet.has(r.id)) continue
+        if (existingPrimary || (keepRenamed && keepRenamed.id !== r.id)) primaryFix.set(r.id, 0)
+      }
       await new Promise((resolve, reject) => {
         // 同一事务里改完：要么全改要么全不改（否则会出现"同一个人一半新名字一半旧名字"）
         const tx = db.transaction(FACE_STORE_NAME, 'readwrite')
@@ -984,6 +1095,7 @@ export function renameFaces(ids, name) {
             hit += 1
             cur.name = finalName
             cur.updatedAt = now
+            if (primaryFix.has(Number(id))) cur.primary = primaryFix.get(Number(id))
             os.put(cur)
           }
         })
@@ -1124,6 +1236,12 @@ export function mergeFaces(ids, keepId) {
       keep.vector = avg.vector
       keep.samples = avg.weight
       keep.updatedAt = now
+      /*
+       * 主样本跟着合并走：只要参与合并的里有主样本，保留那条就接过这个标记
+       * （哪怕用户当时选的主样本不是 keep）。否则合并完主样本凭空消失，
+       * 封面与「挑样本基准」静默回退到默认排序 —— 用户看不出发生了什么。
+       */
+      if (recs.some((r) => r.primary) && !keep.primary) keep.primary = 1
       // 创建时间取最早那条：卡片排序沿用"这个人第一次出现的时间"，合并后不会乱跳
       keep.createdAt = Math.min(...recs.map((r) => Number(r.createdAt) || now))
       // 缩略图沿用保留那条（不另造）：它是这人最早录入的那张，风格与其它卡片一致
@@ -1208,7 +1326,18 @@ export function replaceFaces(list, { force = false } = {}) {
       const os = tx.objectStore(FACE_STORE_NAME)
       os.clear()
       const now = Date.now()
+      /*
+       * 同名人下只认第一条主样本：后端 setPrimaryFace 已经保证唯一，但拉回来的
+       * 那份可能来自更老的版本 / 别的写入路径，防御一下。否则两张卡都挂 ★，
+       * 「封面取哪张」就取决于遍历顺序 —— 那是漂移的来源。
+       */
+      const seenPrimary = new Set()
       items.forEach((f) => {
+        let primary = f.primary ? 1 : 0
+        if (primary) {
+          if (seenPrimary.has(f.name)) primary = 0
+          else seenPrimary.add(f.name)
+        }
         os.add({
           name: String(f.name),
           // 统一转普通数组：TypedArray 在部分老 WebView 的 IndexedDB 里克隆不可靠
@@ -1216,7 +1345,8 @@ export function replaceFaces(list, { force = false } = {}) {
           thumb: f.thumb || '',
           createdAt: Number(f.createdAt) || now,
           updatedAt: Number(f.updatedAt) || now,
-          samples: Number(f.samples) || 1
+          samples: Number(f.samples) || 1,
+          primary
         })
       })
       tx.oncomplete = () => resolve()
@@ -1519,7 +1649,9 @@ export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarit
   const groups = []
   for (const idxs of buckets.values()) {
     const recs = idxs.map((i) => list[i])
-    // 代表样本 = 最早录入的那条（getAllFaces 本来就按 createdAt 升序）
+    // 代表样本 = 最早录入的那条（getAllFaces 本来就按 createdAt 升序）。
+    // key / id / createdAt 都**锚在它身上**：改主样本不该让分组 key 变
+    // （否则设置页展开的面板会被 watch 收起，用户刚设完 ★ 面板就关了）。
     const rep = recs[0]
     const names = [...new Set(recs.map(nameOf))]
     const sameName = names.length === 1
@@ -1533,22 +1665,33 @@ export function groupFaces(rows, { threshold = FACE_GROUP_THRESHOLD, bySimilarit
         }
       }
     }
+    /*
+     * 主样本（★）：这个人的「代表样本」，由用户指定。
+     * 用途：① 卡片封面；② 待录入打分时「最像谁」的对比基准；
+     *      ③ 清理废样本时「保留哪一张」的默认选项。
+     * 刻意**不**参与匹配数学（匹配对该名字下所有样本取最高相似度）——
+     * 让它加权会动摇 0.38 阈值 / 分差门槛那套已验证的体系。
+     * 没有主样本时封面回退到最早录入的那张（rep），行为与加这个字段前一致。
+     */
+    const primaryRec = recs.find((r) => r.primary) || null
     groups.push({
       key: `g${rep.id}`,
       id: rep.id,
       name: rep.name,
-      thumb: rep.thumb || '',
+      thumb: (primaryRec && primaryRec.thumb) || rep.thumb || '',
       createdAt: rep.createdAt || 0,
       count: recs.length,
       sameName,
       names,
       score,
+      primaryId: primaryRec ? primaryRec.id : 0,
       items: recs.map((it) => ({
         id: it.id,
         name: it.name,
         thumb: it.thumb || '',
         createdAt: it.createdAt || 0,
         samples: it.samples || 1,
+        primary: it.primary ? 1 : 0,
         sim: it === rep ? 1 : cosineOrRaw(it.vector, rep.vector)
       }))
     })
@@ -1684,7 +1827,7 @@ export const PENDING_MAX = 24
  *                          <=0 = 关闭去重。缺省回落 vecMatch.PENDING_DEDUPE.sec.def
  * @returns {{added:boolean, id?:number}}
  */
-export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, dedupeSec }) {
+export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, dedupeSec, metrics }) {
   if (!vector || !vector.length || !thumb) return { added: false }
   const list = pendingFaces.value
   const now = at || Date.now()
@@ -1700,6 +1843,7 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, 
     return { added: false, id: hit.id }
   }
   const id = (list[0] ? list[0].id : 0) + 1
+  const m = metrics || {}
   list.unshift({
     id,
     vector: Float32Array.from(vector),
@@ -1708,7 +1852,18 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, 
     at: now,
     camId: camId || '',
     camName: camName || '',
-    hits: 1
+    hits: 1,
+    /*
+     * 样本质量（采集时算的，判定在 faceSampleScore.js，与后端共用）。
+     * score = -1 = 没算过分；界面据此显示「未评分」而不是"0 分"。
+     */
+    score: m.score == null ? -1 : Number(m.score),
+    boxW: Number(m.boxW) || 0,
+    boxH: Number(m.boxH) || 0,
+    yaw: Number(m.yaw) || 0,
+    sharp: Number(m.sharp) || 0,
+    frameW: Number(m.frameW) || 0,
+    frameH: Number(m.frameH) || 0
   })
   const cap = Math.max(1, Math.round(Number(max) || PENDING_MAX))
   if (list.length > cap) list.splice(cap)
@@ -1762,7 +1917,19 @@ function normBackendPending(base, list) {
       camId: f.camId || '',
       camName: f.camName || '',
       hits: 1,
-      fromBackend: true
+      fromBackend: true,
+      /*
+       * 样本质量（采集时在后端算的）。score = -1 = 没算过分 ——
+       * 老行 / 采集那一刻没拿到几何量。界面据此显示「未评分」而不是 0 分，
+       * 因为「0 分」会被读成"这张极差"，而真相是"不知道"。
+       */
+      score: f.score == null ? -1 : Number(f.score),
+      boxW: Number(f.boxW) || 0,
+      boxH: Number(f.boxH) || 0,
+      yaw: Number(f.yaw) || 0,
+      sharp: Number(f.sharp) || 0,
+      frameW: Number(f.frameW) || 0,
+      frameH: Number(f.frameH) || 0
     }))
 }
 

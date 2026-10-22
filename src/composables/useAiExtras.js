@@ -37,7 +37,8 @@ import {
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf } from '../config/defaults.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, yawFromKps } from '../config/defaults.js'
+import { faceSampleScore, toGray } from './faceSampleScore.js'
 
 /** COCO 17 关键点下标 */
 const KP = {
@@ -81,6 +82,35 @@ function safeThumb(canvas, box) {
     return faceThumb(canvas, box, FACE_SHOT_SIZE) || ''
   } catch (e) {
     return ''
+  }
+}
+
+/**
+ * 采集时顺手算「样本质量」（人脸尺寸 / 清晰度 / 正脸程度）。
+ * 与后端 analyzer 同名函数同一套口径（判定都在 faceSampleScore.js）。
+ * ⚠️ 必须此刻算：等 pushPendingFace 只留 thumb（96px）之后，
+ * 原帧尺寸 / 清晰度都已经不可恢复。
+ */
+function sampleMetrics(canvas, face, aligned) {
+  try {
+    let gray = null
+    if (aligned) {
+      const id = aligned.getContext('2d').getImageData(0, 0, aligned.width, aligned.height)
+      gray = toGray(id.data, id.width, id.height)
+    }
+    return faceSampleScore({
+      box: face,
+      kps: face.kps,
+      frameW: canvas.width,
+      frameH: canvas.height,
+      gray,
+      cropW: aligned ? aligned.width : 0,
+      cropH: aligned ? aligned.height : 0,
+      det: face.score,
+      yaw: yawFromKps(face.kps)
+    })
+  } catch (e) {
+    return null
   }
 }
 
@@ -519,7 +549,8 @@ export function useAiExtras(options) {
             camId: cam.id,
             camName: cam.name,
             max: fc.fullAt,
-            dedupeSec: fc.dedupeWin
+            dedupeSec: fc.dedupeWin,
+            metrics: sampleMetrics(frame.canvas, face, aligned)
           })
         }
         if (!fc.eventOnUnknown) continue
@@ -662,7 +693,8 @@ export function useAiExtras(options) {
                     camId: cam.id,
                     camName: cam.name,
                     max: fc.fullAt,
-                    dedupeSec: fc.dedupeWin
+                    dedupeSec: fc.dedupeWin,
+                    metrics: sampleMetrics(canvas, face, aligned)
                   })
                 }
               }
