@@ -13,7 +13,8 @@
  *   · **多跳（A→B→C…）**：path 是有序节点数组，逐跳推进状态机；任一跳超时或错序即断链。
  *
  * ⚠️ 本模块**不碰任何图像 / 推送 / 渲染**——只做「多路本地进出事件按身份 + 时间窗串起来」。
- *    截图由调用方在 record 时传入 `shot`（字符串），引擎只存不取。
+ *    截图由调用方在 record 时传入 `shot`（人形小图）与 `fullShot`（整帧原图），
+ *    引擎只存不取：shot 供推送 / 列表缩略，fullShot 供详情页「流向轨迹节点看原图」。
  */
 import { flowValid, clampFlowWindowSec, isFlowFullZone } from '../config/defaults.js'
 
@@ -30,8 +31,10 @@ export function createFlowEngine() {
    *   head      当前已抵达的节点下标（settled）；-1 表示尚未开始
    *   open      在途：已离场上一个节点、正等待抵达下一个；{ from, at, shot } 或 null
    *   startedAt 这一程的起点出场时刻（用于算总间隔）
-   *   nodeShots 各节点的截图（字符串，调用方传入）：nodeShots[0] = 起点出场帧，
+   *   nodeShots 各节点的人形小图（字符串，调用方传入）：nodeShots[0] = 起点出场帧，
    *             nodeShots[k] (k>=1) = 抵达节点 k 的入场帧；走完全程时按 0..last 排出 flowShots
+   *   nodeFulls 各节点的整帧原图（与 nodeShots 同键同序）：详情页轨迹节点优先展示它，
+   *             老链路 / 采集失败时缺项，展示层回退到 nodeShots
    *   lastAt    最近一次活动时刻（LRU 淘汰用）
    *   expireAt  该链路整体过期时刻（TTL + 断链宽限）
    */
@@ -126,7 +129,8 @@ export function createFlowEngine() {
 
   /**
    * 记录一次「出场」事件（离场上一个节点）。
-   * @param {object} p { cam, zone, gid?, reidKey?, name?, faceName?, at?, shot?, box? }
+   * @param {object} p { cam, zone, gid?, reidKey?, name?, faceName?, at?, shot?, fullShot?, box? }
+   *   shot    人形小图（归一化框裁切）；fullShot 整帧原图（frameShotWithFace 的 dataURL）
    * @returns {{ok:boolean, reason?:string}}
    */
   function recordDeparture(p) {
@@ -146,7 +150,7 @@ export function createFlowEngine() {
       const pk = progKey(flow.id, key)
       let st = progress.get(pk)
       if (!st) {
-        st = { flowId: flow.id, key, head: -1, open: null, startedAt: null, lastAt: now, expireAt: 0, nodeShots: {} }
+        st = { flowId: flow.id, key, head: -1, open: null, startedAt: null, lastAt: now, expireAt: 0, nodeShots: {}, nodeFulls: {} }
         progress.set(pk, st)
       }
       if (segIdx === 0) {
@@ -155,13 +159,17 @@ export function createFlowEngine() {
         st.head = 0
         st.startedAt = now
         st.nodeShots = {}
+        st.nodeFulls = {}
       } else {
         // 途经 / 终点前的出场：必须恰好站在该节点上（上一跳已完成）才能继续
         if (st.head !== segIdx) continue
       }
       st.open = { from: segIdx, at: now, shot: p.shot || null }
       // 节点 0 的图 = 起点出场帧（其余节点的图在 recordArrival 完成对应入场时记）
-      if (segIdx === 0 && p.shot) st.nodeShots[0] = p.shot
+      if (segIdx === 0) {
+        if (p.shot) st.nodeShots[0] = p.shot
+        if (p.fullShot) st.nodeFulls[0] = p.fullShot
+      }
       st.lastAt = now
       st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000
       n++
@@ -178,10 +186,12 @@ export function createFlowEngine() {
    *   matches[].startedAt    这一程起点出场时刻
    *   matches[].arrivedAt    终点入场时刻
    *   matches[].spanSec      整程间隔（秒）
-   *   matches[].shot         终点入场截图
+   *   matches[].shot         终点入场截图（人形小图）
    *   matches[].departureShot 起点出场截图（节点 0 的那张，即 A 摄像头的图）
-   *   matches[].flowShots    各节点截图（有序）：节点 0 = 出场帧、节点 k≥1 = 入场帧；
+   *   matches[].flowShots    各节点人形小图（有序）：节点 0 = 出场帧、节点 k≥1 = 入场帧；
    *                          A→B 为 [A出场, B入场] 共两张，A→B→C 为三张
+   *   matches[].flowFulls    各节点整帧原图（与 flowShots 同序同长，缺项为 ''）：
+   *                          详情页「流向轨迹」节点优先展示它（原图），没有才回退小图
    */
   function recordArrival(p) {
     if (!p || !p.cam || !p.zone) return { ok: false, reason: 'bad-args' }
@@ -215,14 +225,22 @@ export function createFlowEngine() {
       st.lastAt = now
       // 抵达节点 (segIdx+1) 的图 = 该节点入场帧（多跳时每个节点各留一张）
       if (p.shot) st.nodeShots[segIdx + 1] = p.shot || null
+      if (p.fullShot) st.nodeFulls[segIdx + 1] = p.fullShot || null
       const lastIdx = (Array.isArray(flow.path) ? flow.path.length : 0) - 1
       if (st.head >= lastIdx) {
         // 走完全程：把各节点截图按 0..last 顺序排出（节点 0 = 出场帧，其余 = 入场帧）
         const spanSec = st.startedAt != null ? Math.round((now - st.startedAt) / 1000) : 0
         const departureShot = st.nodeShots[0] || null
         const flowShots = []
+        const flowFulls = []
         for (let i = 0; i <= lastIdx; i++) {
-          if (st.nodeShots[i]) flowShots.push(st.nodeShots[i])
+          // 两侧要么都有、要么都没有（采集时一起抓）；任缺其一就补 '' 占位，
+          // 保证 flowShots 与 flowFulls **同长同序**——展示层按下标配对，错位即配错图
+          const s = st.nodeShots[i] || ''
+          const f = st.nodeFulls[i] || ''
+          if (!s && !f) continue
+          flowShots.push(s)
+          flowFulls.push(f)
         }
         matches.push({
           flow,
@@ -231,7 +249,8 @@ export function createFlowEngine() {
           spanSec,
           shot: p.shot || null,
           departureShot,
-          flowShots
+          flowShots,
+          flowFulls
         })
         stats.matched++
         progress.delete(pk)

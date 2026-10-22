@@ -100,6 +100,12 @@ export function backendEventToPayload(ev) {
     /** 人员走向：起点出场截图与各节点（有序）截图，详情页渲染「流向轨迹」多图块用 */
     departureShot: ev.departureShot || '',
     flowShots: Array.isArray(ev.flowShots) ? ev.flowShots : [],
+    /**
+     * 各节点整帧原图（与 flowShots 同长同序，'' = 该节点没存上原图）。
+     * 详情页轨迹节点优先展示它、点击放大看它；长度与 flowShots 不一致时（脏数据）
+     * 展示层整体忽略它回退小图，避免按错下标把节点图配到隔壁节点上。
+     */
+    flowFulls: Array.isArray(ev.flowFulls) ? ev.flowFulls : [],
     flowPath: Array.isArray(ev.flowPath) ? ev.flowPath : [],
     /** 后端推送状态（前端只展示，不再重复推） */
     backendPush: ev.push || '',

@@ -1285,6 +1285,11 @@ function emitExtraAlarm(evt, canvas) {
      * 事件详情页按此数组渲染「流向轨迹」多图块，缺它就看不了节点图。
      */
     flowShots: Array.isArray(evt.flowShots) ? evt.flowShots : [],
+    /**
+     * 各节点整帧原图（与 flowShots 同长同序）：详情页轨迹节点优先展示它、
+     * 点击放大看它；缺项 / 长度不一致时展示层回退 flowShots（见 EventPanel.flowNodes）。
+     */
+    flowFulls: Array.isArray(evt.flowFulls) ? evt.flowFulls : [],
     asCritical: !!evt.asCritical
   })
 

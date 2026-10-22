@@ -166,10 +166,15 @@ function emitFlowEvent(engine, m, ctx, emit) {
     departureAt: m.startedAt || 0,
     departureShot: m.departureShot || '',
     /**
-     * 各节点截图（有序）：节点 0 = 起点出场帧、节点 k≥1 = 入场帧。
+     * 各节点人形小图（有序）：节点 0 = 起点出场帧、节点 k≥1 = 入场帧。
      * A→B 为 [A 出场, B 入场] 共两张；A→B→C 为三张。空数组时详情页不显示轨迹块。
      */
     flowShots: Array.isArray(m.flowShots) ? m.flowShots : [],
+    /**
+     * 各节点整帧原图（与 flowShots 同长同序，缺项为 ''）：详情页轨迹节点优先展示它，
+     * 点击放大看的就是这一张；老事件 / 采集失败时回退到 flowShots。
+     */
+    flowFulls: Array.isArray(m.flowFulls) ? m.flowFulls : [],
     shot: ctx.shot || '',
     box: null,
     at: ctx.at,
@@ -400,13 +405,20 @@ export function useAiExtras(options) {
         const tr = res.tracks.find((t) => t.id === evt.trackId)
         const gid = tr && tr.face && tr.face.id ? tr.face.name : null // 已知人=归组名；陌生人(face.id=0)=null
         const shot = safeThumb(frame.canvas, evt.box)
+        /*
+         * 整帧原图（与 shot 同帧一起抓）：详情页「流向轨迹」的每个节点都要能看原图
+         * —— 只存人形小图的话，用户想看清「是谁在什么画面里走过的」还得回去翻主图。
+         * 采集时机同样是唯一的：此刻 canvas 就是事发那一帧；走完全程再补拍早换了画面。
+         * frameShotWithFace 会在框上画一圈边框，节点图因此自带「人在哪里」的标注。
+         */
+        const fullShot = frameShotWithFace(frame.canvas, evt.box)
         const at = evt.at || now
         if (evt.type === 'exit') {
           // 出场：记一条 departure（窗口内等待对应入场配对）
-          engine.recordDeparture({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, box: evt.box })
+          engine.recordDeparture({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, fullShot, box: evt.box })
         } else {
           // 入场：尝试推进 / 完成链路，成功走完一路则上抛 flow 事件
-          const r = engine.recordArrival({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, box: evt.box })
+          const r = engine.recordArrival({ cam: cam.id, zone: evt.zoneId, gid, name: gid, at, shot, fullShot, box: evt.box })
           if (r.ok) {
             for (const m of r.matches) {
               if (m.flow.push === false) continue // 用户关了这条 flow 的推送 → 只记录不发送

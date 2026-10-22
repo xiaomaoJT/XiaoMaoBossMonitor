@@ -391,12 +391,12 @@
               </span>
             </div>
 
-            <div class="dt-flow" v-if="detail.flowShots && detail.flowShots.length">
-              <div class="dt-flow-title">流向轨迹（{{ detail.flowShots.length }} 个节点）</div>
+            <div class="dt-flow" v-if="flowNodes(detail).length">
+              <div class="dt-flow-title">流向轨迹（{{ flowNodes(detail).length }} 个节点）</div>
               <div class="dt-flow-row">
-                <figure class="dt-flow-node" v-for="(fs, i) in detail.flowShots" :key="i">
-                  <img v-if="fs" :src="fs" :alt="flowNodeLabel(detail, i)" @click="openFlowPreview(fs, detail)" />
-                  <figcaption v-if="fs">{{ flowNodeLabel(detail, i) }}</figcaption>
+                <figure class="dt-flow-node" v-for="(n, i) in flowNodes(detail)" :key="i">
+                  <img v-if="n.src" :src="n.src" :alt="n.label" @click="openFlowPreview(n.src, detail)" />
+                  <figcaption v-if="n.src">{{ n.label }}</figcaption>
                 </figure>
               </div>
             </div>
@@ -720,8 +720,9 @@ async function openPreview(ev) {
 }
 
 /**
- * 流向轨迹单节点图点击放大：flowShots[i] 已是可直接显示的 URL / dataURL，
- * 无需走 IndexedDB 取高清原图，直接塞一个合成对象给截图看板即可。
+ * 流向轨迹单节点图点击放大：节点图（flowFulls 的整帧原图，或回退的人形小图）
+ * 已是可直接显示的 URL / dataURL，无需走 IndexedDB 取高清原图，直接塞一个合成对象
+ * 给截图看板即可（看板支持滚轮缩放 / 拖拽，原图就在里面）。
  */
 function openFlowPreview(fs, ev) {
   if (!fs) return
@@ -732,6 +733,27 @@ function openFlowPreview(fs, ev) {
     type: 'flow',
   }
   resetView()
+}
+
+/**
+ * 流向轨迹节点清单：`[{ src, label }]`，按节点顺序。
+ *
+ * 每个节点优先用 **整帧原图**（flowFulls，用户要看「是谁在什么画面里走过的」），
+ * 没有原图才回退人形小图（flowShots）。两侧靠**下标配对**，因此只有长度相等时
+ * 才敢配（某一侧被 filter / 截断过就会整体错位）—— 长度不一致按脏数据处理，
+ * 整体回退小图，绝不让节点 i 的图配到节点 j 的说明上。
+ */
+function flowNodes(ev) {
+  const shots = Array.isArray(ev && ev.flowShots) ? ev.flowShots : []
+  const fulls = Array.isArray(ev && ev.flowFulls) ? ev.flowFulls : []
+  const pair = fulls.length === shots.length ? fulls : null
+  const out = []
+  for (let i = 0; i < shots.length; i++) {
+    const src = (pair && pair[i]) || shots[i] || ''
+    if (!src) continue
+    out.push({ src, label: flowNodeLabel(ev, i) })
+  }
+  return out
 }
 
 /** 流向轨迹节点说明：节点 0 = 起点出场，其余 = 抵达该节点的入场，配文取 flowPath 的「通道·区域」 */
