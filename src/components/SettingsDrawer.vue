@@ -1702,6 +1702,22 @@
               </div>
             </template>
 
+            <!-- 每帧识别人数上限（默认 2）：多人识别 + 性能保护，判定收口在 defaults.faceMaxFaces。
+                 画面多个人时按框面积取最显眼的前 N 张做识别，其余只画框不识别。 -->
+            <div class="opt">
+              <span>
+                <strong>每帧识别人数上限</strong>
+                <em>
+                  画面里多个人时，每帧最多对多少张脸做识别（按框面积取最显眼的）。
+                  默认 2，兼顾性能与"能分辨多个人"；调大可一次认更多人，代价是每帧算力更高
+                </em>
+              </span>
+              <div class="range-row">
+                <input type="range" min="1" max="12" step="1" v-model.number="opts.face.maxFaces" />
+                <b>{{ Number(opts.face.maxFaces) >= 1 ? Number(opts.face.maxFaces) : 2 }} 人</b>
+              </div>
+            </div>
+
             <div class="opt">
               <span>
                 <strong>人脸库容量</strong>

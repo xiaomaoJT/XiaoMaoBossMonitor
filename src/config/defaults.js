@@ -318,6 +318,27 @@ export const FACE_QUALITY = {
 }
 
 /**
+ * 每帧识别人数上限（多人识别 + 性能保护，前后端共用单一来源）。
+ * ----------------------------------------------------------------------------
+ * 画面里出现多个人时，按"框面积"降序取最显眼的前 N 张做提特征 + 比对，
+ * 其余只画框、不识别。这是"每帧"上限，不是"总人数"上限 —— 靠轨迹去重，
+ * 同一个人整窗只提一次，多个人会跨帧陆续被认出。
+ *
+ * 配置：options.face.maxFaces。
+ *   - 没配 / 配错 → 默认 2（兼顾性能与"能分辨多个人"）；
+ *   - 1 = 每帧只认最显眼的一张；
+ *   - 上限 12（再大每帧算力失控）。
+ */
+export const FACE_MAX_FACES = { def: 2, min: 1, max: 12 }
+
+/** 解析每帧识别人数上限（与 blockMergeThreshold 同一"没配回落默认、越界钳住"约定） */
+export function faceMaxFaces(c) {
+  const n = Number(c && c.maxFaces)
+  if (!Number.isFinite(n) || n <= 0) return FACE_MAX_FACES.def
+  return Math.max(FACE_MAX_FACES.min, Math.min(FACE_MAX_FACES.max, Math.round(n)))
+}
+
+/**
  * 解析「命中质量门槛」旋钮（纯函数，前后端共用）。
  * 「没配」回落默认值；开关本身只认显式真值；数值越界钳住。
  * @returns {{enabled:boolean, minScore:number, minBoxRatio:number, maxYaw:number}}
@@ -618,6 +639,14 @@ export const HIDDEN_OPTIONS = {
     collectUnknown: true,
     /** 画面上画人脸框 */
     drawBox: true,
+    /**
+     * 每帧最多对多少张脸提特征 + 比对（多人识别上限，性能保护）。
+     * 画面里出现多个人时，按"框面积"降序取最显眼的前 N 张做识别，其余只画框不识别。
+     * ⚠️ 这是"每帧"上限，不是"总人数"上限：靠轨迹去重，同一个人整窗只提一次，
+     *    所以多个人会跨帧陆续被认出；调大可以一次认更多人，代价是每帧算力更高。
+     * 默认 2（兼顾性能与"能分辨多个人"）；1 = 每帧只认最显眼的一张；上限 12。
+     */
+    maxFaces: 2,
     /*
      * ---------------- 采集调优（设置页「采集调优」折叠组） ----------------
      * 三个旋钮原本是散落的代码常量，调一次要改代码重构建。缺省值 = 原常量值，

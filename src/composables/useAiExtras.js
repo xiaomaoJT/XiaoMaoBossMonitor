@@ -37,7 +37,7 @@ import {
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, yawFromKps } from '../config/defaults.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces } from '../config/defaults.js'
 import { faceSampleScore, toGray } from './faceSampleScore.js'
 
 /** COCO 17 关键点下标 */
@@ -248,7 +248,10 @@ export function useAiExtras(options) {
       hitMargin: hitMarginThreshold(c),
       // 命中质量门槛（默认关）：判定收口在 defaults.faceQualityConf / faceQualityPassed，
       // 与后端 analyzer 共用同一份口径
-      quality: faceQualityConf(c)
+      quality: faceQualityConf(c),
+      // 每帧识别人数上限（默认 2，性能保护）：判定收口在 defaults.faceMaxFaces，
+      // 与后端 analyzer 共用同一份口径
+      maxFaces: faceMaxFaces(c)
     }
   }
 
@@ -478,7 +481,23 @@ export function useAiExtras(options) {
       }
     }
 
+    /*
+     * 每帧识别人数上限（maxFaces，默认 2）：画面里多个人时，按"框面积"降序取最显眼的前
+     * N 张做提特征 + 比对，其余只画框、不识别（性能保护）。这是"每帧"上限不是"总人数"
+     * 上限 —— 靠轨迹去重，同一个人整窗只提一次，多个人跨帧陆续被认出。
+     */
+    const faceCap = Math.max(1, fc.maxFaces || 2)
+    const cappedIds = new Set(
+      pairs
+        .slice()
+        .sort((a, b) => b.face.w * b.face.h - a.face.w * a.face.h)
+        .slice(0, faceCap)
+        .map((p) => p.track.id)
+    )
+
     for (const { face, track } of pairs) {
+      // 超过每帧识别上限：只显示框，不提特征 / 比对（性能保护，默认 2）
+      if (!cappedIds.has(track.id)) continue
       // 同一个人近期「成功」提过特征 → 直接继承既有结果，别重提（复用只看成功的时刻）
       if (faceReuseFresh(track, now, fc.dedupeSec * 1000)) {
         const known = track.face
