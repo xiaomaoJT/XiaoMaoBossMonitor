@@ -615,6 +615,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { alarmDetail } from '../composables/useAlarmText'
+import { isFlowEvent } from '../config/defaults.js'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -1076,7 +1077,8 @@ const MAIN_FILTERS = [
   { key: 'zone', label: '区域', title: '区域规则报警（走入 / 走出 / 徘徊）' },
   { key: 'pose', label: '姿态', title: '姿态识别报警' },
   { key: 'motion', label: '移动', title: '移动检测报警' },
-  { key: 'count', label: '计数', title: '人员计数报警' }
+  { key: 'count', label: '计数', title: '人员计数报警' },
+  { key: 'flow', label: '流向', title: '人员走向事件（跨摄像头轨迹）' }
 ]
 
 /** 全部筛选定义（含已移到 sysbar 的两个，countOf 仍要能算它们的数量） */
@@ -1133,6 +1135,8 @@ function matches(ev, key) {
   if (key === 'error') return false
   // 区域一类里有走入 / 走出 / 徘徊三种事件
   if (key === 'zone') return ev.type === 'enter' || ev.type === 'exit' || ev.type === 'loiter'
+  // 人员走向事件（跨摄像头轨迹）：前端在途事件带 source:'flow'，后端落库记录靠 type:'flow' 识别
+  if (key === 'flow') return isFlowEvent(ev)
   return ev.type === key
 }
 
@@ -1165,6 +1169,8 @@ function typeLabel(ev) {
       return ev.actionText || '姿态'
     case 'count':
       return '计数'
+    case 'flow':
+      return ev.flowName ? `流向·${ev.flowName}` : '流向'
     case 'offline':
       return '离线'
     case 'online':

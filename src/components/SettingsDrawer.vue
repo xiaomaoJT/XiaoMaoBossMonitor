@@ -345,20 +345,15 @@
 
                 <template v-if="camSilCfg(cam).enabled">
                   <div class="slot-list">
-                    <div class="slot-row" v-for="(s, si) in camSilCfg(cam).slots" :key="'csl-' + si">
-                      <span class="slot-idx">{{ si + 1 }}</span>
-                      <input class="field mini" type="time" v-model="s.start" @mousedown="openPicker" />
-                      <span class="tilde">~</span>
-                      <input class="field mini" type="time" v-model="s.end" @mousedown="openPicker" />
-                      <select class="field mini scope" v-model="s.scope" title="作用域：这个时段在哪些日子生效">
-                        <option v-for="sc in SLOT_SCOPES" :key="sc.id" :value="sc.id">{{ sc.label }}</option>
-                      </select>
-                      <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
-                      <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
-                      <button class="btn tiny danger slot-del" title="删除这个时段" @click="removeCamSilSlot(cam, si)">
-                        删除
-                      </button>
-                    </div>
+                    <SilentSlotRow
+                      v-for="(s, si) in camSilCfg(cam).slots"
+                      :key="'csl-' + si"
+                      :slot="s"
+                      :index="si"
+                      :can-remove="true"
+                      :open-picker="openPicker"
+                      @remove="removeCamSilSlot(cam, si)"
+                    />
                   </div>
                   <div class="slot-actions">
                     <button class="btn tiny" @click="addCamSilSlot(cam)">+ 添加时段</button>
@@ -1062,25 +1057,15 @@
               </p>
 
               <div class="slot-list">
-                <div class="slot-row" v-for="(s, i) in slotsOf" :key="i">
-                  <span class="slot-idx">{{ i + 1 }}</span>
-                  <input class="field mini" type="time" v-model="s.start" @mousedown="openPicker" />
-                  <span class="tilde">~</span>
-                  <input class="field mini" type="time" v-model="s.end" @mousedown="openPicker" />
-                  <select class="field mini scope" v-model="s.scope" title="作用域：这个时段在哪些日子生效">
-                    <option v-for="sc in SLOT_SCOPES" :key="sc.id" :value="sc.id">{{ sc.label }}</option>
-                  </select>
-                  <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
-                  <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
-                  <button
-                    class="btn tiny danger slot-del"
-                    title="删除这个时段"
-                    :disabled="slotsOf.length <= 1"
-                    @click="removeSlot(i)"
-                  >
-                    删除
-                  </button>
-                </div>
+                <SilentSlotRow
+                  v-for="(s, i) in slotsOf"
+                  :key="i"
+                  :slot="s"
+                  :index="i"
+                  :can-remove="slotsOf.length > 1"
+                  :open-picker="openPicker"
+                  @remove="removeSlot(i)"
+                />
               </div>
 
               <div class="slot-actions">
@@ -4604,7 +4589,6 @@ import {
   silentYieldSlots,
   dayTypeOf,
   WEEK_MODES,
-  SLOT_SCOPES,
   matchSilentSlotAt,
   parseSilentSlots,
   HIDDEN_PASSCODE_HASH,
@@ -4732,6 +4716,7 @@ import PushTemplatePanel from './PushTemplatePanel.vue'
 import SelectField from './SelectField.vue'
 import InfoTip from './InfoTip.vue'
 import StatsPanel from './StatsPanel.vue'
+import SilentSlotRow from './SilentSlotRow.vue'
 import { sampleQualityLabel, SAMPLE_SCORE_RECOMMEND } from '../composables/faceSampleScore.js'
 import { faceAttrText } from '../composables/faceAttr.js'
 
@@ -11108,34 +11093,6 @@ function loadHidden() {
   gap: 7px;
 }
 
-.slot-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  padding: 6px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line-soft);
-  background: var(--panel);
-}
-
-.slot-idx {
-  flex: 0 0 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  font-size: 10.5px;
-  color: var(--text-dim-2);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.slot-row .field.mini {
-  width: 104px;
-  cursor: pointer;
-}
-
 /* 敏感字段密码框 + 眼睛切换按钮（默认遮罩，点眼睛临时显示） */
 .pw-wrap {
   position: relative;
@@ -11171,21 +11128,6 @@ function loadHidden() {
 }
 .pw-eye:active {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
-}
-
-.slot-tag {
-  font-size: 10.5px;
-  color: var(--text-dim-2);
-  padding: 1px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-}
-
-/* 跨零点 = 正常用法，给个中性偏暖的提示 */
-.slot-tag.cross {
-  color: var(--warn-text);
-  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
-  background: color-mix(in srgb, var(--warn) 10%, transparent);
 }
 
 /* ---------- 工作日历（时段作用域分流） ---------- */
@@ -11286,18 +11228,6 @@ function loadHidden() {
   color: var(--accent-text);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
-.field.mini.scope {
-  width: auto;
-  min-width: 92px;
-  padding: 3px 6px;
-}
-
-/* 起止相同 = 这个时段永远不会命中，必须显眼地警示 */
-.slot-tag.invalid {
-  color: var(--err-text);
-  border-color: color-mix(in srgb, var(--err) 38%, transparent);
-  background: color-mix(in srgb, var(--err) 10%, transparent);
-}
 
 /* ---------- 通道静默（监控通道卡片内） ---------- */
 .cam-silent {
@@ -11338,10 +11268,6 @@ function loadHidden() {
 
 .cam-digest select.field.mini {
   min-width: 96px;
-}
-
-.slot-del {
-  margin-left: auto;
 }
 
 .slot-actions {
