@@ -1146,9 +1146,15 @@ function typeLabel(ev) {
       return '人形'
     case 'motion':
       return '移动'
-    case 'face':
-      // 已识别到人时直接显示姓名，一眼知道是谁
-      return ev.faceName || '人脸'
+    case 'face': {
+      // 已识别到人时直接显示姓名，一眼知道是谁；带上性别/年龄（后端顺手算的）
+      const t = ev.faceName || '人脸'
+      const sub = []
+      if (ev.gender === 'male') sub.push('男')
+      else if (ev.gender === 'female') sub.push('女')
+      if (ev.age != null) sub.push(`${ev.age}岁`)
+      return sub.length ? `${t}·${sub.join('')}` : t
+    }
     case 'enter':
       return '走入'
     case 'exit':

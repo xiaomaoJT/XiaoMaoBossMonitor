@@ -91,6 +91,10 @@ export function backendEventToPayload(ev) {
     known: ev.known === null || ev.known === undefined ? undefined : ev.known,
     faceName: ev.faceName || '',
     faceScore: ev.faceScore || 0,
+    /** 人脸属性（后端 analyzer 顺手算的，与本地检测同源）：性别 / 年龄 / 口罩眼镜等 */
+    gender: ev.gender || '',
+    age: typeof ev.age === 'number' ? ev.age : null,
+    attr: ev.attr && typeof ev.attr === 'object' ? ev.attr : null,
     faceThumb: ev.faceThumb || '',
     personThumb: ev.personThumb || '',
     actionText: ev.actionText || '',

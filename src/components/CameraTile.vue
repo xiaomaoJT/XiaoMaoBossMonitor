@@ -1246,6 +1246,10 @@ function emitExtraAlarm(evt, canvas) {
     /** 人脸事件：识别到的人名与相似度 */
     faceName: evt.faceName || '',
     faceScore: evt.faceScore || 0,
+    /** 人脸属性（性别 / 年龄 / 口罩眼镜等），本地检测模式由 useAiExtras 一并算 */
+    gender: evt.gender || '',
+    age: typeof evt.age === 'number' ? evt.age : null,
+    attr: evt.attr && typeof evt.attr === 'object' ? evt.attr : null,
     /** 人脸小图（放大后的 96×96），事件详情里单独展示 */
     faceThumb: evt.type === 'face' ? evt.thumb || '' : '',
     /** 区域事件的区域名 */
@@ -1725,12 +1729,17 @@ function drawOverlay() {
       ctx.strokeRect(x, y, bw, bh)
 
       const label = known ? f.name : '未录入'
+      // 属性徽标（性别 / 年龄）：本地检测模式由 useAiExtras 一并算，后端模式不画此层
+      let sub = ''
+      if (known && f.gender) sub += f.gender === 'male' ? '男' : '女'
+      if (known && f.age != null) sub += `${f.age}岁`
+      const fullLabel = sub ? `${label}·${sub}` : label
       ctx.font = `${Math.round(10.5 * dpr)}px -apple-system, "PingFang SC", sans-serif`
-      const tw = ctx.measureText(label).width
+      const tw = ctx.measureText(fullLabel).width
       ctx.fillStyle = known ? 'color-mix(in srgb, var(--warn-text) 94%, transparent)' : 'color-mix(in srgb, var(--text-dim) 85%, transparent)'
       ctx.fillRect(x, Math.max(0, y - 15 * dpr), tw + 10 * dpr, 15 * dpr)
       ctx.fillStyle = known ? 'color-mix(in srgb, var(--warn) 22%, var(--panel))' : 'var(--text-bright)'
-      ctx.fillText(label, x + 5 * dpr, Math.max(11 * dpr, y - 4 * dpr))
+      ctx.fillText(fullLabel, x + 5 * dpr, Math.max(11 * dpr, y - 4 * dpr))
     })
   }
 

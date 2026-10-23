@@ -1878,6 +1878,8 @@
                   >
                   <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
                   <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
+                  <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现） -->
+                  <span class="face-attrs" v-if="faceAttrText(pf)">{{ faceAttrText(pf) }}</span>
                   <!-- 录入时手动归入：选已知的人（同名归到他那一堆）或自定义名字；留空=自动编号，保持旧行为 -->
                   <div class="face-assign" v-if="faceNameOptions.length">
                     <FaceAssignSelect
@@ -1974,6 +1976,8 @@
                       <span class="face-meta">相似度 {{ (h.score * 100).toFixed(0) }}%</span>
                       <span class="face-meta">{{ h.camName || '未知通道' }}</span>
                       <span class="face-time" v-if="h.at">{{ fmtPendingAt(h.at) }}</span>
+                      <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现） -->
+                      <span class="face-attrs" v-if="faceAttrText(h)">{{ faceAttrText(h) }}</span>
                     </div>
                   </div>
                   <!-- 正确名字：选库里已有的人，或选「自定义」填一个；修正 = 按这个名字把样本录进人脸库 -->
@@ -5727,6 +5731,29 @@ function pfScoreTip(pf) {
 function pfRecommended(pf) {
   const s = Number(pf && pf.score)
   return Number.isFinite(s) && s >= 0 && s >= SAMPLE_SCORE_RECOMMEND
+}
+
+/**
+ * 把一条人脸（待录入 / 命中）的属性浓缩成一行徽标文本：
+ *   性别（男/女）+ 年龄（N岁）+ 口罩眼镜（戴帽：口罩/眼镜/墨镜/闭眼）。
+ * 任意字段缺失都不报错、不出现多余符号；三个维度全空则返回 ''（模板 v-if 不渲染）。
+ * @param {{gender?:string, age?:number|null, attr?:object|null}} f
+ */
+function faceAttrText(f) {
+  if (!f) return ''
+  const parts = []
+  if (f.gender === 'male') parts.push('男')
+  else if (f.gender === 'female') parts.push('女')
+  if (f.age != null && Number.isFinite(Number(f.age)) && Number(f.age) >= 0) parts.push(`${Number(f.age)}岁`)
+  const a = f.attr && typeof f.attr === 'object' ? f.attr : null
+  if (a) {
+    // 阈值 50%：概率化输出，过低的判定不显示，避免抖动误导
+    if (Number(a.mask) >= 50) parts.push('口罩')
+    if (Number(a.sunglasses) >= 50) parts.push('墨镜')
+    else if (Number(a.glasses) >= 50) parts.push('眼镜')
+    if (Number(a.leftEyeOpen) < 50 || Number(a.rightEyeOpen) < 50) parts.push('闭眼')
+  }
+  return parts.join(' · ')
 }
 
 /** 刷新待录入：加载态 + 结果提示（以前点下去毫无反馈，用户不知道有没有生效） */
@@ -9560,6 +9587,23 @@ function loadHidden() {
   color: var(--text-dim-2);
   text-align: center;
   word-break: break-all;
+}
+
+/* 属性徽标（性别 / 年龄 / 口罩眼镜等）：一行小胶囊，与通道名/时间区分开 */
+.face-attrs {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--accent, #5ad1ff);
+  background: color-mix(in srgb, var(--accent, #5ad1ff) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #5ad1ff) 36%, transparent);
+  border-radius: 8px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 改名输入框：原本复用 .face-meta 会继承 overflow:hidden，而 .field.mini 宽 118px
