@@ -18,6 +18,7 @@
       @toggle-events="toggleEventPanel"
       @toggle-mask="maskNow"
       @settings="settingsOpen = true"
+      @open-system-info="systemInfoOpen = true"
     />
 
     <main class="wall" :class="{ 'is-phone': isPhone, 'is-free': layoutKey === 'free' }" ref="wallEl">
@@ -124,6 +125,20 @@
       @restart-system="onRestartSystem"
       @start-temp-silent="onStartTempSilent"
       @end-temp-silent="onEndTempSilent"
+    />
+
+    <!--
+      系统信息抽屉：原设置里的「关于系统」页（设备信息 + 数据统计），从顶栏「设置」下拉进入。
+      同样按需加载：只有打开时才下载这块代码。
+    -->
+    <SystemInfoDrawer
+      v-if="systemInfoOpen"
+      :cameras="cameras"
+      :options="options"
+      :hidden-ids="hiddenIds"
+      :layout-key="layoutKey"
+      :events="events"
+      @close="systemInfoOpen = false"
     />
 
     <EventPanel
@@ -239,6 +254,10 @@ import TopBar from './components/TopBar.vue'
  * 于是第一次点「设置」也几乎无感，不会出现"点了半天抽屉不出来"。
  */
 const SettingsDrawer = defineAsyncComponent(() => import('./components/SettingsDrawer.vue'))
+/*
+ * 系统信息抽屉（原设置里的「关于系统」页）同样不在首屏关键路径上，按需加载。
+ */
+const SystemInfoDrawer = defineAsyncComponent(() => import('./components/SystemInfoDrawer.vue'))
 import {
   BRAND,
   DECODER_PATH,
@@ -616,6 +635,8 @@ function migrateCountInterval(opts) {
 const settingsOpen = ref(false)
 /** 打开设置时希望停留的页签（空 = 上次停留的那页） */
 const settingsTab = ref('')
+/** 系统信息抽屉（设备信息 + 数据统计，从顶栏「设置」下拉进入） */
+const systemInfoOpen = ref(false)
 const eventPanelOpen = ref(false)
 /**
  * 事件面板组件引用。
@@ -3891,6 +3912,7 @@ function onKeydown(e) {
   if (e.key === 'Escape') {
     if (zoomIndex.value !== null) zoomIndex.value = null
     else if (settingsOpen.value) settingsOpen.value = false
+    else if (systemInfoOpen.value) systemInfoOpen.value = false
     else if (eventPanelOpen.value) eventPanelOpen.value = false
   }
   if (e.key.toLowerCase() === 'f' && !e.metaKey && !e.ctrlKey) toggleAppFullscreen()

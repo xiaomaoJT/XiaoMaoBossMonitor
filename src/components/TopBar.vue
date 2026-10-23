@@ -109,19 +109,79 @@
           <span class="lbl">事件</span>
           <span class="badge" v-if="unread">{{ unread > 99 ? '99+' : unread }}</span>
         </button>
-        <button class="btn primary" @click="emit('settings')">
-          <svg viewBox="0 0 24 24" width="14" height="14">
-            <path
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4zM19.4 13.6a7.6 7.6 0 0 0 0-3.2l1.7-1.3-1.9-3.3-2 .8a7.6 7.6 0 0 0-2.8-1.6L14 2.6h-4l-.4 2.4a7.6 7.6 0 0 0-2.8 1.6l-2-.8L2.9 9.1l1.7 1.3a7.6 7.6 0 0 0 0 3.2l-1.7 1.3 1.9 3.3 2-.8a7.6 7.6 0 0 0 2.8 1.6l.4 2.4h4l.4-2.4a7.6 7.6 0 0 0 2.8-1.6l2 .8 1.9-3.3z"
-            />
-          </svg>
-          <span class="lbl">设置</span>
-        </button>
+        <!-- 设置：齿轮按钮 + 下拉菜单（完整配置 / 系统信息两个入口） -->
+        <div class="gear-wrap">
+          <button
+            ref="gearBtnEl"
+            class="btn primary"
+            :class="{ open: menuOpen }"
+            title="设置菜单"
+            aria-haspopup="true"
+            :aria-expanded="menuOpen ? 'true' : 'false'"
+            @click.stop="toggleMenu"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4zM19.4 13.6a7.6 7.6 0 0 0 0-3.2l1.7-1.3-1.9-3.3-2 .8a7.6 7.6 0 0 0-2.8-1.6L14 2.6h-4l-.4 2.4a7.6 7.6 0 0 0-2.8 1.6l-2-.8L2.9 9.1l1.7 1.3a7.6 7.6 0 0 0 0 3.2l-1.7 1.3 1.9 3.3 2-.8a7.6 7.6 0 0 0 2.8 1.6l.4 2.4h4l.4-2.4a7.6 7.6 0 0 0 2.8-1.6l2 .8 1.9-3.3z"
+              />
+            </svg>
+            <span class="lbl">设置</span>
+            <svg class="caret" viewBox="0 0 24 24" width="12" height="12">
+              <path
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M6 9l6 6 6-6"
+              />
+            </svg>
+          </button>
+        </div>
+        <!-- 下拉菜单挂到 body：窄屏时按钮组是横向滚动容器，写在里面会被 overflow 裁掉 -->
+        <Teleport to="body">
+          <div
+            class="gear-menu"
+            v-if="menuOpen"
+            :style="menuStyle"
+            role="menu"
+            @pointerdown.stop
+          >
+            <button class="gear-item" role="menuitem" @click="pickSettings">
+              <svg viewBox="0 0 24 24" width="14" height="14">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4zM19.4 13.6a7.6 7.6 0 0 0 0-3.2l1.7-1.3-1.9-3.3-2 .8a7.6 7.6 0 0 0-2.8-1.6L14 2.6h-4l-.4 2.4a7.6 7.6 0 0 0-2.8 1.6l-2-.8L2.9 9.1l1.7 1.3a7.6 7.6 0 0 0 0 3.2l-1.7 1.3 1.9 3.3 2-.8a7.6 7.6 0 0 0 2.8 1.6l.4 2.4h4l.4-2.4a7.6 7.6 0 0 0 2.8-1.6l2 .8 1.9-3.3z"
+                />
+              </svg>
+              <span class="gi-main">打开设置</span>
+              <span class="gi-sub">完整配置</span>
+            </button>
+            <button class="gear-item" role="menuitem" @click="pickSystemInfo">
+              <svg viewBox="0 0 24 24" width="14" height="14">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M12 16v-4M12 8h.01M4.6 5.2h16.8v13.6H4.6zM8.6 2.6h6.8v2.6H8.6zM9.8 21.4h4.4v-2.6H9.8z"
+                />
+              </svg>
+              <span class="gi-main">系统信息</span>
+              <span class="gi-sub">设备信息 · 数据统计</span>
+            </button>
+          </div>
+        </Teleport>
       </div>
 
       <div class="clock">
@@ -163,7 +223,8 @@ const emit = defineEmits([
   'restore-hidden',
   'toggle-events',
   'toggle-mask',
-  'settings'
+  'settings',
+  'open-system-info'
 ])
 
 /** 品牌 logo 动图（public/logo/logo.gif），相对页面根的写法见模板注释 */
@@ -188,9 +249,73 @@ function tick() {
 onMounted(() => {
   tick()
   timer = setInterval(tick, 1000)
+  document.addEventListener('pointerdown', onDocPointerDown, true)
+  document.addEventListener('keydown', onDocKeyDown, true)
 })
 
-onBeforeUnmount(() => clearInterval(timer))
+onBeforeUnmount(() => {
+  clearInterval(timer)
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
+  document.removeEventListener('keydown', onDocKeyDown, true)
+})
+
+/* ==================== 设置下拉菜单 ==================== */
+/*
+ * 顶栏「设置」现在是个下拉菜单：完整配置（SettingsDrawer，原有入口不变）
+ * 和系统信息（SystemInfoDrawer，从设置里拆出来的「只看 / 低频」模块）。
+ * 菜单挂到 body 并用 fixed 定位：窄屏时按钮组是横向滚动容器（overflow 裁剪），
+ * 写在按钮旁边会被切掉；Teleport 之后任何宽度下都能完整显示。
+ */
+const menuOpen = ref(false)
+const gearBtnEl = ref(null)
+const menuStyle = ref({})
+
+function toggleMenu() {
+  if (menuOpen.value) {
+    closeMenu()
+    return
+  }
+  const el = gearBtnEl.value
+  if (el) {
+    const r = el.getBoundingClientRect()
+    menuStyle.value = {
+      top: `${Math.round(r.bottom) + 6}px`,
+      right: `${Math.max(8, Math.round(window.innerWidth - r.right))}px`
+    }
+  }
+  menuOpen.value = true
+}
+
+function closeMenu() {
+  menuOpen.value = false
+}
+
+function pickSettings() {
+  closeMenu()
+  emit('settings')
+}
+
+function pickSystemInfo() {
+  closeMenu()
+  emit('open-system-info')
+}
+
+/** 点在按钮和菜单之外就收起（capture 阶段，先于业务点击） */
+function onDocPointerDown(e) {
+  if (!menuOpen.value) return
+  const t = e.target
+  // t 理论上可能不是 Element（极端情况），closest 不存在时按「点在菜单外」处理
+  if (t && typeof t.closest === 'function' && (t.closest('.gear-menu') || t.closest('.gear-wrap'))) return
+  closeMenu()
+}
+
+/** Esc 收起菜单 */
+function onDocKeyDown(e) {
+  if (e.key === 'Escape' && menuOpen.value) {
+    closeMenu()
+    e.stopPropagation()
+  }
+}
 </script>
 
 <style scoped>
@@ -334,6 +459,97 @@ onBeforeUnmount(() => clearInterval(timer))
   color: #fff;
   background: var(--err);
   font-variant-numeric: tabular-nums;
+}
+
+/* ==================== 设置下拉菜单 ==================== */
+/*
+ * .gear-menu  Teleport 到 body 后 scoped 依然生效（挂载时带上 data-v 属性），
+ * 所以浮动层的样式也能写在组件内，不会泄漏到全局。
+ */
+.gear-wrap {
+  display: inline-flex;
+}
+
+.btn.primary .caret {
+  transition: transform 0.15s ease;
+}
+
+.btn.primary.open .caret {
+  transform: rotate(180deg);
+}
+
+.gear-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 210px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  animation: gear-in 0.14s ease;
+}
+
+@keyframes gear-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.gear-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.gear-item:hover {
+  color: var(--accent-text-strong);
+  background: var(--accent-soft);
+}
+
+.gear-item svg {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.gear-item:hover svg {
+  color: var(--accent-text);
+}
+
+.gi-sub {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim-2);
+  white-space: nowrap;
+}
+
+/* 手机竖屏：菜单贴右缘，别超出屏幕 */
+@media (max-width: 640px) {
+  .gear-menu {
+    min-width: 190px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gear-menu {
+    animation: none;
+  }
+
+  .btn.primary .caret {
+    transition: none;
+  }
 }
 
 .clock {

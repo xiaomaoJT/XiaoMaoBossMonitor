@@ -1,0 +1,3114 @@
+/*
+ * 设置抽屉 / 系统信息抽屉 的统一样式（自 SettingsDrawer.vue 拆出）。
+ * 全部规则以 .sd-scope 为根作用域（抽屉最外层 <div class="mask sd-scope">），
+ * 故而只在抽屉内生效、不会泄漏到页面其它部分；.sd-scope 之前的 scoped 语义由这个前缀承接。
+ * 由 SettingsDrawer.vue 与 DrawerShell.vue 各自 import（Vite 去重为一份）。
+ */
+.sd-scope{
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: color-mix(in srgb, var(--bg-deep) 55%, transparent);
+  backdrop-filter: blur(2px);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sd-scope .drawer{
+  width: 780px;
+  max-width: 97vw;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  animation: slide 0.22s ease;
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(24px);
+    opacity: 0.4;
+  }
+}
+
+.sd-scope .drawer-head{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.sd-scope .drawer-head h2{
+  margin: 0;
+  font-size: 15px;
+}
+
+.sd-scope .head-sub{
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: #8fc0ff;
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.sd-scope .drawer-main{
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+/* ---------- 左侧分类导航 ---------- */
+.sd-scope .tabs{
+  flex: 0 0 auto;
+  width: 148px;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--panel-deep);
+  border-right: 1px solid var(--line);
+  overflow: auto;
+}
+
+.sd-scope .tab{
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: left;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.sd-scope .tab svg{
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+
+.sd-scope .tab span{
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sd-scope .tab em{
+  font-style: normal;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--text-dim-2);
+  background: color-mix(in srgb, var(--tint) 6%, transparent);
+}
+
+.sd-scope .tab em.ok{
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+
+/* 渠道关闭时也明确标出 off，避免误以为在推 */
+.sd-scope .tab em.muted{
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--tint) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tint) 8%, transparent);
+}
+
+.sd-scope .tab:hover{
+  color: var(--text);
+  background: color-mix(in srgb, var(--tint) 5%, transparent);
+}
+
+.sd-scope .tab.on{
+  color: var(--accent-text-strong);
+  background: var(--accent-soft);
+}
+
+.sd-scope .tab.on::before{
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--accent);
+}
+
+.sd-scope .drawer-body{
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  padding: 16px 18px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* ---------- 布局选择 ---------- */
+.sd-scope .layout-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 8px;
+}
+
+.sd-scope .layout-item{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 6px;
+  border-radius: 10px;
+  background: var(--panel-deep);
+  border: 1px solid var(--line);
+  transition: all 0.15s ease;
+}
+
+.sd-scope .layout-item:hover{
+  border-color: var(--line-strong);
+  background: var(--panel-2);
+}
+
+.sd-scope .layout-item.on{
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.sd-scope .layout-label{
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sd-scope .layout-item.on .layout-label{
+  color: var(--accent-text-strong);
+}
+
+.sd-scope .layout-preview{
+  display: grid;
+  width: 54px;
+  height: 34px;
+  gap: 2px;
+}
+
+.sd-scope .layout-preview i{
+  display: block;
+  border-radius: 2px;
+  background: #26344a;
+}
+
+.sd-scope .layout-item.on .layout-preview i{
+  background: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.sd-scope .pv-1{
+  grid-template-columns: 1fr;
+}
+.sd-scope .pv-2{
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+}
+.sd-scope .pv-3{
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+}
+.sd-scope .pv-4{
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(4, 1fr);
+}
+.sd-scope .pv-auto{
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+}
+.sd-scope .pv-focus{
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+}
+.sd-scope .pv-focus i:first-child{
+  grid-column: span 2;
+  grid-row: span 2;
+}
+.sd-scope .pv-free{
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+  position: relative;
+}
+.sd-scope .pv-free i:nth-child(1){
+  grid-area: 1 / 1 / 2 / 3;
+}
+.sd-scope .pv-free i:nth-child(2){
+  grid-area: 1 / 3 / 2 / 5;
+}
+.sd-scope .pv-free i:nth-child(3){
+  grid-area: 2 / 1 / 3 / 4;
+}
+.sd-scope .pv-free i:nth-child(4){
+  grid-area: 2 / 4 / 3 / 5;
+}
+
+.sd-scope .toggle-tip{
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.sd-scope .toggle-tip strong{
+  font-size: 12.5px;
+  color: var(--accent-text-strong);
+}
+
+.sd-scope .toggle-tip em{
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+
+.sd-scope .toggle-tip b{
+  color: var(--accent-text-strong);
+}
+
+.sd-scope .block-head{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* 页头右侧并排的状态芯片（「已启用/未启用」+ GPU 后端） */
+.sd-scope .head-chips{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 「恢复初始化」的二次确认说明（配置方案页） */
+.sd-scope .reset-warn{
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  background: color-mix(in srgb, var(--err) 7%, transparent);
+  font-size: 12px;
+  line-height: 1.75;
+  color: var(--text-dim);
+}
+
+.sd-scope .reset-warn b{
+  color: var(--err-text);
+}
+
+/* 「同时清空数据」勾选行（恢复初始化确认条里） */
+.sd-scope .reset-wipe{
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.sd-scope .reset-wipe .rw-text{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.sd-scope .reset-wipe .rw-text em{
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.sd-scope .reset-wipe .rw-text b{
+  color: var(--err-text);
+}
+
+/* 同一个标签页里的小节标题（AI 扩展分析用） */
+.sd-scope .block-head.sub{
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.sd-scope .sub-title{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 18px 0 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #9fb6d6;
+}
+
+.sd-scope .sub-title em{
+  font-style: normal;
+  font-weight: 400;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .hint.tight{
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+/* ---------- 已圈定区域 ---------- */
+.sd-scope .zone-list{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.sd-scope .zone-row{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sd-scope .zone-cam{
+  flex: 0 0 auto;
+  max-width: 82px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .zone-name{
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ---------- 人脸库 ---------- */
+/* 标题右侧的「管理 / 上传照片录入」按钮组：与字数计数之间留间距，
+   两个按钮之间也留间距（原来两个 button 直接相邻、零间隙）。 */
+.sd-scope .opt-acts{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+/*
+ * 固定卡片宽度 88px + auto-fill 自动铺列：一行几列随抽屉宽度变。
+ * 脚本据此（读 auto-fill 解析出的列数）算「每页 = 列数 × 4 行」，超出翻页。
+ * 用 grid 而不是 flex-wrap，是为了让"列数"可被稳定读出（空轨道也会铺出来）。
+ */
+.sd-scope .face-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 88px);
+  justify-content: start;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.sd-scope .face-card{
+  width: 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+
+/* 空态提示要跨整行，否则在 grid 里会被塞进一个 88px 的格子 */
+.sd-scope .face-grid > .hint{
+  grid-column: 1 / -1;
+}
+
+/*
+ * 「待录入」为空时的占位。
+ * 用虚线框 + 弱化配色，一眼能看出"这里是个空位"，而不是"这里什么都没有"
+ * （后者正是以前整块 v-if 掉之后给人的感觉）。
+ */
+.sd-scope .pending-empty{
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+
+.sd-scope .pending-empty .pe-icon{
+  font-size: 18px;
+  line-height: 1.2;
+  flex: 0 0 auto;
+}
+
+.sd-scope .pending-empty .pe-body{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sd-scope .pending-empty .pe-title{
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sd-scope .pending-empty .pe-hint{
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.55;
+  color: var(--text-dim-2);
+}
+
+/* 分页条：超过 4 行时才出现 */
+.sd-scope .face-pager{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sd-scope .face-page-text{
+  font-size: 12px;
+  color: var(--text-dim-2);
+  min-width: 44px;
+  text-align: center;
+}
+
+.sd-scope .face-card.pending{
+  /* 质量徽标 .pf-score 是绝对定位，卡片得是定位上下文 */
+  position: relative;
+  border-color: color-mix(in srgb, var(--warn-text) 40%, transparent);
+}
+
+/*
+ * 命中样本卡片（「命中修正」）：与待录入（warn 边框）区分开 ——
+ * 这些是**已经认出是谁**的命中，列出来是为了人工复核「有没有认错」。
+ * width:100% 而不是固定 200px：卡片现在填满 1fr 轨道（见 .hit-grid），
+ * 固定宽会在轨道里留下难看的右侧空隙。
+ */
+.sd-scope .face-card.hit{
+  width: 100%;
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/*
+ * 命中卡片网格：**固定 3 列**（用户明确要求一行放 3 个）。
+ *
+ * 为什么不再用 repeat(auto-fill, 200px)：那样列数会随抽屉宽度在 2/3 之间跳，
+ * 而「一行放几个」在这里是**观感决策**，不该由窗口宽度决定 —— 同一个页面
+ * 拖一下窗口就从 3 个变 2 个，正是用户说「不好看」的原因。
+ * minmax(0, 1fr) 让卡片摊满可用宽度，同时把轨道最小尺寸钉在 0 而不是 min-content ——
+ * 否则一个超长人名就能把三列全撑宽、挤出容器。
+ */
+.sd-scope .hit-grid{
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* 卡片内横排：图在左、信息在右，信息多也不会把卡片挤变形 */
+.sd-scope .face-card.hit .hit-top{
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.sd-scope .face-card.hit .hit-top img{
+  width: 60px;
+  height: 60px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  object-fit: cover;
+  display: block;
+  background: #0a0f18;
+}
+
+.sd-scope .face-card.hit .hit-info{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* 横排后信息左对齐更易读（原本在竖排卡片里是居中） */
+.sd-scope .face-card.hit .hit-info .hit-cur, .sd-scope .face-card.hit .hit-info .face-meta, .sd-scope .face-card.hit .hit-info .face-time{
+  text-align: left;
+}
+
+/* 命中卡片底部按钮：允许换行、不裁字 —— 杜绝「只能看到一个字」
+   （覆盖 .face-card .face-acts .mini-btn 的 nowrap + ellipsis） */
+.sd-scope .face-card.hit .face-acts{
+  flex-wrap: wrap;
+}
+
+.sd-scope .face-card.hit .face-acts .mini-btn{
+  flex: 1 1 auto;
+  min-width: 56px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  line-height: 1.25;
+  padding: 4px 6px;
+}
+
+/* 命中管理工具条（刷新命中 / 全部忽略）与卡片网格拉开点距离 */
+.sd-scope .face-acts.hit-toolbar{
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/*
+ * 陌生人标记卡片（反例）：与命中（accent）再区分开 ——
+ * 这些是**被误认**的陌生脸，列出来是为了能看清"拦的是谁"、必要时解除。
+ */
+.sd-scope .face-card.block{
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+}
+
+/*
+ * 陌生人卡片上「被认成的名字」：**单独一行**、比上面的「曾被认成」标签更醒目。
+ *
+ * 为什么单独一行：这个名字就是这张卡的全部意义 —— 「拦的是谁」。
+ * 以前写成「曾被认成：大刘」一行，88px 卡里名字稍长就被 ellipsis 切半，
+ * 而识别结论恰恰是最该看清的部分。分行后标签弱化、名字加重，一眼定位。
+ */
+.sd-scope .block-name{
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 合并计数徽标：「×N」= 同一个陌生人被认错了 N 回、已合并成这一条。
+ * 用 warn 色系小药丸：一眼看出"这条不是第一次"，又不抢名字的视觉重心。
+ * 只有 count > 1 才渲染（模板里 v-if），所以这里只管样式不管有无。
+ */
+.sd-scope .block-count{
+  align-self: center;
+  margin-top: 1px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, transparent);
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* 卡片上「当前认成的名字」：比通道名更醒目的正文色，一眼看到识别结论 */
+.sd-scope .hit-cur{
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sd-scope .face-card img{
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 7px;
+  object-fit: cover;
+  display: block;
+  background: #0a0f18;
+}
+
+.sd-scope .face-meta{
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-soft);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 待录入卡片底部第二行：捕获时间（比通道名更弱、更小，可换行不截断） */
+.sd-scope .face-time{
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-dim-2);
+  text-align: center;
+  word-break: break-all;
+}
+
+/* 属性徽标（性别 / 年龄 / 口罩眼镜等）：一行小胶囊，与通道名/时间区分开 */
+.sd-scope .face-attrs{
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--accent, #5ad1ff);
+  background: color-mix(in srgb, var(--accent, #5ad1ff) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #5ad1ff) 36%, transparent);
+  border-radius: 8px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 改名输入框：原本复用 .face-meta 会继承 overflow:hidden，而 .field.mini 宽 118px
+   远超卡片内容区（88−12=76px），被裁成"截断"。这里单独成类、不裁剪，
+   并把输入框收到卡片内（width:100% + border-box），既不被截断也能看清在改谁。 */
+.sd-scope .face-rename{
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.sd-scope .face-rename .field.mini{
+  width: 100%;
+  box-sizing: border-box;
+  height: 26px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.sd-scope .face-acts{
+  display: flex;
+  gap: 4px;
+}
+
+.sd-scope .face-acts .mini-btn{
+  flex: 1;
+}
+
+/* 卡片里的两个按钮（已录入：改名 / 删除；待录入：录入 / 忽略）挤在 88px 卡片里：
+ * 文字稍长（如「录入中」）若不放开 min-width 会被 nowrap 撑开、把另一个按钮挤出
+ * 卡片边框。这里只针对「卡片内」的子按钮放开收缩 + 超出省略，既能并排又能保证不溢出
+ * （全宽的操作行不在这个作用域里，不受影响）。 */
+.sd-scope .face-card .face-acts .mini-btn{
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 待录入卡片上的「录入时归入」控件：卡片只有 88px 宽，控件必须铺满内部宽度，
+ * 不能沿用 .field.mini 默认 118px（否则会撑破卡片边框）。 */
+.sd-scope .face-assign{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+.sd-scope .face-assign .field.mini{
+  width: 100%;
+  height: 26px;
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+/* ---------------- 同一人归类（多角度样本）----------------
+ * 库里按「人」显示：一「人」一张卡片。卡片上要多带两个信息 ——
+ *   ① 这个人的**几个角度**（右下角数字角标）
+ *   ② 这一组里名字**是不是统一的**（右上角 ! 标记）
+ * ② 是必须的：推送里叫什么名字，取决于这几条记录各自的名字。
+ * 名字不一致时同一个人的不同角度会推不同的名字，用户看到只会觉得"识别乱了"，
+ * 而根源在库这边没统一 —— 所以要让它在卡片上就能被发现。
+ */
+.sd-scope .face-thumb{
+  position: relative;
+  width: 100%;
+  line-height: 0;
+}
+
+.sd-scope .face-thumb.clickable{
+  cursor: zoom-in;
+}
+.sd-scope .face-thumb.clickable:hover img{
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.sd-scope .face-count{
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 78%, #000);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+.sd-scope .face-warn{
+  position: absolute;
+  right: 3px;
+  top: 3px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--warn-text) 88%, #000);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
+
+/*
+ * 主样本角标（★）：用户指定的「代表样本」。
+ * 放左上，与「名字不一致」的 ! （右上）、样本数（右下）错开，不会叠在一起。
+ * 颜色用 warn 系而不是 accent —— 它是「这一张被特别指定过」的标记，
+ * 不该和「选中/展开」那种交互态混成一个色。
+ */
+.sd-scope .face-primary-star{
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--warn-text) 90%, #000);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 35%);
+}
+
+/* 「设为主样本」按钮：和普通操作区分开 */
+.sd-scope .primary-btn{
+  font-weight: 600;
+}
+
+/*
+ * 待录入卡片的「样本质量」徽标（优 / 良 / 一般 / 差 / 未评分）。
+ * 缩略图占满卡片宽，徽标浮在左上角。
+ * 色调沿用项目语义：ok=绿 / warn=黄 / bad=红 / muted=灰（未评分）。
+ */
+.sd-scope .pf-score{
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  color: #fff;
+  background: color-mix(in srgb, var(--muted-text, #888) 88%, #000);
+}
+.sd-scope .pf-score.ok{
+  background: color-mix(in srgb, var(--ok-text, #2f9e44) 90%, #000);
+}
+.sd-scope .pf-score.warn{
+  background: color-mix(in srgb, var(--warn-text) 88%, #000);
+}
+.sd-scope .pf-score.bad{
+  background: color-mix(in srgb, var(--danger-text, #c92a2a) 88%, #000);
+}
+/* 达到「建议先录」线的加一圈细边，一眼扫过去先录这些 */
+.sd-scope .pf-score.rec{
+  box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ok-text, #2f9e44) 55%, transparent);
+}
+
+/* 归到一组的卡片：描边稍重，提示"这不止一条记录" */
+.sd-scope .face-card.grouped{
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line-soft));
+}
+
+/* 正在展开看角度样本的那张卡片 */
+.sd-scope .face-card.selected{
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* 「保存中」按钮：只是个状态位，别让人以为是可点的操作 */
+.sd-scope .face-busy{
+  opacity: 0.85;
+  cursor: default;
+}
+
+/* 归类开关（带说明的那种，不是一行 switch，所以不能直接用 .opt） */
+.sd-scope .face-group-toggle{
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+.sd-scope .face-group-toggle > span:last-child{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.sd-scope .face-group-toggle strong{
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.sd-scope .face-group-toggle em{
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+  color: var(--text-dim-2);
+}
+.sd-scope .face-group-toggle .switch{
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+/* ---------------- 一个人的角度样本面板 ---------------- */
+.sd-scope .face-group-panel{
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line-soft));
+  background: color-mix(in srgb, var(--tint) 4%, transparent);
+}
+
+.sd-scope .fgp-head{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.sd-scope .fgp-head strong{
+  font-size: 13px;
+  color: var(--text);
+}
+.sd-scope .fgp-tag{
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--tint) 8%, transparent);
+}
+.sd-scope .fgp-tag.ok{
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.sd-scope .fgp-tag.warn{
+  color: var(--warn-text);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.sd-scope .fgp-acts{
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.sd-scope .fgp-samples{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 76px);
+  gap: 8px;
+}
+
+.sd-scope .fgp-item{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--tint) 3%, transparent);
+}
+.sd-scope .fgp-item img{
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+  background: #0a0f18;
+}
+.sd-scope .fgp-sim{
+  font-size: 10px;
+  color: var(--text-dim-2);
+}
+/* 主样本那一行的标签：★ 主样本，加粗 + warn 色，和「代表 / 相似度」区分开 */
+.sd-scope .fgp-sim.primary{
+  font-weight: 700;
+  color: var(--warn-text);
+}
+.sd-scope .fgp-name{
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sd-scope .fgp-item .mini-btn{
+  width: 100%;
+  min-width: 0;
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 组面板的合并勾选：每条样本一个 checkbox（放在缩略图上方），头部一个全选 */
+.sd-scope .fgp-check{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-bottom: 2px;
+}
+.sd-scope .fgp-check input, .sd-scope .fgp-allcheck input{
+  width: 14px;
+  height: 14px;
+  accent-color: var(--tint);
+  cursor: pointer;
+}
+.sd-scope .fgp-allcheck{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* 样本面板里「手动归入」控件：fgp-item 也是窄列（约 76px），控件铺满列宽，
+ * 选「自定义」时再露出输入框与「确定」按钮，全部纵向堆叠不溢出。 */
+.sd-scope .fgp-assign{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.sd-scope .fgp-assign .field.mini{
+  width: 100%;
+  height: 26px;
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+.sd-scope .fgp-assign .mini-btn{
+  width: 100%;
+}
+
+/* 待录入缩略图可点击看原图（只有存到整帧时才给 pointer + 提示） */
+.sd-scope .pending-thumb.clickable{
+  cursor: zoom-in;
+}
+.sd-scope .pending-thumb.clickable:hover{
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -2px;
+}
+
+/* 看原图灯箱：遮罩 + 居中图片 + 右上关闭 + 底部说明 */
+.sd-scope .pending-shot-mask{
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(4, 8, 14, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.sd-scope .pending-shot-box{
+  position: relative;
+  max-width: min(92vw, 1100px);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.sd-scope .pending-shot-img{
+  max-width: 100%;
+  max-height: 82vh;
+  border-radius: 10px;
+  background: #0a0f18;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.sd-scope .pending-shot-cap{
+  font-size: 12px;
+  color: var(--text-soft);
+  text-align: center;
+  word-break: break-all;
+}
+.sd-scope .pending-shot-close{
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: #16202e;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sd-scope .pending-shot-close:hover{
+  background: #223044;
+}
+.sd-scope .lb-fade-enter-active, .sd-scope .lb-fade-leave-active{
+  transition: opacity 0.16s ease;
+}
+.sd-scope .lb-fade-enter-from, .sd-scope .lb-fade-leave-to{
+  opacity: 0;
+}
+
+/* 上传照片录入：隐藏的原生 file input + 反馈状态条 */
+.sd-scope .hidden-file{
+  display: none;
+}
+
+.sd-scope .enroll-status{
+  margin: 6px 0 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid transparent;
+}
+
+.sd-scope .enroll-status.busy{
+  color: var(--text-dim, #9fb3c8);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.sd-scope .enroll-status.ok{
+  color: #b6f0c8;
+  background: color-mix(in srgb, #2e9e5b 18%, transparent);
+  border-color: color-mix(in srgb, #2e9e5b 45%, transparent);
+}
+
+.sd-scope .enroll-status.err{
+  color: #ffc9c9;
+  background: color-mix(in srgb, #d23b3b 16%, transparent);
+  border-color: color-mix(in srgb, #d23b3b 42%, transparent);
+}
+
+/* ---------- 小组件按钮 ---------- */
+.sd-scope .mini-btn{
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: #cfe0f7;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sd-scope .mini-btn:hover{
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.sd-scope .mini-btn.ghost{
+  background: transparent;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .mini-btn.ghost:hover{
+  background: color-mix(in srgb, var(--tint) 6%, transparent);
+  color: var(--text-soft);
+}
+
+.sd-scope .mini-btn.danger{
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
+  color: var(--err-text);
+}
+
+.sd-scope .mini-btn.danger:hover{
+  background: color-mix(in srgb, var(--err) 26%, transparent);
+}
+
+/* 被强制保持开启的开关（钉钉/企微开着时 TG 不可关） */
+.sd-scope .switch.locked{
+  cursor: not-allowed;
+}
+
+.sd-scope .block{
+  min-width: 0;
+}
+
+.sd-scope .block h3{
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.sd-scope .block-head h3{
+  margin-bottom: 0;
+}
+
+.sd-scope .block-head + .hint, .sd-scope .block-head + .cam-list, .sd-scope .block-head + .layout-grid{
+  margin-top: 8px;
+}
+
+.sd-scope .hint{
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .cam-list{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sd-scope .cam-item{
+  padding: 9px;
+  border-radius: 10px;
+  background: var(--panel-deep);
+  border: 1px solid var(--line);
+  transition: opacity 0.16s ease, border-color 0.16s ease;
+}
+
+.sd-scope .cam-item.off{
+  opacity: 0.5;
+}
+
+.sd-scope .cam-head{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.sd-scope .row-handle{
+  display: inline-flex;
+  width: 22px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim-2);
+  cursor: grab;
+  border-radius: 6px;
+}
+
+.sd-scope .row-handle:hover{
+  color: #fff;
+  background: color-mix(in srgb, var(--tint) 8%, transparent);
+}
+
+.sd-scope .index{
+  width: 18px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.sd-scope .name-input{
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sd-scope .url-input{
+  height: auto;
+  min-height: 52px;
+  padding: 8px 10px;
+  line-height: 1.5;
+  resize: vertical;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.sd-scope .url-sub{
+  margin-top: 6px;
+  height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.sd-scope .icon-btn{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+}
+
+.sd-scope .icon-btn:hover:not(:disabled){
+  color: #fff;
+  background: color-mix(in srgb, var(--tint) 10%, transparent);
+}
+
+.sd-scope .icon-btn:disabled{
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.sd-scope .icon-btn.del:hover{
+  color: #fff;
+  background: color-mix(in srgb, var(--err) 80%, transparent);
+}
+
+.sd-scope .opt{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  cursor: pointer;
+}
+
+.sd-scope .opt span strong{
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sd-scope .opt span em{
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  font-style: normal;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .opt span em.st-ok{
+  color: var(--ok-text);
+}
+
+.sd-scope .opt span em.st-fail{
+  color: var(--err-text);
+}
+
+.sd-scope .opt span em.st-loading{
+  color: var(--warn-text);
+}
+
+.sd-scope .opt span em b{
+  color: var(--accent-text-strong);
+  font-weight: 600;
+}
+
+/*
+ * 屏幕常亮的实时状态徽标：绿=已生效 / 黄=待生效 / 灰=已关闭。
+ * ⚠️ 必须写到 `.opt span em b.wake-state` 这一层，否则会被上面那条
+ *    「em 里的 b 一律用强调色」的规则盖住，三种状态就长得一模一样了。
+ */
+.sd-scope .opt span em b.wake-state{
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  border: 1px solid transparent;
+}
+
+.sd-scope .opt span em b.wake-state.ok{
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok-text) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ok-text) 32%, transparent);
+}
+
+.sd-scope .opt span em b.wake-state.warn{
+  color: var(--warn-text);
+  background: color-mix(in srgb, var(--warn-text) 14%, transparent);
+  border-color: color-mix(in srgb, var(--warn-text) 32%, transparent);
+}
+
+.sd-scope .opt span em b.wake-state.off{
+  color: var(--text-dim-2);
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+
+.sd-scope .cam-tags{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sd-scope .tag{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 12px;
+  /*
+   * 不参与 flex 收缩 + 不换行：`.tag` 常作为 `.opt`（flex 行）里的尾部按钮，
+   * 默认 flex-shrink:1 会在窄抽屉 / 手机端被挤到比文字还窄，文字折成两行后
+   * 塞在固定 24px 高里就**溢出边框**（「从后端拉取」按钮踩过这个）。
+   * 固定按内容宽度 + nowrap，放不下时整行换行（移动端 .opt 已是 flex-wrap）。
+   */
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  transition: all 0.15s ease;
+}
+
+.sd-scope .tag:hover{
+  color: var(--text-bright);
+  border-color: var(--line-strong);
+}
+
+.sd-scope .tag.on{
+  color: var(--accent-text-strong);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.sd-scope .tag.ghost{
+  color: var(--text-dim-2);
+  background: transparent;
+}
+
+.sd-scope .tag-text{
+  font-size: 12px;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .state-chip{
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 20px;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+}
+
+.sd-scope .state-chip.ready{
+  color: var(--ok-text);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.sd-scope .state-chip.err{
+  color: var(--err-text);
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+.sd-scope .state-chip.loading{
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.sd-scope .state-chip.error{
+  color: var(--err-text);
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+.sd-scope .opt.col{
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  cursor: default;
+}
+
+/* 静默时段（免打扰推送）相关样式 */
+.sd-scope .divider{
+  height: 1px;
+  margin: 14px 0 4px;
+  background: var(--line);
+}
+
+.sd-scope .opt-inline{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sd-scope .opt-inline .muted{
+  font-size: 12px;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .time-row{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sd-scope .time-row .tilde{
+  color: var(--text-dim-2);
+  font-size: 13px;
+}
+
+.sd-scope .ch-pick{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/*
+ * 通用 chip 按钮（临时静默的「静默渠道 / 常用时长」等都用它）。
+ *
+ * ⚠️ 之前只写了 `.ch-pick .chip`（定时静默那几个渠道），
+ * 而 `.chip` / `.chip.sm` / `.chip.on` 的样式定义在 CameraTile.vue 与
+ * EventPanel.vue 里 —— 那两个是**别的 scoped 组件**，样式不会作用到本组件。
+ * 结果「临时静默 → 静默渠道」那几个 chip 完全没有样式：没有边框、没有胶囊形状，
+ * 点一下 `on` 类也**没有任何视觉变化**，看上去就像"点不动"。
+ * 这里补一份本组件自己的 chip 样式（含 .on 选中态），与 .ch-pick 保持一致。
+ */
+.sd-scope .chip{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.sd-scope .chip:hover{
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--text);
+}
+
+/* 选中态：静默渠道 / 常用时长靠它给出"已选"的反馈 */
+.sd-scope .chip.on{
+  color: var(--accent-text-strong);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.sd-scope .chip.sm{
+  padding: 4px 11px;
+  font-size: 12px;
+}
+
+.sd-scope .ch-pick .chip{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.sd-scope .ch-pick .chip input{
+  display: none;
+}
+
+.sd-scope .ch-pick .chip.on{
+  color: var(--accent-text-strong);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.sd-scope .silent-state{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border-left: 2px solid color-mix(in srgb, #f5a623 60%, transparent);
+  padding-left: 10px;
+}
+
+/* ---------- 事件面板停靠位置（item 113） ---------- */
+.sd-scope .pos-picker{
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 每个按钮就是一个缩小版的屏幕缩略图，圆点落在对应角上 */
+.sd-scope .pos-btn{
+  position: relative;
+  width: 52px;
+  height: 38px;
+  padding: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.sd-scope .pos-btn:hover{
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.sd-scope .pos-btn.on{
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+}
+
+.sd-scope .pos-btn .pos-dot{
+  position: absolute;
+  width: 12px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--text-dim-2);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.sd-scope .pos-btn.on .pos-dot{
+  background: var(--accent);
+  transform: scale(1.15);
+}
+
+.sd-scope .pos-btn.tl .pos-dot{
+  top: 4px;
+  left: 4px;
+}
+.sd-scope .pos-btn.tr .pos-dot{
+  top: 4px;
+  right: 4px;
+}
+.sd-scope .pos-btn.bl .pos-dot{
+  bottom: 15px;
+  left: 4px;
+}
+.sd-scope .pos-btn.br .pos-dot{
+  bottom: 15px;
+  right: 4px;
+}
+
+.sd-scope .pos-btn em{
+  position: absolute;
+  bottom: 1px;
+  left: 0;
+  right: 0;
+  font-style: normal;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--text-dim-2);
+  text-align: center;
+}
+
+.sd-scope .pos-btn.on em{
+  color: var(--accent-text);
+}
+
+.sd-scope .opt-inline{
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sd-scope .opt-inline .field.mini{
+  width: 72px;
+}
+
+/* ---------- 远程控制（方案 C，TG 私聊指令） ---------- */
+.sd-scope .remote-block{
+  border-left: 2px solid color-mix(in srgb, #35c98a 55%, transparent);
+}
+
+/* 真正在监听时整块微微提亮，一眼看出"远程控制是活的" */
+.sd-scope .grp.live .grp-head{
+  background: color-mix(in srgb, var(--ok) 7%, transparent);
+}
+
+.sd-scope .grp-ico.remote{
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+
+.sd-scope .remote-status{
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.sd-scope .remote-status .muted{
+  font-size: 11px;
+  color: var(--text-dim-2);
+}
+
+/* ---------- Telegram 远程控制：诊断面板 ---------- */
+/*
+ * 排障面板而不是装饰：每条 diag-row 都是一个「可能出错的地方」，
+ * 用等宽字体对齐键值，扫一眼就能看出是哪一项断了。
+ */
+.sd-scope .tg-diag{
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px dashed var(--line);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sd-scope .diag-row{
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.sd-scope .diag-k{
+  flex: 0 0 62px;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .diag-v{
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.sd-scope .diag-note{
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.sd-scope .id-list{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.sd-scope .id-chip{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+}
+
+.sd-scope .id-chip code{
+  font-size: 11.5px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+}
+
+.sd-scope .id-x{
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-dim-2);
+  background: transparent;
+  cursor: pointer;
+}
+
+.sd-scope .id-x:hover{
+  color: var(--err-text);
+  background: color-mix(in srgb, var(--err) 16%, transparent);
+}
+
+.sd-scope .id-empty{
+  font-size: 11.5px;
+  color: var(--err-text);
+}
+
+.sd-scope .cmd-list{
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+
+.sd-scope .cmd-hint{
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+  line-height: 1.6;
+  margin-bottom: 2px;
+}
+
+.sd-scope .cmd-hint code{
+  padding: 0 4px;
+}
+
+.sd-scope .cmd{
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.sd-scope .cmd code{
+  flex: 0 0 138px;
+  font-size: 11.5px;
+  color: var(--accent-text-strong, var(--accent-text));
+}
+
+.sd-scope .cmd span{
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+  min-width: 0;
+}
+
+/* ---------- 分组卡片（item 121 静默 / 远程控制 UI 美化） ----------
+ * 这两块功能各自选项多、层级深，原先平铺在页面上会被上下内容淹没。
+ * 用 grp 卡片圈起来：头部是「图标 + 标题 + 总开关」，下面按 sub-label 分小节。
+ */
+.sd-scope .grp{
+  margin: 0 0 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 60%, transparent);
+  overflow: hidden;
+}
+
+.sd-scope .grp-head{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.sd-scope .grp-ico{
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 14px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.sd-scope .grp-titles{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sd-scope .grp-titles strong{
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.sd-scope .grp-titles em{
+  font-style: normal;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .grp-titles b{
+  color: var(--text-dim);
+}
+
+.sd-scope .grp-body{
+  padding: 11px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* 临时静默生效时整块提亮，一眼看出"现在是静音状态" */
+.sd-scope .grp-body.temp-silent.active{
+  background: color-mix(in srgb, #9b6dff 6%, transparent);
+}
+
+.sd-scope .sub-label{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+.sd-scope .sub-label.mt{
+  margin-top: 3px;
+}
+
+/* 「当前生效 19:00~08:00」这类实时状态标签 */
+.sd-scope .live-tag{
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--ok-text);
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 32%, transparent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.sd-scope .hint.tight{
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.sd-scope .silent-state{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  border-radius: 8px;
+  border-left: 2px solid color-mix(in srgb, #f5a623 60%, transparent);
+  background: color-mix(in srgb, #f5a623 7%, transparent);
+}
+
+.sd-scope .silent-state b{
+  color: var(--text-soft);
+}
+
+/* 静默时段列表（item 114） ---------- */
+.sd-scope .slot-list{
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+/* 敏感字段密码框 + 眼睛切换按钮（默认遮罩，点眼睛临时显示） */
+.sd-scope .pw-wrap{
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.sd-scope .pw-wrap .field{
+  width: 100%;
+  padding-right: 38px;
+}
+.sd-scope .pw-eye{
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 6px;
+  opacity: 0.78;
+  transition: opacity 0.15s, background 0.15s;
+}
+.sd-scope .pw-eye:hover{
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.sd-scope .pw-eye:active{
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+/* ---------- 工作日历（时段作用域分流） ---------- */
+.sd-scope .cal-block{
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-soft) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sd-scope .cal-row{
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.sd-scope .cal-k{
+  flex: 0 0 64px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 28px;
+  text-align: right;
+}
+.sd-scope .cal-row.today .cal-k{
+  line-height: 24px;
+}
+.sd-scope .seg{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sd-scope .seg-btn{
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sd-scope .seg-btn.on{
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+}
+.sd-scope .date-edit{
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+.sd-scope .date-add{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.sd-scope .date-chips{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.sd-scope .d-chip{
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 2px 4px 2px 7px;
+  font-size: 12px;
+  background: var(--bg);
+}
+.sd-scope .d-x{
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.sd-scope .d-x:hover{
+  color: var(--err-text);
+}
+.sd-scope .cal-today{
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+.sd-scope .cal-today.workday{
+  color: var(--text);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.sd-scope .cal-today.restday{
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* ---------- 通道静默（监控通道卡片内） ---------- */
+.sd-scope .cam-silent{
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sd-scope .cam-silent.on{
+  border-top-color: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.sd-scope .cs-row{
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.sd-scope .cs-flex{
+  flex: 1 1 auto;
+}
+.sd-scope .cs-label, .sd-scope .cs-state{
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+}
+.sd-scope .cs-state.off{
+  opacity: 0.72;
+}
+
+/* ---------- 日常事件静默（监控通道卡片内） ----------
+   复用 .cam-silent 的骨架（同一条卡片里的第二段），只把"正在汇总"的高亮
+   换成强调色，和上面"通道静默"的警示色区分开：那是"别打扰我"，这是"攒着一起发"。 */
+.sd-scope .cam-digest.on{
+  border-top-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.sd-scope .cam-digest select.field.mini{
+  min-width: 96px;
+}
+
+.sd-scope .slot-actions{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sd-scope .slot-actions .muted{
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+}
+
+/* ---------- 临时静默（item 112） ---------- */
+.sd-scope .temp-silent{
+  border-left: 2px solid color-mix(in srgb, #9b6dff 55%, transparent);
+}
+
+.sd-scope .temp-dur, .sd-scope .temp-chips, .sd-scope .temp-until{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 「按小时」：常用时长一行（自身成网格、自适应换行），自定义时长另起一行 */
+.sd-scope .temp-dur{
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.sd-scope .temp-quick{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+
+.sd-scope .temp-custom{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sd-scope .temp-dur .field.mini{
+  width: 82px;
+}
+
+/* 时段开启前提醒（preNotify）—— 跟其它开关行保持一致的呼吸感 */
+.sd-scope .pre-notify{
+  margin-top: 2px;
+}
+/* 描述较长：左侧文案允许换行收缩，右侧开关+状态不换行、也不被挤成竖排 */
+.sd-scope .pre-notify > span:first-child{
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sd-scope .pre-notify .opt-inline{
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 「按小时 / 静默到几点」两个模式的切换，用 seg 按钮对，跟页面其它分段控件一致 */
+.sd-scope .temp-mode .seg-btn{
+  min-width: 92px;
+  justify-content: center;
+}
+
+.sd-scope .temp-until .field{
+  min-width: 210px;
+}
+
+.sd-scope .temp-silent .muted{
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+}
+
+.sd-scope .btn.tiny{
+  height: 24px;
+  padding: 0 10px;
+  font-size: 11.5px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--field-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.sd-scope .btn.tiny:hover:not(:disabled){
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.sd-scope .btn.tiny:disabled{
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sd-scope .btn.tiny.danger{
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err-text);
+}
+
+.sd-scope .btn.tiny.danger:hover:not(:disabled){
+  border-color: color-mix(in srgb, var(--err) 70%, transparent);
+  background: color-mix(in srgb, var(--err) 22%, transparent);
+}
+
+.sd-scope .range-row{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sd-scope .range-row input[type='range']{
+  flex: 1 1 auto;
+  accent-color: var(--accent);
+}
+
+.sd-scope .range-row b{
+  width: 34px;
+  text-align: right;
+  font-size: 12px;
+  color: #9fb2cc;
+  font-variant-numeric: tabular-nums;
+}
+
+.sd-scope .field.mini{
+  width: 118px;
+  height: 30px;
+  flex: 0 0 auto;
+}
+
+.sd-scope .field.mini.wide{
+  width: auto;
+  min-width: 210px;
+  max-width: 100%;
+}
+
+.sd-scope .unit{
+  font-size: 12px;
+  color: var(--text-dim-2);
+  flex: 0 0 auto;
+}
+
+.sd-scope .test-row{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* ---------- 重启诊断 ---------- */
+.sd-scope .restart-detail{
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-1, rgba(128, 128, 128, 0.22));
+  border-radius: 10px;
+  background: var(--panel-2, rgba(128, 128, 128, 0.06));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sd-scope .restart-detail .kv{
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.sd-scope .restart-detail .kv > span{
+  flex: 0 0 62px;
+  color: var(--text-dim-2);
+}
+.sd-scope .restart-detail .kv > b{
+  font-weight: 500;
+  color: var(--text-1);
+  word-break: break-all;
+}
+.sd-scope .restart-detail .kv > b.warn{
+  color: var(--warn-text, #d98a2b);
+}
+.sd-scope .restart-detail .mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.sd-scope .restart-history{
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sd-scope .restart-history .hrow{
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.sd-scope .restart-history .hrow .mono{
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.sd-scope .restart-history .hrow .muted{
+  color: var(--text-dim-2);
+}
+.sd-scope .restart-history .hrow .ellip{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sd-scope .test-state{
+  max-width: 210px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  text-align: right;
+  overflow: hidden;
+}
+
+.sd-scope .test-state.ok{
+  color: var(--ok-text);
+}
+
+.sd-scope .test-state.fail{
+  color: var(--err-text);
+}
+
+.sd-scope .test-state.loading{
+  color: var(--warn-text);
+}
+
+.sd-scope .drawer-foot{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-deep);
+}
+
+.sd-scope .spacer{
+  flex: 1 1 auto;
+}
+
+/* ---------- 通道级推送开关 ---------- */
+.sd-scope .cam-push{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+.sd-scope .tag.mini{
+  height: 22px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+
+.sd-scope .tag.mini.master{
+  font-weight: 600;
+}
+
+.sd-scope .tag.mini.ch:disabled{
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.sd-scope .tag.mini.ch:disabled:hover{
+  border-color: var(--line);
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
+
+/* 通道级附加能力：与前面两个总开关之间加一条细分隔线 */
+.sd-scope .tag-sep{
+  width: 1px;
+  height: 14px;
+  margin: 0 2px;
+  background: var(--line);
+}
+
+/* 虚线 = 「这一路参与」的通道级开关，和实线的全局总开关在视觉上区分开 */
+.sd-scope .tag.mini.ext{
+  border-style: dashed;
+}
+
+.sd-scope .tag.mini.ext.on{
+  border-style: solid;
+}
+
+/* 通道开着但全局总开关还没开：只表示"预设参与"，用冷色和真正在跑的区分 */
+.sd-scope .tag.mini.ext.preset{
+  color: #9fb3cd;
+  border-color: #33415a;
+  background: #0e1522;
+}
+
+.sd-scope .tag.mini.ext:disabled{
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.sd-scope .tag.mini.ext:disabled:hover{
+  border-color: var(--line);
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
+
+/*
+ * 通道级「人脸命中」（推送收窄模式）：
+ *   与附加能力一样用虚/实线区分开关，但打开后用强调色 —— 提醒这是一条**限制型**开关，
+ *   不是"多开一项能力"，而是"把这一路的推送收窄到只剩命中"。
+ *   颜色只吃主题变量，三套主题零适配。
+ */
+.sd-scope .tag.mini.hit{
+  border-style: dashed;
+}
+
+.sd-scope .tag.mini.hit.on{
+  border-style: solid;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.sd-scope .tag.mini.hit:disabled{
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.sd-scope .tag.mini.hit:disabled:hover{
+  border-color: var(--line);
+  color: var(--text-dim);
+  background: var(--panel-2);
+}
+
+.sd-scope .cp-sep{
+  width: 1px;
+  height: 14px;
+  background: var(--line);
+  margin: 0 2px;
+}
+
+.sd-scope .cp-hint{
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
+/* ---------- 自定义档位（下拉 + 数字输入） ---------- */
+.sd-scope .num-field{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.sd-scope .num-field .field.mini.num{
+  width: 68px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 同时播放通道多选 ---------- */
+.sd-scope .block-head.spaced{
+  margin-top: 6px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--line);
+}
+
+.sd-scope .pick-grid{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.sd-scope .tag.mini.pick{
+  max-width: 100%;
+  gap: 5px;
+}
+
+.sd-scope .tag.mini.pick:disabled{
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.sd-scope .tag.mini.pick.on{
+  color: var(--panel-deep);
+  border-color: var(--accent);
+  background: var(--accent);
+  font-weight: 600;
+}
+
+.sd-scope .pick-no{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 4px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--tint) 8%, transparent);
+}
+
+.sd-scope .tag.mini.pick.on .pick-no{
+  color: var(--panel-deep);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.sd-scope .pick-name{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sd-scope .pick-ops{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ---------- 渠道勾选行 ---------- */
+.sd-scope .check-row{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.sd-scope .check{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* ---------- 分段按钮 ---------- */
+.sd-scope .seg-row{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- 配置方案列表 ---------- */
+.sd-scope .profile-list{
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.sd-scope .profile-item{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.sd-scope .profile-item.on{
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+  background: color-mix(in srgb, var(--ok) 7%, transparent);
+}
+
+.sd-scope .pi-main{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sd-scope .pi-main strong{
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sd-scope .pi-main em{
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-dim);
+}
+
+.sd-scope .pi-ops{
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sd-scope .empty-tip{
+  margin: 10px 0;
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+
+/* ---------- 外观主题 ---------- */
+.sd-scope .theme-row{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sd-scope .theme-btn{
+  flex: 0 0 auto;
+}
+
+/* 按钮里的小色卡：一眼看出每个主题长什么样 */
+.sd-scope .theme-btn .swatch{
+  width: 14px;
+  height: 14px;
+  border-radius: 5px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(127, 127, 127, 0.4);
+  /* 上半是界面底色、下半是强调色 */
+  background: linear-gradient(135deg, var(--sw-bg) 55%, var(--sw-accent) 55%);
+}
+
+.sd-scope .sw-liquid{
+  --sw-bg: #131c2b;
+  --sw-accent: #2f8bff;
+}
+
+.sd-scope .sw-dark{
+  --sw-bg: #000000;
+  --sw-accent: #3b8dff;
+}
+
+.sd-scope .sw-light{
+  --sw-bg: #f2f4f8;
+  --sw-accent: #1f6fe0;
+}
+
+.sd-scope .sw-auto{
+  /* 自动：左暗右亮，表达「跟随系统切换」 */
+  --sw-bg: #0b1119;
+  --sw-accent: #f2f4f8;
+}
+
+/* ================================================================== */
+/*        手机端独立版式：抽屉占满全屏 + 顶部分类条 + 单列表单        */
+/*        桌面端始终是「左导航 148px + 右内容」的宽屏形态，不受影响    */
+/* ================================================================== */
+@media (max-width: 640px) {
+  /* ---------- 1. 抽屉铺满整屏，去掉右侧抽屉的观感 ---------- */
+  .sd-scope .drawer{
+    width: 100%;
+    max-width: 100%;
+    border-left: none;
+  }
+
+  .sd-scope .drawer-head{
+    padding: calc(10px + var(--safe-top)) 14px 10px;
+  }
+
+  .sd-scope .drawer-head h2{
+    font-size: 16px;
+  }
+
+  .sd-scope .icon-btn{
+    width: 34px;
+    height: 34px;
+  }
+
+  /* ---------- 2. 左侧竖导航 → 顶部横向胶囊条（可横滑） ---------- */
+  .sd-scope .drawer-main{
+    flex-direction: column;
+  }
+
+  .sd-scope .tabs{
+    flex: 0 0 auto;
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .sd-scope .tabs::-webkit-scrollbar{
+    display: none;
+  }
+
+  .sd-scope .tab{
+    flex: 0 0 auto;
+    height: 34px;
+    padding: 0 13px;
+    gap: 6px;
+    border-radius: 999px;
+    font-size: 13px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+  }
+
+  .sd-scope .tab span{
+    flex: 0 0 auto;
+    overflow: visible;
+    text-overflow: clip;
+  }
+
+  .sd-scope .tab.on::before{
+    display: none;
+  }
+
+  .sd-scope .tab.on{
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  }
+
+  /* ---------- 3. 内容区铺满，纵向滚动（column 布局必须放开 min-height） ---------- */
+  .sd-scope .drawer-body{
+    padding: 14px 14px calc(18px + var(--safe-bottom));
+    gap: 18px;
+    min-height: 0;
+  }
+
+  /* ---------- 4. 表单行：够宽就并排，装不下就整块换行、控件占满 ---------- */
+  .sd-scope .opt{
+    padding: 12px 0;
+    gap: 9px 12px;
+  }
+
+  .sd-scope .opt:not(.col){
+    flex-wrap: wrap;
+  }
+
+  .sd-scope .opt:not(.col) > span:first-child{
+    flex: 1 1 190px;
+    min-width: 0;
+  }
+
+  /* 输入类控件：至少 170px，放不下就换行独占一行 */
+  .sd-scope .opt:not(.col) > .field, .sd-scope .opt:not(.col) > select, .sd-scope .opt:not(.col) > input, .sd-scope .opt:not(.col) > textarea, .sd-scope .opt:not(.col) > .cam-tags, .sd-scope .opt:not(.col) > .check-row, .sd-scope .opt:not(.col) > .seg-row, .sd-scope .opt:not(.col) > .range-row, .sd-scope .opt:not(.col) > .test-row{
+    flex: 1 1 170px;
+    width: auto;
+    min-width: 0;
+  }
+
+  .sd-scope .opt:not(.col) > .num-field{
+    flex: 1 1 200px;
+  }
+
+  /* 固定宽度的迷你输入框在手机上不再写死宽度 */
+  .sd-scope .field.mini, .sd-scope .field.mini.wide{
+    width: auto;
+    min-width: 0;
+  }
+
+  .sd-scope .num-field{
+    width: auto;
+    min-width: 0;
+  }
+
+  .sd-scope .num-field > .field.mini{
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .sd-scope .num-field > .field.mini.num{
+    flex: 0 0 72px;
+    width: 72px;
+  }
+
+  /* 开关独占一行的情况交给 flex 布局，保持单行即可 */
+  .sd-scope .opt:not(.col) > .switch{
+    align-self: center;
+    margin-left: auto;
+  }
+
+  /* ---------- 4b. 命中修正网格：手机上 3 列会把卡片压到 ~110px，
+                   图 + 信息 + 下拉 + 3 个按钮摆不下 → 退回自适应（≥150px 才成列） ---------- */
+  .sd-scope .hit-grid{
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+
+  /* 命中卡片的图略缩小，把宽度让给信息与按钮 */
+  .sd-scope .face-card.hit .hit-top img{
+    width: 52px;
+    height: 52px;
+  }
+
+  /* ---------- 5. 摄像头卡：名称输入框独占一行，按钮排一行 ---------- */
+  .sd-scope .cam-head{
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .sd-scope .cam-head .name-input{
+    flex: 1 1 100%;
+    order: 9;
+    margin-top: 2px;
+  }
+
+  .sd-scope .row-handle, .sd-scope .cam-head .index{
+    order: 1;
+  }
+
+  .sd-scope .cam-head .icon-btn{
+    order: 5;
+  }
+
+  .sd-scope .url-input{
+    font-size: 13px;
+  }
+
+  /* ---------- 6. 标签 / 按钮放大到手指可点 ---------- */
+  .sd-scope .tag{
+    height: 30px;
+  }
+
+  .sd-scope .tag.mini{
+    height: 30px;
+    padding: 0 10px;
+    font-size: 12px;
+    border-radius: 8px;
+  }
+
+  .sd-scope .tag.mini.pick{
+    height: 32px;
+  }
+
+  .sd-scope .cp-sep{
+    height: 18px;
+  }
+
+  .sd-scope .cp-hint{
+    display: none;
+  }
+
+  .sd-scope .check-row{
+    gap: 10px 16px;
+    padding: 11px 12px;
+  }
+
+  .sd-scope .check{
+    font-size: 13px;
+  }
+
+  /* ---------- 7. 其它横向排布的小块 ---------- */
+  .sd-scope .block-head{
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .sd-scope .layout-grid{
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .sd-scope .profile-item{
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .sd-scope .pi-ops{
+    margin-left: auto;
+  }
+
+  .sd-scope .seg-row{
+    flex-wrap: wrap;
+  }
+
+  .sd-scope .test-row{
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .sd-scope .test-state{
+    max-width: 100%;
+    text-align: left;
+  }
+
+  /* ---------- 8. 底部操作条：3 行 2 列 + 主按钮整行 ---------- */
+  .sd-scope .drawer-foot{
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 14px calc(10px + var(--safe-bottom));
+  }
+
+  .sd-scope .drawer-foot .spacer{
+    display: none;
+  }
+
+  .sd-scope .drawer-foot .btn{
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+  }
+
+  .sd-scope .drawer-foot .btn.primary{
+    flex: 1 1 100%;
+    order: 99;
+    height: 44px;
+    font-size: 15px;
+  }
+}
+
+/* ==================== 后端检测服务（headless） ==================== */
+.sd-scope .backend-meta{
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 12px;
+
+  b {
+    font-weight: 600;
+    margin-left: 2px;
+  }
+}
+
+.sd-scope .backend-cam{
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 12px;
+  width: 100%;
+}
+
+.sd-scope .backend-cam b{
+  font-weight: 500;
+}
+
+.sd-scope .ok-text{
+  color: var(--ok, #3b6d11);
+}
+
+.sd-scope .err-text{
+  color: var(--danger, #a32d2d);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+/* 状态哨兵「最近动作」一行 */
+.sd-scope .backend-note{
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.06);
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+/* ---------------- 人员流向（跨摄像头走向）配置 ---------------- */
+.sd-scope .flow-head{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px 0 8px;
+}
+.sd-scope .flow-head strong{
+  color: var(--text);
+  font-size: 13px;
+}
+.sd-scope .flow-card{
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 12px 6px;
+  margin-bottom: 12px;
+  background: rgba(127, 127, 127, 0.04);
+}
+.sd-scope .flow-card-head{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.sd-scope .flow-name{
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sd-scope .switch-wrap{
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.sd-scope .flow-card-head .icon-btn.danger{
+  flex: 0 0 auto;
+  font-size: 14px;
+  opacity: 0.65;
+}
+.sd-scope .flow-card-head .icon-btn.danger:hover{
+  opacity: 1;
+}
+.sd-scope .flow-route{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sd-scope .flow-end{
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sd-scope .flow-end-label{
+  font-size: 12px;
+  color: var(--text-soft);
+  opacity: 0.8;
+}
+.sd-scope .flow-arrow{
+  flex: 0 0 auto;
+  font-size: 20px;
+  color: var(--accent-text-strong);
+  align-self: center;
+  padding-top: 14px;
+}
+.sd-scope .flow-errors{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 8px;
+}
+.sd-scope .flow-err{
+  color: var(--danger, #a32d2d);
+  font-size: 12px;
+}
+.sd-scope .flow-ok{
+  color: var(--ok, #2e9e5b);
+  font-size: 12px;
+  margin: 4px 0 8px;
+}
+
+@media (max-width: 520px) {
+  .sd-scope .flow-route{
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .sd-scope .flow-arrow{
+    padding-top: 0;
+    transform: rotate(90deg);
+    align-self: center;
+  }
+}
