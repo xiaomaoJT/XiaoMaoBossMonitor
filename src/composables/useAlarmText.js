@@ -100,7 +100,23 @@ export function alarmBrief(r) {
 /** 通知标题里的类型短名（带人脸姓名时优先显示姓名） */
 export function alarmTitle(r) {
   if (r && r.type === 'face' && r.faceName) return r.faceName
+  /*
+   * 走向事件：用户在设置里给规则起了名，标题就直接显示这个名字 ——
+   * 收到推送时一眼看出是「哪条流向规则」触发，而不是一串摄像头·区域。
+   * 没起名时 flowName 退化为路线文本（emitFlowEvent 的口径），
+   * 与路线判等跳过，保持原来的类型短名「人员走向」。
+   */
+  if (r && r.type === 'flow' && r.flowName && r.flowName !== flowRouteText(r)) return r.flowName
   return alarmLabel(r && r.type)
+}
+
+/** 走向事件的路线文本（多跳 A→B→C）。alarmDetail / alarmTitle 共用一份，避免两处漂移。 */
+function flowRouteText(r) {
+  if (Array.isArray(r.flowPath) && r.flowPath.length) {
+    return r.flowPath.map((p) => `${p.camName || '?'}·${p.zoneName || '?'}`).join(' → ')
+  }
+  // 兼容早期事件（仅含 from/to）
+  return `${r.fromCamName || r.fromCam || '?'}·${r.fromZoneName || r.fromZone || '?'} → ${r.toCamName || r.toCam || '?'}·${r.toZoneName || r.toZone || '?'}`
 }
 
 /**
@@ -177,15 +193,15 @@ export function alarmDetail(r) {
       // 人员走向（跨摄像头，支持 A→B→C 多跳）：把「谁从哪去了哪、间隔多久」写进一行，
       // 比 type 原值更有信息量；名字/区域缺省时退化为「未知」以免空着。
       const who = r.faceName || r.name || '未知人员'
-      let route
-      if (Array.isArray(r.flowPath) && r.flowPath.length) {
-        route = r.flowPath.map((p) => `${p.camName || '?'}·${p.zoneName || '?'}`).join(' → ')
-      } else {
-        // 兼容早期事件（仅含 from/to）
-        route = `${r.fromCamName || r.fromCam || '?'}·${r.fromZoneName || r.fromZone || '?'} → ${r.toCamName || r.toCam || '?'}·${r.toZoneName || r.toZone || '?'}`
-      }
+      const route = flowRouteText(r)
       const span = r.spanSec != null ? `（间隔 ${r.spanSec} 秒）` : ''
-      return `人员走向（${who} 从 ${route}${span}）`
+      /*
+       * 用户在设置里给这条流向规则起的名字。有就加在最前面（【名字】），
+       * 与路线文本判等跳过 —— 没起名时 flowName 就等于路线文本
+       * （emitFlowEvent 的 `f.name || routeText` 口径），不重复写一遍。
+       */
+      const rule = r.flowName && r.flowName !== route ? `【${r.flowName}】` : ''
+      return `人员走向${rule}（${who} 从 ${route}${span}）`
     }
     case 'offline':
       return '通道异常'

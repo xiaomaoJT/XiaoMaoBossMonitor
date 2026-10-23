@@ -5636,19 +5636,19 @@ const allPendingFaces = computed(() =>
 )
 
 /**
- * 待录入排序：「按样本质量」优先（默认）—— 用户要在这堆抓拍里挑「哪张值得录进
- * 人脸库」，一张侧脸/糊脸录进去拉低的是整个名字的匹配（同人相似度被废样本摊薄，
- * 真人反而认不出来）。所以默认把分高的排前面，未评分（老行，采集时没拿到几何量）
- * 排最后 —— 「不知道」不该被摆在「知道很差」前面冒充好样本。
+ * 待录入排序：默认「按时间」—— 用户要在这堆抓拍里核对现场顺序（谁先谁后到），
+ * 时间线连续比「哪张画质好」更要紧；画质信息交给每张卡上的 ★/评分标签，
+ * 挑样本时用户自己会看，不需要默认把好样本顶到前面、把时间线打乱。
  *
- * 「按时间」保留旧行为（最近抓到的在前），给想按现场顺序核对的用户。
+ * 「按样本质量」可选切换：把分高的排前面、未评分（老行，采集时没拿到几何量）
+ * 垫底 —— 「不知道」不该被摆在「知道很差」前面冒充好样本。
  */
 const pendingSort = ref(
   (() => {
     try {
-      return localStorage.getItem('pendingSort') === 'time' ? 'time' : 'score'
+      return localStorage.getItem('pendingSort') === 'score' ? 'score' : 'time'
     } catch (e) {
-      return 'score'
+      return 'time'
     }
   })()
 )
@@ -6194,7 +6194,7 @@ function toggleEvent(channelKey, evKey) {
 }
 
 /**
- * 「关键事件单独提醒」的四类事件。
+ * 「关键事件单独提醒」的五类事件。
  * 与上面的 EVENT_GROUPS（报警类型分组）**不是一回事**：那是"哪些类型的报警要推"，
  * 这是"哪几类关键事件要额外单独提醒"。键与执行层（TG directPush.events /
  * 钉钉、企微 critical.events）严格一一对应。
@@ -6203,7 +6203,8 @@ const CRIT_EVENTS = [
   { key: 'silence', label: '静默开始/结束', desc: '免打扰时段开始与结束的状态提醒（各一条）' },
   { key: 'summary', label: '静默汇总', desc: '免打扰结束时，把本时段收存的报警汇总成一条' },
   { key: 'face', label: '在库人脸命中', desc: '识别到已录入（在库）的人脸时，带图单独提醒' },
-  { key: 'pending', label: '待录入满库', desc: '待录入人脸库达到预警 / 满库线时提醒处理' }
+  { key: 'pending', label: '待录入满库', desc: '待录入人脸库达到预警 / 满库线时提醒处理' },
+  { key: 'flow', label: '人员走向', desc: '匹配到跨摄像头走向（且该条流向开了「作为关键事件实时推送」）时，带图单独提醒' }
 ]
 
 /** 某渠道的「关键事件」子开关是否开启（缺省即开，与执行层同一语义 `!== false`） */
@@ -8189,12 +8190,13 @@ async function testTelegram() {
 
 /* ---------------- 关键事件单独提醒（私聊推送） ---------------- */
 
-/** 四类关键事件。key 与 useTelegram.directPushEventOn 的 kind 一一对应 */
+/** 五类关键事件。key 与 useTelegram.directPushEventOn 的 kind 一一对应 */
 const DIRECT_EVENT_OPTS = [
   { id: 'silence', label: '静默开始/结束', desc: '免打扰时段开始与结束的状态提醒（各一条）' },
   { id: 'summary', label: '静默汇总', desc: '免打扰结束时，把本时段收存的报警汇总成一条' },
   { id: 'face', label: '在库人脸命中', desc: '识别到人脸库里的人时，带图单独提醒' },
-  { id: 'pending', label: '待录入满库', desc: '未建档人脸攒满收集上限时，提醒及时处理（每个填满周期只提醒一次）' }
+  { id: 'pending', label: '待录入满库', desc: '未建档人脸攒满收集上限时，提醒及时处理（每个填满周期只提醒一次）' },
+  { id: 'flow', label: '人员走向', desc: '匹配到跨摄像头走向（且该条流向开了「作为关键事件实时推送」）时，带图单独提醒' }
 ]
 
 const newDirectId = ref('')

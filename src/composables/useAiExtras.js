@@ -144,7 +144,17 @@ function emitFlowEvent(engine, m, ctx, emit) {
   const person = (ctx.person && ctx.person !== 'unknown:') || ''
   const who = person || '未知人员'
   const routeText = route.map((r) => `${r.camName}·${r.zoneName}`).join(' → ')
-  const text = `🚶 ${who} 从 ${routeText}（间隔 ${m.spanSec} 秒）`
+  /*
+   * 用户在设置里给这条流向规则起的名字：起了名就织进正文最前面（【名字】）。
+   * text 是**唯一的原文**（后端终端日志的 label、事件列本文本、/flow 的
+   * 回退行都取它），推送正文则另外走 alarmDetail 的 flow 分支 ——
+   * 两边都会带上规则名，用户要求的「推送和日志都要能看出是哪条流向规则」。
+   * 没起名时保持原样，不塞空括号。
+   */
+  const ruleName = String(f.name || '').trim()
+  const text = ruleName
+    ? `🚶【${ruleName}】${who} 从 ${routeText}（间隔 ${m.spanSec} 秒）`
+    : `🚶 ${who} 从 ${routeText}（间隔 ${m.spanSec} 秒）`
   emit({
     type: 'flow',
     source: 'flow',

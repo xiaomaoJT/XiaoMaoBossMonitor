@@ -113,8 +113,9 @@ export function directPushRecipients(tgCfg) {
  * 这一类关键事件要不要单独提醒。
  *
  * ⚠️ 判据是 `!== false`（**缺省即开**）：与渠道「推送哪些事件」的分组勾选
- * 同一套语义 —— 老配置里没有 events 字段时按三类全开处理，而不是一个都不发。
+ * 同一套语义 —— 老配置里没有 events 字段时按五类全开处理，而不是一个都不发。
  * 写反了会让升级上来的用户默默收不到提醒。
+ * 五类 = silence / summary / face / pending / flow，与钉钉、企微 critical.events 逐键对齐。
  */
 export function directPushEventOn(tgCfg, kind) {
   const dp = (tgCfg && tgCfg.directPush) || null

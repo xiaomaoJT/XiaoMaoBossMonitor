@@ -1119,9 +1119,9 @@ export const HIDDEN_OPTIONS = {
       titlePrefix: '【监控报警】',
       /**
        * 哪几类关键事件要单独推。判据与 directPush.events 同语义（缺省即开），
-       * 老配置缺这个字段时按四类全开。
+       * 老配置缺这个字段时按五类全开。
        */
-      events: { silence: true, summary: true, face: true, pending: true },
+      events: { silence: true, summary: true, face: true, pending: true, flow: true },
       /**
        * 静默时段也允许推送（缺省 / 显式 true = 允许）。
        *
@@ -1264,11 +1264,11 @@ export const HIDDEN_OPTIONS = {
       /**
        * 哪几类关键事件要单独提醒。
        * 判据统一是「!== false」，即缺省视为开 —— 与渠道事件的勾选语义一致，
-       * 老配置里没有这个字段时也能按默认的四类生效。
-       * ⚠️ 必须与钉钉 / 企微 `critical.events` 的四个键（silence/summary/face/pending）
+       * 老配置里没有这个字段时也能按默认的五类生效。
+       * ⚠️ 必须与钉钉 / 企微 `critical.events` 的五个键（silence/summary/face/pending/flow）
        *    严格一致，否则三端"关键事件"会对不齐（曾漏掉 pending）。
        */
-      events: { silence: true, summary: true, face: true, pending: true },
+      events: { silence: true, summary: true, face: true, pending: true, flow: true },
       /**
        * 静默时段也允许推送（缺省 / 显式 true = 允许）。语义与钉钉 / 企微
        * critical.throughSilence **完全一致**（见那边的说明），缺省同样为开。
@@ -1380,7 +1380,7 @@ export const HIDDEN_OPTIONS = {
       /** 标题前缀（兼作机器人自定义关键词） */
       titlePrefix: '【监控报警】',
       /** 哪几类关键事件要单独推（缺省即开） */
-      events: { silence: true, summary: true, face: true, pending: true },
+      events: { silence: true, summary: true, face: true, pending: true, flow: true },
       /** 静默时段也允许推送（缺省/显式 true = 允许）。语义与钉钉 critical.throughSilence 一致 */
       throughSilence: true,
       /**
@@ -1902,7 +1902,11 @@ export function foldFaceBlocks(list, threshold) {
  * asCritical 由配置 flow.asCritical 经 useAiExtras.emitFlowEvent 透传：
  *   真 → 一旦匹配到走向，立刻实时单发（关键事件），静默时段也推（见 criticalSilentBlocked）；
  *   假 → 完全按普通事件走：实时发送 + 静默/日常汇总吸收。
- * 默认缺省为 true（计划 §8：走向本身是用户最关心的"人去了哪"，优先实时知会）。
+ * ⚠️ **缺省为 false**（defaultFlow / normalizeFlow 都是）：每条流向要在设置里
+ *    手动打开「作为关键事件实时推送」才急推。这里曾经写着"缺省 true"，
+ *    与实现相反 —— 用户照着打开开关却发现不收推送，就是被这句话误导的。
+ *    宁可改注释，不改缺省值：默认急推会让"只是看看人流向"的用户被每一条
+ *    走向私聊轰炸，那比漏推更难收拾。
  */
 export function isFlowCritical(rec) {
   return isFlowEvent(rec) && !!(rec && rec.asCritical)

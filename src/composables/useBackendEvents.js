@@ -99,6 +99,12 @@ export function backendEventToPayload(ev) {
     backendKey: ev.key || '',
     /** 人员走向：起点出场截图与各节点（有序）截图，详情页渲染「流向轨迹」多图块用 */
     departureShot: ev.departureShot || '',
+    /*
+     * 流向规则名（用户在设置里给这条 A→B 走向起的名字）。
+     * 不映射的话，后端模式的事件面板 / 通知卡片走 alarmDetail 时拿不到名字，
+     * 「起了名却只在推送里露一面」—— 面板列表与详情也该显示是哪条规则。
+     */
+    flowName: ev.flowName || '',
     flowShots: Array.isArray(ev.flowShots) ? ev.flowShots : [],
     /**
      * 各节点整帧原图（与 flowShots 同长同序，'' = 该节点没存上原图）。

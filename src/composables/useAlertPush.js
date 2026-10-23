@@ -46,6 +46,7 @@ import {
   isWallAlignedInterval,
   isFaceHit,
   isFlowCritical,
+  isFlowEvent,
   matchSilentSlotAt,
   parseSilentSlots,
   slotBoundaryAt,
@@ -2595,6 +2596,17 @@ export function useAlertPush(options, hooks = {}) {
   /** 入口：处理一条报警事件 */
   async function handleAlarm(record) {
     const now = Date.now()
+    /*
+     * 「在库人脸命中」路由的判据。⚠️ 必须**排除走向事件**：
+     * emitFlowEvent 在认出人时会带上 faceName（谁是这条走向的主角），
+     * 而 isFaceHit 的判据就是 `!!faceName` —— 不排除的话，带姓名的走向
+     * 会被当成人脸命中：普通发送/排队被清空（下方第一处），
+     * 而「人脸命中」急推只认 type==='face'（走向是 'flow'）不补发，
+     * 于是这条走向既不普推、也不急推、也不进汇总 —— 整个黑洞。
+     * 匿名走向（无 faceName）本来不受影响，有姓名的走向走本修复放行。
+     * isFaceHit 本身是纯函数（统计 / /hits 三处共用），不改它，只在这里派生。
+     */
+    const faceHitRoute = isFaceHit(record) && !isFlowEvent(record)
     const decisions = CHANNEL_DEFS.map((d) => ({ id: d.id, ...checkChannel(d.id, record, now) }))
     let send = decisions.filter((d) => d.ok).map((d) => d.id)
     let queue = decisions.filter((d) => d.overflow && readCfg(d.id).overflowMode === 'merge')
@@ -2603,8 +2615,10 @@ export function useAlertPush(options, hooks = {}) {
      * 已录入人脸（在库命中）：只走关键的「在库人脸命中」急推（见下方 pushDirectToUsers），
      * 不发普通 face 事件、也不进静默 / 日常汇总 —— 否则同一条既进汇总又急推，重复且违背
      * "关键事件不吸收"的设计。陌生人脸（无 faceName）仍走普通 face 事件正常推送 / 汇总。
+     * ⚠️ 走向事件即使带 faceName 也不走这里（faceHitRoute 已排除）：否则被清空后
+     *    没有任何一条推送发得出去（见 faceHitRoute 定义处的说明）。
      */
-    if (isFaceHit(record)) {
+    if (faceHitRoute) {
       send = []
       queue = []
     }
@@ -2613,7 +2627,8 @@ export function useAlertPush(options, hooks = {}) {
      * 人员走向（跨摄像头）关键事件：source==='flow' 且 asCritical 为真时，
      * 与在库人脸命中等价 —— 立刻实时单发、不被静默 / 日常汇总吸收。
      * 判据统一走 isFlowCritical（defaults.js），与事件面板 / 卡片展示共用同一份。
-     * asCritical 缺省 true（配置项 flow.asCritical），即"人去了哪"优先实时知会。
+     * ⚠️ asCritical **缺省 false**（配置项 flow.asCritical）：每条流向要在设置里
+     *    手动打开「作为关键事件实时推送」才走这里；没开的走向按普通事件照常推送。
      */
     if (isFlowCritical(record)) {
       send = []
@@ -2653,7 +2668,7 @@ export function useAlertPush(options, hooks = {}) {
      * 它只影响这个集合，看起来却像在实现"汇总归整体"，很能误导人。
      */
     let buffered = false
-    if (!isFaceHit(record) && !isFlowCritical(record)) {
+    if (!faceHitRoute && !isFlowCritical(record)) {
       const suppressIds = [...byGlobal, ...byCam]
       if (suppressIds.length) {
         send = send.filter((id) => !suppressIds.includes(id))
@@ -2702,8 +2717,8 @@ export function useAlertPush(options, hooks = {}) {
     let digested = false
     // 已录入人脸（在库命中）：send/queue 已在上方清空（改走关键事件急推），但仍要进日常汇总
     // 缓冲 —— 用户要在汇总里单独看在库人脸命中（是否命中 / 次数 / 明细），所以这里用
-    // isFaceHit 放行，别被「没有实时渠道可摘」挡在门外（与全局免打扰汇总一致：那里也不剔人脸）。
-    if (send.length || queue.length || isFaceHit(record) || isFlowCritical(record)) {
+    // faceHitRoute 放行，别被「没有实时渠道可摘」挡在门外（与全局免打扰汇总一致：那里也不剔人脸）。
+    if (send.length || queue.length || faceHitRoute || isFlowCritical(record)) {
       const dCam = camById(record.id)
       const dState = dCam ? digestStateOf(dCam, now) : { active: false }
       if (dState.active) {
@@ -2711,7 +2726,7 @@ export function useAlertPush(options, hooks = {}) {
         const hitQueue = queue.filter((id) => dState.channels.includes(id))
         // 在库人脸 / 走向关键事件：即便 hitSend/hitQueue 为空（实时渠道已在上游清空），也要落缓冲，
         // 否则同一条既进了关键事件急推、又漏掉日常汇总的命中统计，与"汇总单独强调命中"矛盾。
-        if (hitSend.length || hitQueue.length || isFaceHit(record) || isFlowCritical(record)) {
+        if (hitSend.length || hitQueue.length || faceHitRoute || isFlowCritical(record)) {
           /*
            * 无论是否「在库人脸命中」，都收进日常汇总缓冲 —— 用户要的正是
            * "汇总里单独强调是否命中在库人脸、命中次数、命中明细"，所以这条事件
@@ -2726,7 +2741,7 @@ export function useAlertPush(options, hooks = {}) {
           const dchans = digestMasterOn(now) ? mergedDigestChannels(now) : dState.channels
           // 仅对**非在库人脸 / 非走向关键**事件从实时 send/queue 里摘（避免与日常汇总双发）；
           // 在库人脸 / 走向关键仍按关键事件单独提醒，日常汇总只做"记录"，不重复抑制其实时。
-          if (!isFaceHit(record) && !isFlowCritical(record)) {
+          if (!faceHitRoute && !isFlowCritical(record)) {
             send = send.filter((id) => !dchans.includes(id))
             queue = queue.filter((id) => !dchans.includes(id))
           }
@@ -3481,13 +3496,16 @@ export function useAlertPush(options, hooks = {}) {
      * 于是出现「开了日常静默、人形补图还在实时刷」。
      * 与 handleAlarm 同一判据：digest 激活 且 该渠道在 digest.channels 里 且 非人脸命中。
      * 命中在库人脸（关键事件，实时单发）时补图也跟着实时，保持一致。
+     * ⚠️ 与 handleAlarm 的 faceHitRoute 同理：补拍匹配是按「同通道 + 时间最近」找原报警的，
+     *    走向事件也可能被匹配上（它带 faceName）—— 那种记录不是人脸命中，
+     *    该按普通事件进 digest，别绕过汇总实时推。
      */
     const dCam = camById(record.id)
     const dState = dCam ? digestStateOf(dCam, now) : { active: false, channels: [] }
     const liveIds = []
     const digestIds = []
     for (const id of ids) {
-      if (dState.active && dState.channels.includes(id) && !isFaceHit(record)) {
+      if (dState.active && dState.channels.includes(id) && !(isFaceHit(record) && !isFlowEvent(record))) {
         digestIds.push(id)
       } else {
         liveIds.push(id)
