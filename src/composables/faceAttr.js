@@ -17,8 +17,31 @@
  *    分桶至少能回答"来的人大概在哪个年龄段"。
  */
 
-/** 概率多少算「命中」这个标签。50% = 半数以上的把握，低于它的判定不显示，避免抖动误导 */
+/** 概率多少算「命中」这个标签。50% = 半数以上的把握，低于它的判定不显示，避免抖动误导。
+ *  这是出厂默认；实际运行时由 setAttrOnSource 注入的可调阈值覆盖（见下方）。 */
 export const FACE_ATTR_ON = 50
+
+/**
+ * 运行期把"属性标签阈值从哪读"注入进来（前后端各注入一次）：
+ *   · 浏览器：useAlertPush 工厂里 setAttrOnSource(() => options.face.attribThreshold)
+ *   · 无头后端：headless-monitor 启动处注入
+ * 不注入时退回 FACE_ATTR_ON 常量（=50，等价于旧行为）。
+ */
+let _attrOnGetter = null
+export function setAttrOnSource(getter) {
+  _attrOnGetter = typeof getter === 'function' ? getter : null
+}
+function attrOnNow() {
+  if (_attrOnGetter) {
+    try {
+      const v = Number(_attrOnGetter())
+      if (Number.isFinite(v) && v > 0 && v <= 100) return v
+    } catch (_) {
+      /* 忽略 */
+    }
+  }
+  return FACE_ATTR_ON
+}
 
 /**
  * 属性标签表（顺序固定：展示与统计都按这个顺序，避免两处排版不一致）。
@@ -45,19 +68,20 @@ export const FACE_ATTR_TAGS = [
 export function faceAttrTags(attr) {
   const a = attr && typeof attr === 'object' ? attr : null
   if (!a) return []
-  const on = (v) => {
+  const on = attrOnNow()
+  const hit = (v) => {
     const n = Number(v)
-    return Number.isFinite(n) && n >= FACE_ATTR_ON
+    return Number.isFinite(n) && n >= on
   }
   const out = []
-  if (on(a.mask)) out.push('mask')
-  if (on(a.sunglasses)) out.push('sunglasses')
-  else if (on(a.glasses)) out.push('glasses')
+  if (hit(a.mask)) out.push('mask')
+  if (hit(a.sunglasses)) out.push('sunglasses')
+  else if (hit(a.glasses)) out.push('glasses')
   // 任一只眼低于阈值就判闭眼（单眼眨也算，宁可多说）；缺字段不算闭眼
   const closed = (v) => {
     if (v == null) return false
     const n = Number(v)
-    return Number.isFinite(n) && n < FACE_ATTR_ON
+    return Number.isFinite(n) && n < on
   }
   if (closed(a.leftEyeOpen) || closed(a.rightEyeOpen)) out.push('eyesClosed')
   return out
@@ -102,6 +126,26 @@ export function ageBucket(age) {
 }
 
 /**
+ * 年龄 → 一行「粗标签」文案。模型对儿童估高非常严重（实测 8 岁估成 30+），
+ * 所以**绝不**给精确岁数，只给分桶：'18岁以下' / '18-29岁' / '30-44岁' /
+ * '45-59岁' / '60岁以上'。没算过（null / -1）或非法返回 ''。
+ * @param {number|null|undefined} age
+ * @returns {string}
+ */
+export function ageBucketLabel(age) {
+  const id = ageBucket(age)
+  if (id === 'unknown') return ''
+  const MAP = {
+    u18: '18岁以下',
+    '18-29': '18-29岁',
+    '30-44': '30-44岁',
+    '45-59': '45-59岁',
+    '60+': '60岁以上'
+  }
+  return MAP[id] || ''
+}
+
+/**
  * 属性 → 一行人类可读文本（设置页徽标 / 推送正文 / 远程明细共用）。
  *
  * 只输出**有把握**的部分：性别只认 male/female（''/'unknown' 不出字），
@@ -110,15 +154,15 @@ export function ageBucket(age) {
  *
  * @param {{gender?:string, age?:number|null, attr?:object|null}} f
  * @param {string} [sep] 分隔符（远程明细用 ' · '，一行内已用 · 时可传 '/'）
- * @returns {string} 例如 '男 · 32岁 · 口罩 · 闭眼'
+ * @returns {string} 例如 '男 · 30-44岁 · 口罩 · 闭眼'（年龄只给粗分桶，见 ageBucketLabel）
  */
 export function faceAttrText(f, sep = ' · ') {
   if (!f) return ''
   const parts = []
   if (f.gender === 'male') parts.push('男')
   else if (f.gender === 'female') parts.push('女')
-  const age = Number(f.age)
-  if (f.age != null && Number.isFinite(age) && age >= 0) parts.push(`${age}岁`)
+  const ageLabel = ageBucketLabel(f.age)
+  if (ageLabel) parts.push(ageLabel)
   faceAttrTags(f.attr).forEach((id) => parts.push(faceAttrLabel(id)))
   return parts.join(sep)
 }

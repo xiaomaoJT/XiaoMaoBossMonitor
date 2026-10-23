@@ -50,9 +50,11 @@ import {
   flowRuleLabels,
   matchSilentSlotAt,
   parseSilentSlots,
+  setCalendarSource,
   slotBoundaryAt,
   takenOverSummaryChannels
 } from '../config/defaults.js'
+import { setAttrOnSource } from './faceAttr.js'
 import {
   buildTelegramCaption,
   buildTelegramMergedText,
@@ -117,6 +119,19 @@ export function useAlertPush(options, hooks = {}) {
 
   /** 每次创建实例时按当前 options 生成（read 是闭包，取的时候仍读实时配置） */
   const CHANNEL_DEFS = makeChannelDefs(options)
+
+  /*
+   * 注入「日历源」与「属性标签阈值源」：
+   *   - 日历（options.calendar）供静默时段按工作日 / 放假日分流；
+   *   - 属性阈值（options.face.attribThreshold）供 50% 标签阈值可调。
+   * 前后端共用同一份口径；用闭包读实时配置，所以设置页改了立刻生效。
+   * 无头后端也走这个工厂（notify.mjs 复用同一套推送逻辑），所以这里注入一次即可覆盖两端。
+   */
+  setCalendarSource(() => (options && options.calendar) || null)
+  setAttrOnSource(() => {
+    const f = (options && options.face) || {}
+    return f.attribThreshold
+  })
 
   /**
    * 取当前通道列表。

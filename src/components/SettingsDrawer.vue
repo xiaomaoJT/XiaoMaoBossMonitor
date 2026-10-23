@@ -350,6 +350,9 @@
                       <input class="field mini" type="time" v-model="s.start" @mousedown="openPicker" />
                       <span class="tilde">~</span>
                       <input class="field mini" type="time" v-model="s.end" @mousedown="openPicker" />
+                      <select class="field mini scope" v-model="s.scope" title="作用域：这个时段在哪些日子生效">
+                        <option v-for="sc in SLOT_SCOPES" :key="sc.id" :value="sc.id">{{ sc.label }}</option>
+                      </select>
                       <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
                       <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
                       <button class="btn tiny danger slot-del" title="删除这个时段" @click="removeCamSilSlot(cam, si)">
@@ -1064,6 +1067,9 @@
                   <input class="field mini" type="time" v-model="s.start" @mousedown="openPicker" />
                   <span class="tilde">~</span>
                   <input class="field mini" type="time" v-model="s.end" @mousedown="openPicker" />
+                  <select class="field mini scope" v-model="s.scope" title="作用域：这个时段在哪些日子生效">
+                    <option v-for="sc in SLOT_SCOPES" :key="sc.id" :value="sc.id">{{ sc.label }}</option>
+                  </select>
                   <span class="slot-tag invalid" v-if="s.start === s.end">起止相同，不生效</span>
                   <span class="slot-tag cross" v-else-if="s.end < s.start">跨零点</span>
                   <button
@@ -1099,6 +1105,82 @@
                 在「Telegram 推送 → 远程控制 → 可用指令」里单独配 —— 两者互不影响，
                 默认值也不一样（那边默认只静默钉钉 + 企微）。
               </p>
+
+              <!-- ---------- 工作日历（决定工作日 / 放假日，供时段作用域分流） ---------- -->
+              <div class="sub-label mt">工作日历（时段作用域按「工作日 / 放假日」分流）</div>
+              <p class="hint tight">
+                给上面的每个时段选「仅工作日 / 仅放假日」，就能让工作日和休息日用不同的免打扰时段
+                （例如工作日夜里静默、周末全天静默）。放假日 = 周末 + 法定假日；调休补班日算工作日。
+              </p>
+              <div class="cal-block">
+                <div class="cal-row">
+                  <span class="cal-k">周模式</span>
+                  <div class="seg">
+                    <button
+                      v-for="wm in WEEK_MODES"
+                      :key="wm.id"
+                      class="seg-btn"
+                      :class="{ on: cal.weekMode === wm.id }"
+                      @click="cal.weekMode = wm.id"
+                    >{{ wm.label }}</button>
+                  </div>
+                </div>
+
+                <div class="cal-row" v-if="cal.weekMode === 'custom'">
+                  <span class="cal-k">自定义休息日</span>
+                  <div class="ch-pick">
+                    <label class="chip" v-for="d in WEEKDAYS" :key="d.id" :class="{ on: cal.customRestDays.includes(d.id) }">
+                      <input type="checkbox" :value="d.id" v-model="cal.customRestDays" /> {{ d.label }}
+                    </label>
+                  </div>
+                </div>
+
+                <div class="cal-row" v-if="cal.weekMode === 'alternate'">
+                  <span class="cal-k">大小周锚点</span>
+                  <input class="field mini" type="date" v-model="cal.alternateAnchor" />
+                  <span class="muted">该周（含周一）为大周（双休），之后单双周交替</span>
+                </div>
+
+                <div class="cal-row">
+                  <span class="cal-k">法定假日</span>
+                  <div class="date-edit">
+                    <div class="date-add">
+                      <input class="field mini" type="date" v-model="holidayInput" />
+                      <button class="btn tiny" @click="addHoliday">+ 加入</button>
+                    </div>
+                    <div class="date-chips">
+                      <span class="d-chip" v-for="(d, i) in cal.holidays" :key="d">
+                        {{ d }}<button class="d-x" @click="removeHoliday(i)">×</button>
+                      </span>
+                      <span class="muted" v-if="!cal.holidays.length">未配置（仅按周模式判断）</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="cal-row">
+                  <span class="cal-k">调休补班</span>
+                  <div class="date-edit">
+                    <div class="date-add">
+                      <input class="field mini" type="date" v-model="makeupInput" />
+                      <button class="btn tiny" @click="addMakeup">+ 加入</button>
+                    </div>
+                    <div class="date-chips">
+                      <span class="d-chip" v-for="(d, i) in cal.makeups" :key="d">
+                        {{ d }}<button class="d-x" @click="removeMakeup(i)">×</button>
+                      </span>
+                      <span class="muted" v-if="!cal.makeups.length">未配置</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="cal-row today">
+                  <span class="cal-k">今天</span>
+                  <span class="cal-today" :class="todayDayType.type">
+                    {{ todayDayType.label }}
+                  </span>
+                  <span class="muted">（用于预览时段作用域是否会命中今天）</span>
+                </div>
+              </div>
 
               <!-- 免打扰「开始 / 结束」提醒推送（preNotify，默认开） -->
               <div class="opt pre-notify">
@@ -1656,6 +1738,17 @@
                 <em>face_attrib_net 模型（43MB 外部权重，每帧一次 128×128 推理）。不看这类标签就关掉，省一次推理与 43MB 内存</em>
               </span>
               <span class="switch" :class="{ on: opts.face.attrib !== false }" @click="opts.face.attrib = opts.face.attrib === false"></span>
+            </label>
+
+            <label class="opt">
+              <span>
+                <strong>属性标签阈值</strong>
+                <em>口罩 / 眼镜 / 墨镜 / 闭眼这些标签，模型给的概率高于它才判定「有」（%）。默认 50；调低更易判定、调高更保守。前后端共用同一份</em>
+              </span>
+              <div class="test-row">
+                <input class="field mini" type="number" min="10" max="90" step="5" v-model.number="opts.face.attribThreshold" />
+                <span class="unit">%</span>
+              </div>
             </label>
 
             <div class="opt">
@@ -4509,6 +4602,11 @@ import {
   digestCfgOf,
   digestIntervalLabel,
   silentYieldSlots,
+  dayTypeOf,
+  WEEK_MODES,
+  SLOT_SCOPES,
+  matchSilentSlotAt,
+  parseSilentSlots,
   HIDDEN_PASSCODE_HASH,
   syncChannelCameras,
   defaultFlow,
@@ -5182,21 +5280,66 @@ onUnmounted(() => {
 })
 
 const CH_LABELS = { ding: '钉钉', wecom: '企业微信', tg: 'TG' }
+
+/**
+ * 工作日历：保证 opts.calendar 字段齐全（老存档可能没有），之后直接读写 opts.calendar。
+ * 与静默时段的升级 watch 同理，放在这里就地补，避免渲染期写状态。
+ */
+watch(
+  () => opts.calendar,
+  (c) => {
+    if (!c || typeof c !== 'object') {
+      opts.calendar = { weekMode: 'double', customRestDays: [0, 6], alternateAnchor: '2026-01-05', holidays: [], makeups: [] }
+      return
+    }
+    if (!Array.isArray(c.holidays)) c.holidays = []
+    if (!Array.isArray(c.makeups)) c.makeups = []
+    if (!Array.isArray(c.customRestDays)) c.customRestDays = [0, 6]
+    if (!WEEK_MODES.some((w) => w.id === c.weekMode)) c.weekMode = 'double'
+    if (typeof c.alternateAnchor !== 'string' || !c.alternateAnchor) c.alternateAnchor = '2026-01-05'
+  },
+  { immediate: true }
+)
+const cal = computed(() => opts.calendar)
+const WEEKDAYS = [
+  { id: 0, label: '周日' }, { id: 1, label: '周一' }, { id: 2, label: '周二' },
+  { id: 3, label: '周三' }, { id: 4, label: '周四' }, { id: 5, label: '周五' }, { id: 6, label: '周六' }
+]
+const holidayInput = ref('')
+const makeupInput = ref('')
+function _isIsoDate(v) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(v || '')
+}
+function addHoliday() {
+  const v = (holidayInput.value || '').trim()
+  if (!_isIsoDate(v) || cal.value.holidays.includes(v)) return
+  cal.value.holidays.push(v)
+  holidayInput.value = ''
+}
+function removeHoliday(i) {
+  cal.value.holidays.splice(i, 1)
+}
+function addMakeup() {
+  const v = (makeupInput.value || '').trim()
+  if (!_isIsoDate(v) || cal.value.makeups.includes(v)) return
+  cal.value.makeups.push(v)
+  makeupInput.value = ''
+}
+function removeMakeup(i) {
+  cal.value.makeups.splice(i, 1)
+}
+/** 今天的工作日 / 放假日类型（含原因），用于设置页预览 */
+const todayDayType = computed(() => {
+  const dt = dayTypeOf(new Date(), cal.value)
+  const LABEL = { weekday: '工作日', weekend: '周末', holiday: '法定假日', makeup: '调休补班（上班）' }
+  return { type: dt.type, label: LABEL[dt.reason] || dt.type }
+})
+
 const silentActiveNow = computed(() => {
   const c = opts.silent
   if (!c || !c.enabled) return false
-  const toMin = (s) => {
-    const [h, m] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
-    return h * 60 + m
-  }
-  const m = new Date(nowTs.value).getHours() * 60 + new Date(nowTs.value).getMinutes()
-  // 多时段（item 114）：任意一个命中即算静默中
-  return slotsOf.value.some((s) => {
-    const a = toMin(s.start)
-    const b = toMin(s.end)
-    if (a === b) return false
-    return a < b ? m >= a && m < b : m >= a || m < b
-  })
+  // 用与引擎同源的 matchSilentSlotAt：含跨零点 + 多时段 + 作用域（工作日/放假日）过滤
+  return !!matchSilentSlotAt(parseSilentSlots(c), nowTs.value, cal.value)
 })
 /**
  * 「运行设备」悬浮说明（item 107）。
@@ -5228,7 +5371,8 @@ watch(
       s.slots = [
         {
           start: s.start != null ? String(s.start) : '19:00',
-          end: s.end != null ? String(s.end) : '08:00'
+          end: s.end != null ? String(s.end) : '08:00',
+          scope: 'all'
         }
       ]
     }
@@ -5298,7 +5442,11 @@ const revealed = reactive({
 /** 把 slots 写回配置；老字段 start/end 同步为首个时段，兼容旧版本读取 */
 function persistSlots(list) {
   if (!opts.silent) opts.silent = {}
-  opts.silent.slots = list.map((s) => ({ start: s.start, end: s.end }))
+  opts.silent.slots = list.map((s) => ({
+    start: s.start,
+    end: s.end,
+    scope: s.scope === 'workdays' || s.scope === 'restdays' ? s.scope : 'all'
+  }))
   const first = opts.silent.slots[0]
   if (first) {
     opts.silent.start = first.start
@@ -5309,7 +5457,7 @@ function persistSlots(list) {
 function addSlot() {
   const list = [...slotsOf.value]
   // 新时段默认给一个明显不同的区间（午休 12:00~13:00），避免和已有时段重叠
-  list.push({ start: '12:00', end: '13:00' })
+  list.push({ start: '12:00', end: '13:00', scope: 'all' })
   persistSlots(list)
 }
 
@@ -5323,64 +5471,42 @@ function removeSlot(i) {
 const activeSlotLabel = computed(() => {
   const c = opts.silent
   if (!c || !c.enabled) return ''
-  const now = Date.now()
-  const d = new Date(now)
-  const m = d.getHours() * 60 + d.getMinutes()
-  const toMin = (s) => {
-    const [h, mm] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
-    return h * 60 + mm
-  }
-  // 与 useAlertPush.matchSlot 同一套判定（含跨零点）
-  const hit = slotsOf.value.find((s) => {
-    const a = toMin(s.start)
-    const b = toMin(s.end)
-    if (a === b) return false
-    return a < b ? m >= a && m < b : m >= a || m < b
-  })
+  // 与引擎同源：含跨零点 + 作用域（工作日/放假日）过滤
+  const hit = matchSilentSlotAt(parseSilentSlots(c), Date.now(), cal.value)
   if (!hit) return ''
-  const cross = hit.end < hit.start ? '（跨零点）' : ''
-  return `${hit.start} ~ ${hit.end}${cross}`
+  const p2 = (n) => String(n).padStart(2, '0')
+  const fmt = (ms) => {
+    const x = new Date(ms)
+    return `${p2(x.getHours())}:${p2(x.getMinutes())}`
+  }
+  return `${fmt(hit.startMs)} ~ ${hit.crossDay ? '次日 ' : ''}${fmt(hit.endMs)}`
 })
 
 const silentStatusText = computed(() => {
   const c = opts.silent
   if (!c || !c.enabled) return '未开启'
   const ch = (c.channels || []).map((id) => CH_LABELS[id] || id)
-  // 多时段（item 114）：把所有时段都列出来，别只显示第一个
+  // 把所有时段都列出来，别只显示第一个
   const slots = slotsOf.value
   const slotsLabel = slots.length ? slots.map((s) => `${s.start}~${s.end}`).join('、') : '无'
   const base = `静默渠道：${ch.length ? ch.join(' / ') : '无'}（${slotsLabel}）`
   if (!silentActiveNow.value) return `未进入静默 · ${base}`
 
   /*
-   * 静默中：算「距离最近那个结束点还有多久」。
-   * 多个时段命中时取最晚的结束（免打扰按最宽窗口算），这里必须和
-   * useAlertPush.matchSlot 的口径一致，否则显示的剩余时间会跟实际推送时刻对不上。
+   * 静默中：算「距离结束点还有多久」。
+   * 与引擎同源（matchSilentSlotAt，含跨零点 + 作用域过滤 + 取最晚结束），
+   * 否则显示的剩余时间会跟实际推送时刻对不上。
    */
-  const toMin = (s) => {
-    const [h, m] = String(s || '0:0').split(':').map((n) => Number(n) || 0)
-    return h * 60 + m
-  }
-  const m = new Date(nowTs.value).getHours() * 60 + new Date(nowTs.value).getMinutes()
-  let endMin = null
-  slots.forEach((s) => {
-    const a = toMin(s.start)
-    const b = toMin(s.end)
-    if (a === b) return
-    const hit = a < b ? m >= a && m < b : m >= a || m < b
-    if (!hit) return
-    // 跨零点且当前在"结束前"那段时，实际结束时刻是明天的 end
-    const cand = b <= m && m < a ? b + 1440 : b
-    if (endMin === null || cand > endMin) endMin = cand
-  })
-  if (endMin === null) return `静默中 · ${base}`
-  const diff = Math.max(0, endMin - m)
-  const hh = Math.floor(diff / 60)
-  const mm = diff % 60
+  const hit = matchSilentSlotAt(parseSilentSlots(c), nowTs.value, cal.value)
+  if (!hit) return `静默中 · ${base}`
+  const leftMs = Math.max(0, hit.endMs - nowTs.value)
+  const diffMin = Math.round(leftMs / 60000)
+  const hh = Math.floor(diffMin / 60)
+  const mm = diffMin % 60
   const dur = hh ? `${hh} 小时 ${mm} 分` : `${mm} 分`
-  // 结束时刻可能落在次日，标出来更清楚
   const p2 = (n) => String(n).padStart(2, '0')
-  const endText = endMin >= 1440 ? `次日 ${p2(endMin - 1440)}` : p2(endMin % 1440)
+  const x = new Date(hit.endMs)
+  const endText = `${hit.crossDay ? '次日 ' : ''}${p2(x.getHours())}:${p2(x.getMinutes())}`
   return `静默中 · 将于 ${endText} 自动推送结束提醒 + 汇总（约 ${dur} 后）· ${base}`
 })
 function flushSilentNow() {
@@ -8068,7 +8194,7 @@ function toggleCamSilent(cam) {
   const s = ensureCamSil(cam)
   s.enabled = !s.enabled
   // 开启时补一个默认时段：开了却没有任何时段，看起来会像"没生效"
-  if (s.enabled && !s.slots.length) s.slots.push({ start: '19:00', end: '08:00' })
+  if (s.enabled && !s.slots.length) s.slots.push({ start: '19:00', end: '08:00', scope: 'all' })
 }
 
 function toggleCamSilChannel(cam, ch) {
@@ -8082,7 +8208,7 @@ function toggleCamSilChannel(cam, ch) {
 }
 
 function addCamSilSlot(cam) {
-  ensureCamSil(cam).slots.push({ start: '12:00', end: '13:00' })
+  ensureCamSil(cam).slots.push({ start: '12:00', end: '13:00', scope: 'all' })
 }
 function removeCamSilSlot(cam, i) {
   ensureCamSil(cam).slots.splice(i, 1)
@@ -11060,6 +11186,110 @@ function loadHidden() {
   color: var(--warn-text);
   border-color: color-mix(in srgb, var(--warn) 30%, transparent);
   background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+/* ---------- 工作日历（时段作用域分流） ---------- */
+.cal-block {
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-soft) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cal-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cal-k {
+  flex: 0 0 64px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 28px;
+  text-align: right;
+}
+.cal-row.today .cal-k {
+  line-height: 24px;
+}
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.seg-btn {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.seg-btn.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-text);
+}
+.date-edit {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+.date-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.date-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.d-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 2px 4px 2px 7px;
+  font-size: 12px;
+  background: var(--bg);
+}
+.d-x {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.d-x:hover {
+  color: var(--err-text);
+}
+.cal-today {
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+.cal-today.workday {
+  color: var(--text);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.cal-today.restday {
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.field.mini.scope {
+  width: auto;
+  min-width: 92px;
+  padding: 3px 6px;
 }
 
 /* 起止相同 = 这个时段永远不会命中，必须显眼地警示 */

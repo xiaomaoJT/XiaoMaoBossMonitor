@@ -356,9 +356,12 @@ export function faceMaxFaces(c) {
  */
 export function faceAttrConf(face) {
   const c = face || {}
+  const thr = Number(c.attribThreshold)
   return {
     genderAge: c.genderAge !== false,
-    attrib: c.attrib !== false
+    attrib: c.attrib !== false,
+    /** 属性标签阈值（概率百分比），默认 50%。低于它的判定不显示，避免抖动 */
+    attribThreshold: Number.isFinite(thr) && thr > 0 && thr <= 100 ? thr : 50
   }
 }
 
@@ -655,6 +658,12 @@ export const HIDDEN_OPTIONS = {
      */
     genderAge: true,
     attrib: true,
+    /**
+     * 属性标签阈值（概率百分比，0~100）：口罩 / 眼镜 / 墨镜 / 闭眼这些标签，
+     * 模型给的概率高于它才判定"有"。默认 50%（半数把握）。可在设置页调整。
+     * 收口在 faceAttr.js（运行时经 setAttrOnSource 注入，前后端共用）。
+     */
+    attribThreshold: 50,
     /** 人脸检测置信度阈值 */
     score: 0.4,
     /** 判定为同一个人的余弦相似度阈值（越高越严格） */
@@ -946,6 +955,51 @@ export const HIDDEN_OPTIONS = {
     tempSince: 0,
     tempChannels: [],
     tempLabel: ''
+  },
+
+  /* ---------------- 工作日历（决定「工作日 / 放假日」，供静默时段按日类型分流） ----------------
+   * 用户诉求：免打扰希望「工作日」和「放假日」用不同的时段。
+   * 例如工作日夜里 22:00~08:00 静默，周末 / 法定假日白天也静默。
+   *
+   * 实现收口在 defaults.js 的 `dayTypeOf(date, cal)`：给定一天，返回它是
+   * workday 还是 restday，以及原因（weekday / weekend / holiday / makeup）。
+   * 静默时段（全局 silent.slots 与通道 cam.silent.slots）的每一项可带 `scope`：
+   *   · 省略 / 'all'   —— 每天生效
+   *   · 'workdays'     —— 仅工作日（周一~周五，但法定假日 / 调休会让某些周六日变工作、某些周中日变休息）
+   *   · 'restdays'     —— 仅放假日（周末 + 法定假日；调休补班日不算放假日）
+   *
+   * 周模式（weekMode）：
+   *   · double   双休（周六周日休息）
+   *   · single   单休（仅周日休息）
+   *   · alternate 大小周：单双周交替，大周双休、小周单休（锚点 alternateAnchor 那一周为大周）
+   *   · custom   自定义：customRestDays 里列出的星期几休息（0=周日 … 6=周六）
+   *
+   * 法定节假日（holidays）/ 调休补班（makeups）：都是 ISO 日期字符串数组。
+   * holidays 里的日期一律算放假日；makeups 里的日期一律算工作日（覆盖周末）。
+   * 两者都是**用户可编辑**的 —— 国务院每年 11 月左右才公布下一年安排，
+   * 这里内置一份 2026 年作为出厂默认，换年就改这两个数组即可（或直接在设置页增删）。
+   * 离线环境（无头后端）无法联网拉取，所以走「内置 + 可编辑」而不是在线 API。
+   */
+  calendar: {
+    weekMode: 'double',
+    /** custom 模式下的休息星期（0=周日 … 6=周六） */
+    customRestDays: [0, 6],
+    /** 大小周锚点：这一周（含该周一）为大周（双休）。默认 2026-01-05 是周一 */
+    alternateAnchor: '2026-01-05',
+    /** 2026 年法定放假日（含调休凑出的连休；周末重复列出无害） */
+    holidays: [
+      '2026-01-01', '2026-01-02', '2026-01-03',
+      '2026-02-15', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19',
+      '2026-02-20', '2026-02-21', '2026-02-22', '2026-02-23',
+      '2026-04-04', '2026-04-05', '2026-04-06',
+      '2026-05-01', '2026-05-02', '2026-05-03', '2026-05-04', '2026-05-05',
+      '2026-06-19', '2026-06-20', '2026-06-21',
+      '2026-09-25', '2026-09-26', '2026-09-27',
+      '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04',
+      '2026-10-05', '2026-10-06', '2026-10-07'
+    ],
+    /** 2026 年调休补班日（周末上班，算工作日） */
+    makeups: ['2026-01-04', '2026-02-14', '2026-02-28', '2026-05-09', '2026-09-20', '2026-10-10']
   },
 
   /* ---------------- 日常事件静默（总开关默认间隔） ----------------
@@ -1686,7 +1740,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.7.0'
+  version: '1.8.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
@@ -2091,6 +2145,156 @@ export function normalizeCameraChannels(cam) {
   return cam
 }
 
+/* ==================== 工作日历（工作日 / 放假日判定） ====================
+ * 静默时段需要「按日类型分流」（工作日一套时段、放假日另一套）时，先把"今天算
+ * 工作日还是放假日"收敛到这一个纯函数，前后端（设置页 / useAlertPush / 通道静默）
+ * 全部共用，避免三处各算一遍对不上。
+ *
+ * 判定优先级（后者覆盖前者）：
+ *   1) 调休补班日（makeups）→ 工作日（哪怕当天是周六日）
+ *   2) 周模式算出的基础休息日：
+ *        double    周六周日休息
+ *        single    仅周日休息
+ *        alternate 大小周：大周双休、小周单休（锚点周为大周）
+ *        custom    customRestDays 里列出的星期休息
+ *   3) 法定假日（holidays）→ 放假日（覆盖基础工作日的周中部分；周末重复列出无害）
+ *   4) 其余 → 工作日
+ */
+
+/** 周模式选项（设置页单选用，文案与 dayTypeOf 的口径必须一致） */
+export const WEEK_MODES = [
+  { id: 'double', label: '双休（周六周日休息）' },
+  { id: 'single', label: '单休（仅周日休息）' },
+  { id: 'alternate', label: '大小周（单双周交替）' },
+  { id: 'custom', label: '自定义（自选休息日）' }
+]
+
+/** 静默时段作用域选项（设置页下拉用） */
+export const SLOT_SCOPES = [
+  { id: 'all', label: '每天' },
+  { id: 'workdays', label: '仅工作日' },
+  { id: 'restdays', label: '仅放假日' }
+]
+
+const _DEFAULT_CALENDAR = {
+  weekMode: 'double',
+  customRestDays: [0, 6],
+  alternateAnchor: '2026-01-05',
+  holidays: [],
+  makeups: []
+}
+
+/** 把任意来源（配置 / undefined）收口成结构完整的日历配置，缺字段用默认 */
+export function normalizeCalendar(cal) {
+  const c = cal && typeof cal === 'object' ? cal : {}
+  const rest = Array.isArray(c.customRestDays)
+    ? c.customRestDays.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+    : null
+  return {
+    weekMode: WEEK_MODES.some((w) => w.id === c.weekMode) ? c.weekMode : 'double',
+    customRestDays: rest && rest.length ? rest : [0, 6],
+    alternateAnchor: typeof c.alternateAnchor === 'string' && c.alternateAnchor ? c.alternateAnchor : '2026-01-05',
+    holidays: Array.isArray(c.holidays) ? c.holidays.filter((s) => typeof s === 'string') : [],
+    makeups: Array.isArray(c.makeups) ? c.makeups.filter((s) => typeof s === 'string') : []
+  }
+}
+
+function _pad2(n) {
+  return String(n).padStart(2, '0')
+}
+
+/** Date → 'YYYY-MM-DD'（本地时区，避免 toISOString 的 UTC 偏移把跨午夜算错日） */
+function _isoDate(d) {
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`
+}
+
+/** 取某天所在周的周一（本地时区，零点的 Date） */
+function _mondayOf(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const off = (x.getDay() + 6) % 7
+  x.setDate(x.getDate() - off)
+  return x
+}
+
+/** 大小周：以锚点的那一周为大周（双休），之后每两周交替。返回 true=大周 */
+function _isBigWeek(date, anchor) {
+  const a = new Date(anchor)
+  if (isNaN(a.getTime())) return true
+  const diffDays = Math.round((_mondayOf(date).getTime() - _mondayOf(a).getTime()) / 86400000)
+  // 偶数周（含第 0 周）为大周
+  return ((diffDays % 14) + 14) % 14 < 7
+}
+
+/** 周模式 → 当天的"基础休息星期"集合（不含法定假日覆盖） */
+function _restDows(cal, date) {
+  switch (cal.weekMode) {
+    case 'single':
+      return [0]
+    case 'custom':
+      return cal.customRestDays.slice()
+    case 'alternate':
+      return _isBigWeek(date, cal.alternateAnchor) ? [0, 6] : [0]
+    case 'double':
+    default:
+      return [0, 6]
+  }
+}
+
+/**
+ * 给定一天，返回它是工作日还是放假日，以及原因。
+ * @param {Date|number|string} date
+ * @param {object} [cal] 日历配置（options.calendar）；缺省用内置默认
+ * @returns {{type:'workday'|'restday', reason:'weekday'|'weekend'|'holiday'|'makeup', iso:string, dow:number}}
+ */
+export function dayTypeOf(date, cal) {
+  const d = date instanceof Date ? date : new Date(date == null ? Date.now() : date)
+  const c = normalizeCalendar(cal)
+  const iso = _isoDate(d)
+  const dow = d.getDay()
+  if (c.makeups.includes(iso)) return { type: 'workday', reason: 'makeup', iso, dow }
+  const rest = _restDows(c, d)
+  if (c.holidays.includes(iso)) return { type: 'restday', reason: 'holiday', iso, dow }
+  if (rest.includes(dow)) return { type: 'restday', reason: 'weekend', iso, dow }
+  return { type: 'workday', reason: 'weekday', iso, dow }
+}
+
+/**
+ * 给一个时段作用域判定"此刻这个时段该不该生效"。
+ * @param {string} scope 'all' | 'workdays' | 'restdays'（其它值一律当 'all'）
+ * @param {{type:string}} dayType dayTypeOf 的结果
+ * @returns {boolean} true=生效
+ */
+export function scopeMatches(scope, dayType) {
+  if (!scope || scope === 'all') return true
+  if (!dayType) return true
+  if (scope === 'workdays') return dayType.type === 'workday'
+  if (scope === 'restdays') return dayType.type === 'restday'
+  return true
+}
+
+/**
+ * 运行期把"配置从哪读"注入进来（前后端各注入一次）：
+ *   · 浏览器：useAlertPush 工厂里 setCalendarSource(() => options.calendar)
+ *   · 无头后端：headless-monitor 启动处注入
+ * 不注入时 dayTypeOf 退化为"只认周模式、无节假日"（等价于旧行为），
+ * matchSilentSlotAt 也只在 scope 存在且能拿到日类型时才过滤，向后兼容。
+ */
+let _calendarGetter = null
+export function setCalendarSource(getter) {
+  _calendarGetter = typeof getter === 'function' ? getter : null
+}
+function calendarSource() {
+  if (_calendarGetter) {
+    try {
+      const c = _calendarGetter()
+      if (c && typeof c === 'object') return c
+    } catch (_) {
+      /* 忽略 */
+    }
+  }
+  return null
+}
+
 /* ==================== 静默时段匹配（全局静默与通道静默共用） ====================
  * ⚠️ 这几个函数原本长在 useAlertPush 内部、只服务全局静默。通道静默（对某一路
  * 监控在指定时段静默指定渠道）需要**同一套时段语义** —— 跨零点怎么算、命中多个
@@ -2116,18 +2320,19 @@ export function hmToMinutes(hm) {
 export function parseSilentSlots(cfg) {
   const c = cfg || {}
   const out = []
-  const push = (s, e) => {
+  const push = (s, e, scope) => {
     const a = hmToMinutes(s)
     const b = hmToMinutes(e)
     if (a === null || b === null || a === b) return
-    out.push({ start: a, end: b })
+    const sc = scope === 'workdays' || scope === 'restdays' ? scope : 'all'
+    out.push({ start: a, end: b, scope: sc })
   }
   if (Array.isArray(c.slots) && c.slots.length) {
     c.slots.forEach((it) => {
-      if (it && it.start !== undefined && it.end !== undefined) push(it.start, it.end)
+      if (it && it.start !== undefined && it.end !== undefined) push(it.start, it.end, it.scope)
     })
   } else if (c.start !== undefined && c.end !== undefined) {
-    push(c.start, c.end)
+    push(c.start, c.end, 'all')
   }
   return out
 }
@@ -2152,14 +2357,20 @@ export function slotBoundaryAt(now, min, dayOff) {
  * 多个时段重叠时取**结束最晚**的那个（免打扰当然按最宽的窗口算）。
  * @returns {{start:number,end:number,startMs:number,endMs:number,crossDay:boolean}|null}
  */
-export function matchSilentSlotAt(slots, now) {
+export function matchSilentSlotAt(slots, now, cal) {
   const d = new Date(now)
   const m = d.getHours() * 60 + d.getMinutes()
   const today = d.getDate()
+  // cal 没传时回退到运行期注入的全局日历源（设置页 / 通道静默都能据此过滤 scope）
+  const calNow = cal || calendarSource()
+  const dt = calNow ? dayTypeOf(now, calNow) : null
   let best = null
   ;(Array.isArray(slots) ? slots : []).forEach((s) => {
     const hit = s.start < s.end ? m >= s.start && m < s.end : m >= s.start || m < s.end
     if (!hit) return
+    // 时段作用域：'workdays' 仅工作日、'restdays' 仅放假日；无日历源时一律放行（向后兼容）
+    const scope = s.scope === 'workdays' || s.scope === 'restdays' ? s.scope : 'all'
+    if (!scopeMatches(scope, dt)) return
     let startMs
     let endMs
     if (s.start < s.end) {
@@ -2227,7 +2438,7 @@ export function normalizeCameraSilent(cam) {
  *          |{active:true, temp:boolean, startMs:number, endMs:number,
  *            channels:string[], rangeLabel:string, endLabel:string, reason?:string}}
  */
-export function camSilentState(cam, now = Date.now()) {
+export function camSilentState(cam, now = Date.now(), cal) {
   const s = (cam && cam.silent) || null
   if (!s) return { active: false }
 
@@ -2255,7 +2466,7 @@ export function camSilentState(cam, now = Date.now()) {
   if (!s.enabled) return { active: false }
   const chans = Array.isArray(s.channels) ? s.channels : []
   if (!chans.length) return { active: false }
-  const hit = matchSilentSlotAt(parseSilentSlots(s), now)
+  const hit = matchSilentSlotAt(parseSilentSlots(s), now, cal || calendarSource())
   if (!hit) return { active: false }
   const p2 = (n) => String(n).padStart(2, '0')
   const fmt = (ms) => {
@@ -2311,12 +2522,12 @@ export function findCamera(cameras, token) {
  * 只回「够用且不敏感」的字段 —— 这个函数的结果最终会进 `/cams` 回执，
  * 别把流地址之类塞进来（那是内网地址，回给聊天窗口不合适）。
  */
-export function camSilentOverview(cameras, now = Date.now()) {
+export function camSilentOverview(cameras, now = Date.now(), cal) {
   const list = Array.isArray(cameras) ? cameras : []
   return list
     .filter((c) => c && c.id)
     .map((c) => {
-      const st = camSilentState(c, now)
+      const st = camSilentState(c, now, cal || calendarSource())
       const cfg = c.silent || {}
       return {
         id: c.id,
