@@ -96,31 +96,124 @@ export function faceSampleScore(m) {
   const box = (m && m.box) || {}
   const frameW = Number(m && m.frameW) || 0
   const frameH = Number(m && m.frameH) || 0
-  const boxW = Math.round((Number(box.w) || 0) * frameW)
-  const boxH = Math.round((Number(box.h) || 0) * frameH)
-  const short = Math.min(boxW, boxH)
+  const gray = m && m.gray
+  const p = scoreParts(
+    (Number(box.w) || 0) * frameW,
+    (Number(box.h) || 0) * frameH,
+    gray ? laplacianVar(gray, Number(m.cropW) || 0, Number(m.cropH) || 0) : 0,
+    m && m.yaw,
+    m && m.det
+  )
+  return {
+    boxW: p.boxW,
+    boxH: p.boxH,
+    yaw: p.yaw,
+    sharp: p.sharp,
+    sizeScore: p.sizeScore,
+    sharpScore: p.sharpScore,
+    frontScore: p.frontScore,
+    total: p.total
+  }
+}
+
+/**
+ * 三个分项的原始物理量 → 归一化分项 + 总分。
+ *
+ * **唯一口径**：正算（faceSampleScore，手里有整帧）与回算（sampleScoreFromMetrics，
+ * 只有库里存的几何量）都走这一份，否则同一个样本会算出两个分数。
+ *
+ * @param {number} boxW 人脸框宽（原帧像素）
+ * @param {number} boxH 人脸框高（原帧像素）
+ * @param {number} sharp 拉普拉斯方差（对齐裁切灰度）
+ * @param {number} yaw 偏航（归一化眼距倍数，可正可负）
+ * @param {number} [det] 检测置信度（<=0 表示未知，不打折）
+ */
+function scoreParts(boxW, boxH, sharp, yawIn, det) {
+  const w = Math.round(Number(boxW) || 0)
+  const h = Math.round(Number(boxH) || 0)
+  const short = Math.min(w, h)
+  const sh = Math.max(0, Number(sharp) || 0)
+  const yaw = Number(yawIn) || 0
   const sizeScore = unit(short, SAMPLE_SCORE_SCALE.size.min, SAMPLE_SCORE_SCALE.size.max)
-  const sharp = m && m.gray ? laplacianVar(m.gray, Number(m.cropW) || 0, Number(m.cropH) || 0) : 0
-  const sharpScore = unit(sharp, SAMPLE_SCORE_SCALE.sharp.min, SAMPLE_SCORE_SCALE.sharp.max)
-  const yaw = Math.abs(Number(m && m.yaw)) || 0
-  const frontScore = Math.max(0, Math.min(1, 1 - yaw / SAMPLE_SCORE_SCALE.yaw.max))
+  const sharpScore = unit(sh, SAMPLE_SCORE_SCALE.sharp.min, SAMPLE_SCORE_SCALE.sharp.max)
+  const frontScore = Math.max(0, Math.min(1, 1 - Math.abs(yaw) / SAMPLE_SCORE_SCALE.yaw.max))
   let total =
     sizeScore * SAMPLE_SCORE_WEIGHTS.size +
     sharpScore * SAMPLE_SCORE_WEIGHTS.sharp +
     frontScore * SAMPLE_SCORE_WEIGHTS.front
   // 检测器自己都没把握的脸，整体打折（但不归零：可能是姿态极端导致漏分）
-  const det = Number(m && m.det)
-  if (Number.isFinite(det) && det > 0 && det < SAMPLE_SCORE_SCALE.minDet) total *= det / SAMPLE_SCORE_SCALE.minDet
+  const d = Number(det)
+  if (Number.isFinite(d) && d > 0 && d < SAMPLE_SCORE_SCALE.minDet) total *= d / SAMPLE_SCORE_SCALE.minDet
   return {
-    boxW,
-    boxH,
-    yaw: Number(m && m.yaw) || 0,
-    sharp,
+    boxW: w,
+    boxH: h,
+    yaw,
+    sharp: sh,
     sizeScore: round2(sizeScore),
     sharpScore: round2(sharpScore),
     frontScore: round2(frontScore),
     total: round2(total)
   }
+}
+
+/**
+ * 采集时算出的一批「待录入入库字段」。
+ *
+ * **为什么需要这一层封装**：faceSampleScore() 回答的是「三个分项各多少、为什么」，
+ * 里面叫 `total`；而写入方（store.addPendingFace / useFaceLib.pushPendingFace）
+ * 期望的是**落库字段**：多了 frameW/frameH/det，且总分列名叫 `score`。
+ * 以前两边各读各的 —— 写入方读 `m.score`，而这个字段根本不存在，
+ * 于是 score 恒落 -1、scored_at 恒为 0，待录入列表**一律显示「未评分」**。
+ * 现在把「分项解释」到「入库形状」的映射收在这一个函数里，前后端共用，
+ * 再加字段只改这里，不会再出现「一边算一边读不到」。
+ *
+ * @param {object} input 与 faceSampleScore 同一份入参
+ *        （box / frameW / frameH / gray / cropW / cropH / det / yaw）
+ * @returns {{score:number, boxW:number, boxH:number, yaw:number, sharp:number,
+ *            det:number, frameW:number, frameH:number}}
+ */
+export function pendingSampleMetrics(input) {
+  const m = input || {}
+  const aligned = {
+    boxW: (Number(m.box && m.box.w) || 0) * (Number(m.frameW) || 0),
+    boxH: (Number(m.box && m.box.h) || 0) * (Number(m.frameH) || 0),
+    sharp: m.gray ? laplacianVar(m.gray, Number(m.cropW) || 0, Number(m.cropH) || 0) : 0,
+    yaw: m.yaw,
+    det: m.det
+  }
+  const p = scoreParts(aligned.boxW, aligned.boxH, aligned.sharp, aligned.yaw, aligned.det)
+  return {
+    score: p.total,
+    boxW: p.boxW,
+    boxH: p.boxH,
+    yaw: p.yaw,
+    sharp: p.sharp,
+    det: Number(m.det) || 0,
+    frameW: Math.round(Number(m.frameW) || 0),
+    frameH: Math.round(Number(m.frameH) || 0)
+  }
+}
+
+/**
+ * 只用「库里存下来的几何量」回算总分（用于给历史行补分）。
+ *
+ * 与 pendingSampleMetrics 的差别只有一处：**没有 gray，清晰度用库里那份 sharp**。
+ * 那份 sharp 是采集时在同一张对齐裁切上算的拉普拉斯方差，和现在的算法同源，
+ * 所以回算结果与当时应得的分数一致（只差检测置信度打折，老行 det 丢了）。
+ *
+ * 判据：`boxW > 0 && boxH > 0` 才算「量过几何量」。补列之前的老行这两列是
+ * DEFAULT 0 —— 对着 0 算会把 `yaw=0` 当成完美正脸，得到一份假高分，
+ * 比「未评分」更坏（用户会照着假分去挑样本）。那种行**继续返回 -1**，
+ * 界面如实显示「未评分」。
+ *
+ * @param {{boxW:number,boxH:number,yaw:number,sharp:number,det?:number}} m
+ * @returns {number} 0..1 的总分；-1 = 没有几何量、算不出来
+ */
+export function sampleScoreFromMetrics(m) {
+  const w = Math.round(Number(m && m.boxW) || 0)
+  const h = Math.round(Number(m && m.boxH) || 0)
+  if (w <= 0 || h <= 0) return -1
+  return scoreParts(w, h, m && m.sharp, m && m.yaw, m && m.det).total
 }
 
 function round2(v) {

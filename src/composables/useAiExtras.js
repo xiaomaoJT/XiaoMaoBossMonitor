@@ -38,8 +38,8 @@ import {
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces } from '../config/defaults.js'
-import { faceSampleScore, toGray } from './faceSampleScore.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf } from '../config/defaults.js'
+import { pendingSampleMetrics, toGray } from './faceSampleScore.js'
 
 /** COCO 17 关键点下标 */
 const KP = {
@@ -91,6 +91,9 @@ function safeThumb(canvas, box) {
  * 与后端 analyzer 同名函数同一套口径（判定都在 faceSampleScore.js）。
  * ⚠️ 必须此刻算：等 pushPendingFace 只留 thumb（96px）之后，
  * 原帧尺寸 / 清晰度都已经不可恢复。
+ * ⚠️ 必须用 pendingSampleMetrics 而不是 faceSampleScore：后者返回的总分叫 `total`，
+ *    而 pushPendingFace 读的是 `score` —— 直接返后者会让分数永远落 -1
+ *    （「待录入一律显示未评分」就是这么来的）。映射收敛在 pendingSampleMetrics 一处。
  */
 function sampleMetrics(canvas, face, aligned) {
   try {
@@ -99,7 +102,7 @@ function sampleMetrics(canvas, face, aligned) {
       const id = aligned.getContext('2d').getImageData(0, 0, aligned.width, aligned.height)
       gray = toGray(id.data, id.width, id.height)
     }
-    return faceSampleScore({
+    return pendingSampleMetrics({
       box: face,
       kps: face.kps,
       frameW: canvas.width,
@@ -252,7 +255,10 @@ export function useAiExtras(options) {
       quality: faceQualityConf(c),
       // 每帧识别人数上限（默认 2，性能保护）：判定收口在 defaults.faceMaxFaces，
       // 与后端 analyzer 共用同一份口径
-      maxFaces: faceMaxFaces(c)
+      maxFaces: faceMaxFaces(c),
+      // 属性模型两个开关（性别/年龄、口罩眼镜）：默认都开，显式 false 才关。
+      // 解析收口在 defaults.faceAttrConf，与后端 analyzer / headless-monitor 共用
+      ...faceAttrConf(c)
     }
   }
 
@@ -534,9 +540,14 @@ export function useAiExtras(options) {
                Math.abs((f.y + f.h / 2) - (face.y + face.h / 2)) < 0.02
       )
       // 属性（性别/年龄/口罩/眼镜）：本地识别模式与后端 analyzer 同口径；
-      // 失败静默兜底，绝不拖累人脸识别主流程（与后端 faceAttributes 一致）
+      // 失败静默兜底，绝不拖累人脸识别主流程（与后端 faceAttributes 一致）。
+      // 两个模型各自受 fc.genderAge / fc.attrib 控制：关掉的那一项连模型都不懒加载，
+      // 省的是真算力（43MB 的 face_attrib_net 尤其）。
+      const attrOn = fc.genderAge || fc.attrib
       let attrs = null
-      try { attrs = await faceAttributes(frame, face) } catch (e) { attrs = null }
+      if (attrOn) {
+        try { attrs = await faceAttributes(frame, face, { genderAge: fc.genderAge, attrib: fc.attrib }) } catch (e) { attrs = null }
+      }
 
       /*
        * 命中质量门槛：检测置信度太低 / 脸太小 / 侧脸转太多，不许认成库内某人

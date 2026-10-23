@@ -110,8 +110,8 @@ export function alarmTitle(r) {
   return alarmLabel(r && r.type)
 }
 
-/** 走向事件的路线文本（多跳 A→B→C）。alarmDetail / alarmTitle 共用一份，避免两处漂移。 */
-function flowRouteText(r) {
+/** 走向事件的路线文本（多跳 A→B→C）。alarmDetail / alarmTitle / 汇总分区共用一份，避免两处漂移。 */
+export function flowRouteText(r) {
   if (Array.isArray(r.flowPath) && r.flowPath.length) {
     return r.flowPath.map((p) => `${p.camName || '?'}·${p.zoneName || '?'}`).join(' → ')
   }

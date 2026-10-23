@@ -339,6 +339,30 @@ export function faceMaxFaces(c) {
 }
 
 /**
+ * 解析人脸「属性模型」的两个开关（纯函数，前后端共用）。
+ * ----------------------------------------------------------------------------
+ * 性别/年龄（genderage）与 口罩/眼镜（face_attrib_net）是**两个独立模型、两笔开销**，
+ * 必须能分别关掉：
+ *   - genderage：1.3MB，很快，想要人口画像就留着；
+ *   - face_attrib_net：43MB 外部权重 + 每帧一次 128×128 推理，是最贵的一项，
+ *     不看口罩/眼镜的现场关掉它（省一次推理，也省掉那份权重的加载失败风险）。
+ *
+ * ⚠️ 「没配」一律当**开**（= 1.6.x 的行为：装上模型就一直在算），只有显式 false 才关。
+ *   反过来（没配当关）会让升级后的存量用户莫名丢属性，且设置页两个开关看起来
+ *   都是关的，和实际行为不符。
+ *
+ * @param {object} face options.face
+ * @returns {{genderAge:boolean, attrib:boolean}}
+ */
+export function faceAttrConf(face) {
+  const c = face || {}
+  return {
+    genderAge: c.genderAge !== false,
+    attrib: c.attrib !== false
+  }
+}
+
+/**
  * 解析「命中质量门槛」旋钮（纯函数，前后端共用）。
  * 「没配」回落默认值；开关本身只认显式真值；数值越界钳住。
  * @returns {{enabled:boolean, minScore:number, minBoxRatio:number, maxYaw:number}}
@@ -621,6 +645,16 @@ export const HIDDEN_OPTIONS = {
    */
   face: {
     enabled: true,
+    /**
+     * ---------------- 属性模型（两个独立开关） ----------------
+     * 认到脸之后要不要顺带识别「性别/年龄」和「口罩/眼镜/墨镜/闭眼」。
+     * 以前没有开关：模型装上就无条件跑，43MB 的 face_attrib_net 每帧一次推理，
+     * 用户既关不了、也看不出它在算。现在能分别关，关掉的那一项：
+     *   ① 不再加载模型（省内存/省启动时间）；② 事件与统计里该字段为 null。
+     * 缺省都开（= 升级前的行为）；显式 false 才关。解析收口在 faceAttrConf。
+     */
+    genderAge: true,
+    attrib: true,
     /** 人脸检测置信度阈值 */
     score: 0.4,
     /** 判定为同一个人的余弦相似度阈值（越高越严格） */
@@ -1652,7 +1686,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.6.1'
+  version: '1.7.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
@@ -2546,6 +2580,43 @@ export function flowZoneName(cam, zoneId) {
   if (!zoneId) return ''
   const z = cam && Array.isArray(cam.zones) ? cam.zones.find((zz) => zz && zz.id === zoneId) : null
   return z ? z.name || zoneId : zoneId
+}
+
+/**
+ * 配置里的走向规则 → 可直接展示的 `[{ id, name, route, enabled }]`（只列已启用的）。
+ *
+ * **为什么需要这个**：汇总消息要「按走向配置几条」逐条统计 —— 一条规则哪怕
+ * 本时段一次都没触发，也要单独占一行（写「0 条」）。这才是用户想看的：
+ * 死规则和没配好的规则正是要一眼发现的东西。而库里的事件只带 `flowName`，
+ * 没法反推出「配置了但没发生」的那些，所以必须在展示层把配置本身也带上。
+ *
+ * 名字口径与 emitFlowEvent 一致：`f.name || 路线文本`（见 useAiExtras）。
+ * 没起名的规则，名字就是那串「A·区 → B·区」，与事件里的 flowName 能对上。
+ *
+ * @param {Array<{id?:string,name?:string,enabled?:boolean,path?:Array<{cam:string,zone:string}>}>} flows
+ * @param {Array<{id:string,name?:string,zones?:Array<{id:string,name?:string}>}>} cameras
+ * @returns {{id:string,name:string,route:string}[]}
+ */
+export function flowRuleLabels(flows, cameras) {
+  const list = Array.isArray(cameras) ? cameras : []
+  const camOf = (id) => list.find((c) => c && c.id === id)
+  const nodeText = (node) => {
+    const cam = camOf(node && node.cam)
+    // 摄像头名缺失时写「?」，别把空串拼成「·区」这种读不懂的东西
+    const camName = cam ? cam.name || cam.id || '?' : '?'
+    return `${camName}·${flowZoneName(cam, node && node.zone) || '?'}`
+  }
+  return (Array.isArray(flows) ? flows : [])
+    .filter((f) => f && f.enabled)
+    .map((f) => {
+      const path = Array.isArray(f.path) ? f.path : []
+      const route = path.map(nodeText).join(' → ')
+      return {
+        id: String(f.id || route || ''),
+        name: String(f.name || '').trim() || route || '未命名走向',
+        route
+      }
+    })
 }
 
 /**

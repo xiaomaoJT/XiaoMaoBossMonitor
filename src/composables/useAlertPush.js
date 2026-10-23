@@ -47,6 +47,7 @@ import {
   isFaceHit,
   isFlowCritical,
   isFlowEvent,
+  flowRuleLabels,
   matchSilentSlotAt,
   parseSilentSlots,
   slotBoundaryAt,
@@ -130,6 +131,16 @@ export function useAlertPush(options, hooks = {}) {
     typeof hooks.getCameras === 'function' ? hooks.getCameras : () => (options ? options.cameras : null)
 
   const pendingCount = ref(0)
+
+  /**
+   * 汇总正文「人员走向」分区要用的规则清单（`buildSilentSummary` 的 ctx.flows）。
+   *
+   * 调用点都嵌在这个工厂里，只能在这里算：`options.flows` 是配置、通道名在
+   * `camerasOf()` 里（前后端都不在 options.cameras 上），两样都拿到手的只有这一层。
+   * 只列已启用的规则 —— 一条都没触发的规则也会在汇总里占一行写 0 次，
+   * 那正是「哪条走向配了但没生效」最容易被发现的地方。
+   */
+  const flowLabelsFor = () => flowRuleLabels(options && options.flows, camerasOf())
 
   /** 每个渠道独立的限流状态 */
   const chState = {}
@@ -413,6 +424,15 @@ export function useAlertPush(options, hooks = {}) {
       ratio: record.ratio,
       faceName: record.faceName,
       faceScore: record.faceScore,
+      /*
+       * 属性（性别 / 年龄 / 口罩眼镜）也要收 —— 汇总消息的「人脸命中」逐条明细
+       * 要印「男/32岁/口罩」。这是个手写字段清单，漏了就静默丢（不报错），
+       * 表现是「实时通知里有性别年龄，静默汇总里一个字都没有」。
+       * 只收三个标量/小对象，体积可忽略（属性对象最多 5 个整数）。
+       */
+      gender: record.gender || '',
+      age: record.age == null ? null : Number(record.age),
+      attr: record.attr && typeof record.attr === 'object' ? record.attr : null,
       counts: record.counts,
       zoneName: record.zoneName,
       dwellMs: record.dwellMs,
@@ -852,7 +872,9 @@ export function useAlertPush(options, hooks = {}) {
       endMs,
       rangeLabel: closedWin ? closedWin.rangeLabel : '',
       stillSilent: !!next,
-      stillLabel: next ? next.rangeLabel : ''
+      stillLabel: next ? next.rangeLabel : '',
+      // 走向规则清单：免打扰结算汇总同样要「按规则一条一行」（见 buildSilentSummary 的 flowRows）
+      flows: flowLabelsFor()
     })
     const dropped = takeDropped(silentBuffer)
     const toSend = addDroppedNote(summary, dropped)
@@ -1102,7 +1124,8 @@ export function useAlertPush(options, hooks = {}) {
       endMs,
       variant: 'cam',
       scopeName: name,
-      rangeLabel: opts.window ? opts.window.rangeLabel : ''
+      rangeLabel: opts.window ? opts.window.rangeLabel : '',
+      flows: flowLabelsFor()
     })
     const dropped = takeDropped(st.buf)
     const toSend = addDroppedNote(summary, dropped)
@@ -1318,7 +1341,8 @@ export function useAlertPush(options, hooks = {}) {
       endMs: now,
       variant: 'digest',
       intervalMinutes: mergedIntervalMs(now) / 60000,
-      scopeName: mergedScopeName
+      scopeName: mergedScopeName,
+      flows: flowLabelsFor()
     })
     const dropped = takeDropped(digestMerged.buf)
     const toSend = addDroppedNote(summary, dropped)
@@ -1469,7 +1493,8 @@ export function useAlertPush(options, hooks = {}) {
       endMs: now,
       variant: 'digest',
       scopeName: name,
-      intervalMinutes: s.intervalMinutes
+      intervalMinutes: s.intervalMinutes,
+      flows: flowLabelsFor()
     })
     const dropped = takeDropped(st.buf)
     const toSend = addDroppedNote(summary, dropped)

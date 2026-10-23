@@ -181,6 +181,45 @@
           明细最多保留每人每天最近 {{ HIT_LOG_MAX }} 条，完整记录看事件列表或远程 <code>/hits</code> 指令。
         </p>
       </section>
+
+      <!-- ============ 人脸属性（性别 / 年龄 / 口罩眼镜） ============
+           这一卡回答的是"看见的人都是些什么人"，与上面「谁来过」是两个问题：
+           上面只统计库内的人，这里**含陌生人**（陌生人没有名字，但没有名字不代表没有性别年龄）。
+           分子/分母都只算「真的算过属性」的记录 —— 属性模型可以在设置里关掉，
+           关掉之后每条记录都没属性字段，硬把它们算进分母只会得到「样本 N、男 0 女 0」。 -->
+      <section class="card" v-if="attrTotal.n > 0">
+        <h4>
+          人脸属性
+          <em>{{ attrTotal.n }} 份属性样本 · 含陌生人</em>
+        </h4>
+
+        <h5 class="sub">性别</h5>
+        <div class="attr-rows">
+          <div class="attr-row" v-for="g in genderRows" :key="g.id">
+            <span class="ar-label">{{ g.label }}</span>
+            <span class="ar-bar"><i :style="{ width: g.width, background: g.color }"></i></span>
+            <b>{{ g.n }}</b>
+            <span class="ar-pct">{{ g.pct }}</span>
+          </div>
+        </div>
+
+        <h5 class="sub">年龄分布<em>模型估算，只宜当粗标签（儿童会被估高）</em></h5>
+        <DistBars :rows="ageRows" unit="次" />
+
+        <h5 class="sub">
+          口罩 / 眼镜 / 闭眼
+          <em v-if="!attrTagRows.length">该周期没有命中</em>
+        </h5>
+        <div class="people" v-if="attrTagRows.length">
+          <span class="p-chip" v-for="t in attrTagRows" :key="t.id">{{ t.label }} {{ t.n }} · {{ t.pct }}</span>
+        </div>
+
+        <p class="tip-line">
+          判定阈值 50%（概率过半才算），与设置页「待录入 / 命中修正」卡片上的徽标同一份口径。
+          一项都没显示不代表没人戴 —— 只有<b>算过属性</b>的记录才进统计，可在「人脸识别」页分别开关
+          <b>性别/年龄</b>与<b>口罩/眼镜</b>两个模型。
+        </p>
+      </section>
     </template>
   </div>
 </template>
@@ -217,6 +256,8 @@ import {
   statsOf
 } from '../composables/useDailyStats'
 import { confirmDialog } from '../composables/confirm.js'
+// 属性分桶 / 标签 / 阈值与设置页徽标共用一份口径（faceAttr.js），这里只做排版
+import { AGE_BUCKETS, FACE_ATTR_TAGS, faceAttrLabel } from '../composables/faceAttr.js'
 import DistBars from './charts/DistBars.vue'
 import DonutShare from './charts/DonutShare.vue'
 import HeatGrid from './charts/HeatGrid.vue'
@@ -419,6 +460,75 @@ const recentHits = computed(() => (total.value.recentHits || []).slice(0, RECENT
 const stalePeople = computed(() => {
   const counted = new Set(hitPeople.value.map((r) => r.id))
   return total.value.people.filter((n) => !counted.has(n))
+})
+
+/* ==================== 人脸属性 ====================
+ * 分母统一是 attrTotal.n（= 真的算过属性的记录条数），不是 alarms 也不是 personHits：
+ *   · 用 alarms 做分母 → 一条人脸事件可能在多个通道各推一次，比例会超过 100%；
+ *   · 用 personHits 做分母 → 里面混着"没算属性"的记录（属性模型关掉过的时段），
+ *     算出来会系统性偏低。
+ * 空对象兜底写成 {} 而不是 undefined：模板里直接读 .n，少一层判空。
+ */
+const attrTotal = computed(() => total.value.faceAttrs || { n: 0, gender: {}, age: {}, tags: {} })
+
+/** 百分比文案；分母为 0 时给 '—'，不显示 'NaN%' 或 '0%'（0% 会被读成"一个都没有"） */
+function pctOf(n, base) {
+  const b = Number(base) || 0
+  if (!b) return '—'
+  return `${Math.round((Number(n) || 0) / b * 100)}%`
+}
+
+const genderRows = computed(() => {
+  const A = attrTotal.value
+  const g = A.gender || {}
+  const base = A.n || 0
+  const defs = [
+    { id: 'male', label: '男', color: 'var(--type-person)' },
+    { id: 'female', label: '女', color: 'var(--type-face)' },
+    { id: 'unknown', label: '未判', color: 'var(--type-motion)' }
+  ]
+  const max = Math.max(1, ...defs.map((d) => Number(g[d.id]) || 0))
+  return defs.map((d) => {
+    const n = Number(g[d.id]) || 0
+    return {
+      id: d.id,
+      label: d.label,
+      n,
+      color: d.color,
+      // 条形宽度按**最大那一项**归一（不是按总数）：男女 48/46 时要能看出"差不多各一半"，
+      // 按总数归一的话两根都只有一半长，反而读不出对比。
+      width: `${Math.round((n / max) * 100)}%`,
+      pct: pctOf(n, base)
+    }
+  })
+})
+
+/**
+ * 年龄分桶：只列本周期有数的桶（零桶不占版面，与报警类型分布同一套取舍）。
+ * 百分比交给 DistBars 自己算：每条记录**恰好落进一个桶**，所以各桶之和 == attrTotal.n，
+ * 它那套"除以本行合计"的口径在这里与"除以属性样本数"完全等价，不用另喂一个 note。
+ */
+const ageRows = computed(() => {
+  const src = attrTotal.value.age || {}
+  const rows = []
+  AGE_BUCKETS.forEach((b) => {
+    const n = Number(src[b.id]) || 0
+    if (n > 0) rows.push({ id: b.id, label: b.label, n, color: 'var(--accent)' })
+  })
+  const unknown = Number(src.unknown) || 0
+  if (unknown > 0) rows.push({ id: 'unknown', label: '未判', n: unknown, color: 'var(--type-motion)' })
+  return rows
+})
+
+const attrTagRows = computed(() => {
+  const src = attrTotal.value.tags || {}
+  const base = attrTotal.value.n || 0
+  const rows = []
+  FACE_ATTR_TAGS.forEach((t) => {
+    const n = Number(src[t.id]) || 0
+    if (n > 0) rows.push({ id: t.id, label: faceAttrLabel(t.id), n, pct: pctOf(n, base) })
+  })
+  return rows
 })
 
 /**
@@ -710,6 +820,58 @@ void dailyStats
   color: var(--ok-text, #bfe9d1);
   background: color-mix(in srgb, var(--ok) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+}
+
+/* ---------- 人脸属性：性别小横条 ----------
+ * 为什么不用 DistBars：那一版每行自带"统一刻度尺 + 百分比列"，
+ * 性别只有 3 行（男/女/未判），尺子比数据还占地方。这里用**按最大项归一**的
+ * 细条，读的是"男女大致几比几"，不是"各占总数多少"。
+ */
+.attr-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attr-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 34px 36px;
+  align-items: center;
+  gap: 7px;
+}
+
+.ar-label {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.ar-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  overflow: hidden;
+}
+
+.ar-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.attr-row b {
+  text-align: right;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-bright);
+  font-variant-numeric: tabular-nums;
+}
+
+.ar-pct {
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- 人脸命中：小标题 + 最近命中记录 ---------- */

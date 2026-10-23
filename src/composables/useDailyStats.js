@@ -67,6 +67,12 @@ import { reactive } from 'vue'
  * 都调它，两边不会各写一套"哪些算报警、哪些算命中"。
  */
 import { isFaceHit } from '../config/defaults.js'
+/*
+ * 属性的解读口径（阈值 / 标签 / 年龄分桶）收在 faceAttr.js 一份 ——
+ * 设置页徽标与这里的统计必须用同一套阈值，否则会出现「卡片上写着口罩、
+ * 统计里没算他一顶」这种对不上的账。
+ */
+import { AGE_BUCKETS, FACE_ATTR_TAGS, ageBucket, faceAttrTags, hasFaceAttrs } from './faceAttr.js'
 
 const KEY = 'monitor-wall-daily-stats-v1'
 /** 保留天数（含今天） */
@@ -175,6 +181,19 @@ function hoursOf(d) {
   return H
 }
 
+/** 属性分布的空结构（性别 / 年龄分桶 / 口罩眼镜等标签） */
+function emptyAttrs() {
+  return {
+    /** 属性样本数 = 分母（只算真的算过属性的记录，见 faceAttr.hasFaceAttrs） */
+    n: 0,
+    gender: { male: 0, female: 0, unknown: 0 },
+    /** 年龄分桶：{ [桶 id]: 次数 }，稀疏 */
+    age: {},
+    /** 标签命中次数：{ mask: n, glasses: n, ... }，稀疏 */
+    tags: {}
+  }
+}
+
 function emptyDay() {
   return {
     alarms: 0,
@@ -196,6 +215,14 @@ function emptyDay() {
     hitsByName: {},
     /** 最近命中明细（时间**倒序**，最多 HIT_LOG_MAX 条）：{ n:名字, t:时刻, c:通道, s:相似度 } */
     recentHits: [],
+    /**
+     * 人脸属性分布（性别 / 年龄分桶 / 口罩眼镜等标签）。
+     * 回答的是"看见的人都是些什么人"，与"谁来过"（hitsByName）是两件事。
+     * n 是**分母**：只累计真的算过属性的记录 —— 属性模型可以关
+     * （face.genderAge / face.attrib），关掉之后每条记录都没属性字段，
+     * 把它们算进分母只会得到「样本 1200、男 0 女 0」，看着像模型坏了。
+     */
+    faceAttrs: emptyAttrs(),
     /** 通道断线 / 恢复次数 */
     offline: 0,
     online: 0,
@@ -253,6 +280,32 @@ function normRecentHits(src) {
 }
 
 /**
+ * 规整属性分布：计数一律夹成非负整数，**年龄桶与标签只认白名单键**。
+ * 白名单不只是防脏数据 —— 它同时给出体积上界：子存档里塞 500 个假标签键，
+ * 也只会保留恰好 FACE_ATTR_TAGS.length + AGE_BUCKETS.length 个。
+ * 空桶不写（稀疏），与小时桶同一套取舍。
+ */
+function normAttrs(src) {
+  const base = emptyAttrs()
+  if (!src || typeof src !== 'object') return base
+  const int = (v) => Math.max(0, Math.floor(Number(v) || 0))
+  base.n = int(src.n)
+  const g = src.gender || {}
+  base.gender.male = int(g.male)
+  base.gender.female = int(g.female)
+  base.gender.unknown = int(g.unknown)
+  ;[...AGE_BUCKETS.map((b) => b.id), 'unknown'].forEach((id) => {
+    const v = int((src.age || {})[id])
+    if (v) base.age[id] = v
+  })
+  FACE_ATTR_TAGS.forEach((t) => {
+    const v = int((src.tags || {})[t.id])
+    if (v) base.tags[t.id] = v
+  })
+  return base
+}
+
+/**
  * 只保留最近 KEEP_DAYS 天，顺手保证结构完整。
  *
  * ⚠️ 这里是**唯一的归一化收口** —— 载入（load）与落盘（save）都走它，
@@ -281,6 +334,8 @@ function prune(days) {
       faceHits: Math.max(0, Math.floor(Number(d.faceHits) || 0)),
       hitsByName: normHitsByName(d.hitsByName),
       recentHits: normRecentHits(d.recentHits),
+      // 属性分布：白名单键 + 稀疏，`...d` 带进来的那份会被这里整段覆盖成规整版
+      faceAttrs: normAttrs(d.faceAttrs),
       // 小时桶：旧存档（无 hours / 长度不对 / 脏值）在这里被补成整齐的 24 长数组。
       // `...d` 已经把 dh 带进来了，这里整段覆盖成规整过的版本。
       hours: {
@@ -437,6 +492,43 @@ export function statFaceHit(faceName, meta = {}, ts = Date.now()) {
   }
 }
 
+/**
+ * 记一条记录的**人脸属性**（性别 / 年龄桶 / 口罩眼镜标签）。
+ *
+ * 判定「要不要记」的闸门在 faceAttr.hasFaceAttrs（不是这里）：只有真的算过属性的
+ * 记录才进分母。属性模型可以关（face.genderAge / face.attrib），关掉之后
+ * 每条记录都没有属性字段 —— 那种记录算进分母只会得到「样本 1200、男 0 女 0」。
+ *
+ * 注意与 statFaceHit 的分工：那个记「谁来过」（只算库内的人），
+ * 这个记「看见的人是什么样」（含陌生人）—— 人口画像不该只有自己人。
+ *
+ * @param {object} rec 事件记录（需要 gender / age / attr）
+ * @param {number} [ts]
+ * @returns {boolean} 是否真的计入了一条
+ */
+export function statFaceAttrs(rec, ts = Date.now()) {
+  try {
+    if (!hasFaceAttrs(rec)) return false
+    const d = bucket(ts)
+    if (!d.faceAttrs || typeof d.faceAttrs !== 'object') d.faceAttrs = emptyAttrs()
+    const A = d.faceAttrs
+    A.n += 1
+    if (rec.gender === 'male') A.gender.male += 1
+    else if (rec.gender === 'female') A.gender.female += 1
+    else A.gender.unknown += 1
+    const ab = ageBucket(rec.age)
+    A.age[ab] = (A.age[ab] || 0) + 1
+    faceAttrTags(rec.attr).forEach((id) => {
+      A.tags[id] = (A.tags[id] || 0) + 1
+    })
+    save()
+    return true
+  } catch (e) {
+    /* 统计失败绝不影响报警 */
+    return false
+  }
+}
+
 /** 记一次推送结果（小时桶只关心"这个小时发了几条"，成功失败在日汇总里分开看） */export function statPush(channelId, ok, ts = Date.now()) {
   try {
     if (!channelId) return
@@ -494,6 +586,12 @@ export function statEvent(rec) {
   if (isFaceHit(rec)) {
     statFaceHit(rec.faceName, { camName: rec.name, camId: rec.id, score: rec.faceScore }, t)
   }
+  /*
+   * 属性（性别 / 年龄 / 口罩眼镜）：与上面两条**并列**、互不代替 ——
+   * 陌生人脸没有名字，不会进「人员榜」，但它一样有性别年龄，
+   * 人口画像要是只统计自己人就废了。闸门（是否算过属性）在函数内部。
+   */
+  statFaceAttrs(rec, t)
 }
 
 /** 清零统计 */
@@ -593,7 +691,8 @@ export function statsOf(key) {
  * 把若干天合并成一个周期。
  * @param {string[]} keys 日期键（早→晚）
  * @returns {{alarms:number, byType:object, push:object, personHits:number, people:string[],
- *            faceHits:number, hitsByName:object, recentHits:Array, offline:number, online:number, days:number}}
+ *            faceHits:number, hitsByName:object, recentHits:Array, faceAttrs:object,
+ *            offline:number, online:number, days:number}}
  */
 export function aggregate(keys) {
   const total = emptyDay()
@@ -640,6 +739,22 @@ export function aggregate(keys) {
     })
     // 明细先全收，循环结束后统一定序截断（每天只留自己最近 30 条，合并后可能超过上限）
     ;(d.recentHits || []).forEach((h) => total.recentHits.push(h))
+    /* ---------- 人脸属性：全部按位求和（都是计数，没有"取最大"那种口径） ---------- */
+    const da = d.faceAttrs
+    if (da) {
+      const A = total.faceAttrs
+      A.n += Number(da.n) || 0
+      const dg = da.gender || {}
+      A.gender.male += Number(dg.male) || 0
+      A.gender.female += Number(dg.female) || 0
+      A.gender.unknown += Number(dg.unknown) || 0
+      Object.keys(da.age || {}).forEach((id) => {
+        A.age[id] = (A.age[id] || 0) + (Number(da.age[id]) || 0)
+      })
+      Object.keys(da.tags || {}).forEach((id) => {
+        A.tags[id] = (A.tags[id] || 0) + (Number(da.tags[id]) || 0)
+      })
+    }
     // 小时桶按位相加：**遍历指标表**而不是逐个手写 ——
     // 以后再加指标（如 hours.known）不用回来改这里（漏改的表现是"这个维度全为 0"）
     const dh = d.hours || {}

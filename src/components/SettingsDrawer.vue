@@ -1569,7 +1569,8 @@
           </div>
           <p class="hint">
             SCRFD 人脸检测 + MobileFaceNet 特征 + 本地人脸库。识别到已录入的人会用姓名播报与推送，
-            并输出性别 / 年龄与口罩、眼镜等属性。前提是「检测识别」页的<b>人形识别（AI）</b>已开启。
+            并输出性别 / 年龄与口罩、眼镜等属性（两项可分别关闭，见下）。
+            前提是「检测识别」页的<b>人形识别（AI）</b>已开启。
           </p>
 
           <label class="opt">
@@ -1633,6 +1634,28 @@
                 <em>识别到的人脸框上会标出姓名</em>
               </span>
               <span class="switch" :class="{ on: opts.face.drawBox }" @click="opts.face.drawBox = !opts.face.drawBox"></span>
+            </label>
+
+            <!--
+              属性模型两个开关（缺省都开 = 升级前的行为；显式 false 才关）。
+              解析收口在 defaults.faceAttrConf，前后端共用同一份口径。
+              关掉 = ① 不再加载模型（headless 会顺手释放已加载的会话）
+                     ② 事件/统计/推送里该字段为 null（不显示假的"未知"）。
+            -->
+            <label class="opt">
+              <span>
+                <strong>识别性别 / 年龄</strong>
+                <em>genderage 模型（1.3MB）。关掉后事件与统计里不再有性别年龄；年龄为模型估算，只宜当粗标签</em>
+              </span>
+              <span class="switch" :class="{ on: opts.face.genderAge !== false }" @click="opts.face.genderAge = opts.face.genderAge === false"></span>
+            </label>
+
+            <label class="opt">
+              <span>
+                <strong>识别口罩 / 眼镜</strong>
+                <em>face_attrib_net 模型（43MB 外部权重，每帧一次 128×128 推理）。不看这类标签就关掉，省一次推理与 43MB 内存</em>
+              </span>
+              <span class="switch" :class="{ on: opts.face.attrib !== false }" @click="opts.face.attrib = opts.face.attrib === false"></span>
             </label>
 
             <div class="opt">
@@ -4612,6 +4635,7 @@ import SelectField from './SelectField.vue'
 import InfoTip from './InfoTip.vue'
 import StatsPanel from './StatsPanel.vue'
 import { sampleQualityLabel, SAMPLE_SCORE_RECOMMEND } from '../composables/faceSampleScore.js'
+import { faceAttrText } from '../composables/faceAttr.js'
 
 /*
  * ---------------- 下拉选项 ----------------
@@ -5818,28 +5842,11 @@ function pfRecommended(pf) {
   return Number.isFinite(s) && s >= 0 && s >= SAMPLE_SCORE_RECOMMEND
 }
 
-/**
- * 把一条人脸（待录入 / 命中）的属性浓缩成一行徽标文本：
- *   性别（男/女）+ 年龄（N岁）+ 口罩眼镜（戴帽：口罩/眼镜/墨镜/闭眼）。
- * 任意字段缺失都不报错、不出现多余符号；三个维度全空则返回 ''（模板 v-if 不渲染）。
- * @param {{gender?:string, age?:number|null, attr?:object|null}} f
+/*
+ * 待录入 / 命中卡片的属性徽标直接用 faceAttrText（见文件顶部的 import）。
+ * 50% 阈值和「墨镜优先于眼镜」这类判定只在 faceAttr.js 一份 ——
+ * 两处各写一份的话，迟早出现「卡片上写着口罩、统计里没算他一顶」。
  */
-function faceAttrText(f) {
-  if (!f) return ''
-  const parts = []
-  if (f.gender === 'male') parts.push('男')
-  else if (f.gender === 'female') parts.push('女')
-  if (f.age != null && Number.isFinite(Number(f.age)) && Number(f.age) >= 0) parts.push(`${Number(f.age)}岁`)
-  const a = f.attr && typeof f.attr === 'object' ? f.attr : null
-  if (a) {
-    // 阈值 50%：概率化输出，过低的判定不显示，避免抖动误导
-    if (Number(a.mask) >= 50) parts.push('口罩')
-    if (Number(a.sunglasses) >= 50) parts.push('墨镜')
-    else if (Number(a.glasses) >= 50) parts.push('眼镜')
-    if (Number(a.leftEyeOpen) < 50 || Number(a.rightEyeOpen) < 50) parts.push('闭眼')
-  }
-  return parts.join(' · ')
-}
 
 /** 刷新待录入：加载态 + 结果提示（以前点下去毫无反馈，用户不知道有没有生效） */
 const pendingRefreshing = ref(false)

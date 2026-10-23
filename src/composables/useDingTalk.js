@@ -25,11 +25,17 @@ import {
   dwellText,
   extraText,
   featureText,
+  flowRouteText,
   normalizeEvents
 } from './useAlarmText.js'
 import { runtimeLine } from './useDeviceInfo.js'
-import { BRAND, digestIntervalLabel, silentOverlapSegments } from '../config/defaults.js'
+import { BRAND, digestIntervalLabel, silentOverlapSegments, isFlowEvent } from '../config/defaults.js'
 import { collectAlarmVars, renderTemplate, DEFAULT_DING_TEMPLATE } from './useMessageTemplate.js'
+/*
+ * 属性的一行文本（性别 / 年龄 / 口罩眼镜）。阈值与标签判定只在 faceAttr.js 一份 ——
+ * 汇总消息、设置页徽标、统计页三处必须是同一个口径。
+ */
+import { faceAttrText } from './faceAttr.js'
 
 const PROXY_PREFIX = '/dingtalk-robot'
 const DINGTALK_ORIGIN = 'https://oapi.dingtalk.com'
@@ -619,7 +625,14 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     const body = shown
       .map((r) => {
         const sc = Number(r.faceScore) > 0 ? `（相似度 ${Math.round(Number(r.faceScore) * 100)}%）` : ''
-        return `- ${fmtClockSec(r.time || Date.now())} · ${r.name || '未知通道'} · ${String(r.faceName).trim()}${sc}`
+        /*
+         * 属性跟在姓名后面（男/32岁/口罩）。分隔符用 `/` 而不是 ` · `：
+         * 这一行本身已经用 ` · ` 分成「时刻 / 通道 / 姓名」，再来几个
+         * 会分不清哪个是字段分隔、哪个是属性内部的。
+         * 没有属性就什么都不加（不印"未判"，那会让"模型没开"看着像"没判出来"）。
+         */
+        const attrs = faceAttrText(r, '/')
+        return `- ${fmtClockSec(r.time || Date.now())} · ${r.name || '未知通道'} · ${String(r.faceName).trim()}${sc}${attrs ? ` · ${attrs}` : ''}`
       })
       .join('\n')
     return over ? `${body}\n- …另有 ${over} 次命中未列出` : body
@@ -655,6 +668,74 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
       })
     : []
 
+  /*
+   * ==================== 人员走向（按规则分条） ====================
+   * 诉求原文：「汇总类消息，人员走向要按走向配置几条，单独按类目汇总，
+   * 人员走向单独起一行统计。」
+   *
+   * 以前走向只是「按通道」里一个 `走向 N` 和「按类型」里一行 —— 看不出是哪条规则、
+   * 谁走了哪条线、哪条规则其实一次都没触发。现在**一条规则一行**：
+   * 次数 / 涉及几人 / 最近一次 / 路线。
+   *
+   * 规则行来自两份，合并顺序是刻意的：
+   *   ① ctx.flows —— 配置里已启用的规则。**一次都没触发也占一行写 0 次**：
+   *      死规则 / 没配好的规则正是最该被一眼发现的东西，省掉就等于藏起来。
+   *   ② 事件里出现、配置里已经没有的 flowName（规则被删了或改了名）——
+   *      追加并标「规则已删除」，否则这段时间的历史会凭空消失。
+   * ctx.flows 没传时退化为「只按事件里的 flowName 分组」，老调用方行为不变。
+   */
+  const flowRows = (() => {
+    const map = new Map()
+    const add = (name, route) => {
+      const key = String(name || '').trim() || '未命名走向'
+      let row = map.get(key)
+      if (!row) {
+        row = { name: key, route: String(route || ''), count: 0, who: new Set(), lastAt: 0, orphan: false }
+        map.set(key, row)
+      }
+      if (!row.route && route) row.route = String(route)
+      return row
+    }
+    // ① 配置里的规则先占位：顺序 = 用户在设置页里的顺序，读起来对得上
+    const cfgFlows = Array.isArray(ctx.flows) ? ctx.flows.filter((f) => f && f.name) : []
+    cfgFlows.forEach((f) => add(f.name, f.route))
+    const cfgKeys = new Set(map.keys())
+    // ② 事件里出现过的
+    list.forEach((r) => {
+      if (!isFlowEvent(r)) return
+      const route = flowRouteText(r)
+      const named = String(r.flowName || '').trim()
+      // flowName 退化成路线文本时（emitFlowEvent 的口径），名字就是路线，别拆成两行
+      const key = named && named !== route ? named : route
+      const row = add(key, route)
+      if (!cfgKeys.has(row.name)) row.orphan = true
+      row.count += 1
+      const t = Number(r.time) || 0
+      if (t > row.lastAt) row.lastAt = t
+      // 人数按身份去重：有 gid 用 gid（同一人跨通道同一个 gid），没有就退回姓名
+      const who = String(r.gid || r.faceName || '').trim()
+      if (who) row.who.add(who)
+    })
+    // 有事件的按次数降序在前；0 条的按配置顺序垫后（sort 稳定，不来回跳）
+    return [...map.values()].sort((a, b) => b.count - a.count || a.lastAt - b.lastAt)
+  })()
+
+  /**
+   * 走向分区正文。没有配置规则、也没有走向事件时整块不出现 ——
+   * 没开走向功能的现场不该被塞一个「- 无」。
+   */
+  const flowLines = flowRows
+    .map((r) => {
+      const bits = [`**${r.name}**`, r.count ? `${r.count} 次` : '0 次']
+      if (r.who.size) bits.push(`${r.who.size} 人`)
+      if (r.lastAt) bits.push(`最近 ${fmtClockSec(r.lastAt)}`)
+      // 名字就是路线时别重复印一遍
+      if (r.route && r.route !== r.name) bits.push(r.route)
+      if (r.orphan) bits.push('规则已删除')
+      return `- ${bits.join(' · ')}`
+    })
+    .join('\n')
+
   const lines = [
     `### 【${titleName}】${rangeLabel}`,
     '',
@@ -686,6 +767,9 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
       : ['- 本时段无在库人员命中']),
     ...(strangerFaces ? [`- 另有 ${strangerFaces} 次未识别的人脸（陌生人，不计入命中）`] : []),
     '',
+    // 「人员走向」单独成区：一条规则一行。没有任何走向配置与事件时整块不出现
+    // （没开这个功能的现场不该多一个空标题）。
+    ...(flowRows.length ? ['**🧭 人员走向**', flowLines, ''] : []),
     '**📋 按通道**',
     camLines,
     '',
@@ -822,7 +906,9 @@ export function buildSystemDigestSummary(items, ctx = {}) {
  *
  * @param {Array<object>} records 时段内收存的报警快照（可为空数组）
  * @param {object} cfg   options.silent（暂未用，预留给将来按渠道定制）
- * @param {object} ctx   { startMs, endMs, rangeLabel, stillSilent, stillLabel }
+ * @param {object} ctx   { startMs, endMs, rangeLabel, stillSilent, stillLabel, flows }
+ *        flows = 已启用的走向规则清单（flowRuleLabels 的产物），只影响正文里
+ *        「人员走向」分区列的规则条数，不传就只按事件里已有的 flowName 分组。
  * @returns {{ title:string, markdown:string, html:string, plain:string }}
  */
 export function buildSilentEndMessages(records, cfg, ctx = {}) {
@@ -866,7 +952,7 @@ export function buildSilentEndMessages(records, cfg, ctx = {}) {
     `本时段报警：<b>${total}</b> 条 · ${stillText}`
   ]
 
-  const summary = total ? buildSilentSummary(list, cfg, { startMs, endMs }) : null
+  const summary = total ? buildSilentSummary(list, cfg, { startMs, endMs, flows: ctx.flows }) : null
   if (summary) {
     mdLines.push('', summary.markdown)
     plainLines.push('', summary.plain)

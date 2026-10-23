@@ -1819,6 +1819,22 @@ export const PENDING_MAX = 24
 /** looksSame / cosineOrRaw 已抽到 vecMatch.js（前后端共用单一来源），这里不再重复定义 */
 
 /**
+ * 从采集时算好的 metrics 里取总分。
+ *
+ * ⚠️ 字段名是 **score**（pendingSampleMetrics 的输出形状）。以前直接读
+ * `metrics.score` 而 metrics 来自 faceSampleScore()（总分字段叫 `total`），
+ * 于是永远取不到 → 待录入一律显示「未评分」。现在形状由
+ * faceSampleScore.pendingSampleMetrics 统一，这里只做防御性解析：
+ * <= 0 一律当「没算过分」(-1)，界面据此显示「未评分」而不是「0 分」。
+ */
+function pendingScoreOf(metrics) {
+  const v = metrics && metrics.score
+  if (v == null) return -1
+  const n = Number(v)
+  return Number.isFinite(n) && n >= 0 ? n : -1
+}
+
+/**
  * 暂存一张未录入的人脸。
  * @param {object} o
  * @param {number} [o.max] 队列容量（来自 `options.face.pendingFullAt` 的解析值；
@@ -1845,6 +1861,23 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, 
     if (hit.gender == null && gender) hit.gender = gender
     if (hit.age == null && age != null) hit.age = Number(age)
     if (!hit.attr && attr) hit.attr = attr
+    /*
+     * 补分：只在「这条还没打过分」且这次算出了分时才写。
+     * 首帧常常没有对齐图（模型刚加载），metrics 为空 → score -1；合并窗口内的
+     * 后一帧往往能算出来，补上就少一条「未评分」。已有分数绝不覆盖。
+     */
+    const sc = pendingScoreOf(metrics)
+    if (sc >= 0 && (!Number.isFinite(Number(hit.score)) || Number(hit.score) < 0)) {
+      const m = metrics || {}
+      hit.score = sc
+      hit.boxW = Number(m.boxW) || 0
+      hit.boxH = Number(m.boxH) || 0
+      hit.yaw = Number(m.yaw) || 0
+      hit.sharp = Number(m.sharp) || 0
+      hit.det = Number(m.det) || 0
+      hit.frameW = Number(m.frameW) || 0
+      hit.frameH = Number(m.frameH) || 0
+    }
     return { added: false, id: hit.id }
   }
   const id = (list[0] ? list[0].id : 0) + 1
@@ -1862,11 +1895,12 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, 
      * 样本质量（采集时算的，判定在 faceSampleScore.js，与后端共用）。
      * score = -1 = 没算过分；界面据此显示「未评分」而不是"0 分"。
      */
-    score: m.score == null ? -1 : Number(m.score),
+    score: pendingScoreOf(m),
     boxW: Number(m.boxW) || 0,
     boxH: Number(m.boxH) || 0,
     yaw: Number(m.yaw) || 0,
     sharp: Number(m.sharp) || 0,
+    det: Number(m.det) || 0,
     frameW: Number(m.frameW) || 0,
     frameH: Number(m.frameH) || 0,
     // 属性（性别/年龄/口罩眼镜）：本地识别模式与后端 store.addPendingFace 同字段，
@@ -1938,8 +1972,18 @@ function normBackendPending(base, list) {
       boxH: Number(f.boxH) || 0,
       yaw: Number(f.yaw) || 0,
       sharp: Number(f.sharp) || 0,
+      det: Number(f.det) || 0,
       frameW: Number(f.frameW) || 0,
-      frameH: Number(f.frameH) || 0
+      frameH: Number(f.frameH) || 0,
+      /*
+       * 属性（性别 / 年龄 / 口罩眼镜）：后端 store.listPendingFaces 已经解析好了，
+       * 这里**必须原样带过来** —— 漏映射的后果是「后端模式下待录入卡片的属性徽标
+       * 永远不显示」（前端模式反而正常），是那种最难查的"只在某条链路缺"的 bug。
+       * 空串/null 一律归一成「没有」，让 faceAttrText 自己决定要不要画分隔符。
+       */
+      gender: f.gender || '',
+      age: f.age == null || Number(f.age) < 0 ? null : Number(f.age),
+      attr: f.attr || null
     }))
 }
 

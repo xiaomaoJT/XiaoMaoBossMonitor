@@ -752,21 +752,28 @@ export function cropAttrBuffer(full, sw, sh, cx, cy, half, size) {
  *
  * ⚠️ 与后端唯一差别：后端在启动时 ensureAll 一并加载；前端这里**懒加载**
  * （首次进入本地识别、人脸槽位就绪后才触发），所以前几帧属性可能为空，属正常。
+ * 懒加载**受开关约束**：关掉的那一项不加载（43MB 的 face_attrib_net 尤其要看这个）。
  *
  * @param {object} frame 带 canvas 的画面（{ canvas }）
  * @param {object} box 归一化人脸框 {x,y,w,h}
+ * @param {object} [opts] 两个模型各自的开关（解析收口在 defaults.faceAttrConf）
+ * @param {boolean} [opts.genderAge=true] 是否跑性别/年龄
+ * @param {boolean} [opts.attrib=true] 是否跑口罩/眼镜
  * @returns {Promise<{gender:'male'|'female'|null, age:number|null, attr:object|null}>}
  */
-export async function faceAttributes(frame, box) {
+export async function faceAttributes(frame, box, opts) {
   const sw = frame.canvas.width
   const sh = frame.canvas.height
   const result = { gender: null, age: null, attr: null }
   if (!sw || !sh) return result
-  // 懒加载（与后端"随人脸启动"等效，只是延后到真正用到时）
-  if (!isSlotReady('genderage')) await loadModel('genderage', SLOT_FILE.genderage, SLOT_SIZE.genderage).catch(() => {})
-  if (!isSlotReady('faceattr')) await loadModel('faceattr', SLOT_FILE.faceattr, SLOT_SIZE.faceattr).catch(() => {})
-  const gaReady = isSlotReady('genderage')
-  const faReady = isSlotReady('faceattr')
+  const wantGA = !opts || opts.genderAge !== false
+  const wantAttr = !opts || opts.attrib !== false
+  if (!wantGA && !wantAttr) return result
+  // 懒加载（与后端"随人脸启动"等效，只是延后到真正用到时）；关掉的那一项不加载
+  if (wantGA && !isSlotReady('genderage')) await loadModel('genderage', SLOT_FILE.genderage, SLOT_SIZE.genderage).catch(() => {})
+  if (wantAttr && !isSlotReady('faceattr')) await loadModel('faceattr', SLOT_FILE.faceattr, SLOT_SIZE.faceattr).catch(() => {})
+  const gaReady = wantGA && isSlotReady('genderage')
+  const faReady = wantAttr && isSlotReady('faceattr')
   if (!gaReady && !faReady) return result
 
   let full = null
