@@ -7,6 +7,8 @@
  *   face      人脸检测   scrfd-500m                 人脸框 + 5 点关键点
  *   faceemb   人脸特征   mobilefacenet              112×112 → 512 维向量
  *   pose      姿态估计   yolov8n-pose               17 关键点
+ *   genderage 性别/年龄  genderage                  框心 1.5×max 方裁 → 96×96，原图 0-255 直喂
+ *   faceattr  口罩/眼镜  face_attrib_net(+.data)    框心 1.5×max 方裁 → 128×128，/255
  *
  * 为什么放 Worker：H.265 软解已经把主线程吃得很紧，推理（尤其 WASM 后端）
  * 如果跑在主线程会让按钮、画面全部卡住。放到独立线程后推理期间界面依旧流畅。
@@ -44,9 +46,20 @@ const dynImport = new Function('u', 'return import(u)')
 const NORM_FN = {
   unit: (v) => v * 0.00392156862745098,
   scrfd: (v) => (v - 127.5) * 0.0078125,
-  arcface: (v) => (v - 127.5) * 0.00784313725490196
+  arcface: (v) => (v - 127.5) * 0.00784313725490196,
+  // raw：保持原图 0-255 直喂。genderage（InsightFace）的归一化已烘焙进权重图，
+  // 再做 (x-127.5)/128 之类会失真（后端探针实测确认，与后端 detector 同一口径）。
+  raw: (v) => v
 }
-const SLOT_NORM = { detector: 'unit', face: 'scrfd', faceemb: 'arcface', pose: 'unit' }
+const SLOT_NORM = {
+  detector: 'unit',
+  face: 'scrfd',
+  faceemb: 'arcface',
+  pose: 'unit',
+  // 性别/年龄：原图 0-255 直喂；属性（口罩/眼镜）：/255
+  genderage: 'raw',
+  faceattr: 'unit'
+}
 
 /* ==================== 运行时与会话 ==================== */
 let ort = null
@@ -509,6 +522,27 @@ self.onmessage = async (ev) => {
         // 人脸特征：只有一条 512 维向量，直接原样带回（余弦相似度在主线程算）
         const o = outputs[0]
         items = [{ vector: Array.from(o.data) }]
+      } else if (msg.slot === 'genderage') {
+        // InsightFace genderage：fc1 = [女, 男, 年龄/100]
+        const d = outputs[0] && outputs[0].data
+        if (d && d.length >= 3) {
+          items = [{ gender: d[0] >= d[1] ? 'female' : 'male', age: Math.max(0, Math.round(d[2] * 100)) }]
+        } else items = []
+      } else if (msg.slot === 'faceattr') {
+        // 高通 face_attrib_net：probability = [左眼睁, 右眼睁, 眼镜, 口罩, 太阳镜]（0-1）
+        const d = outputs[0] && outputs[0].data
+        if (d && d.length >= 5) {
+          const pct = (x) => Math.round(Math.min(1, Math.max(0, Number(x) || 0)) * 100)
+          items = [{
+            attr: {
+              leftEyeOpen: pct(d[0]),
+              rightEyeOpen: pct(d[1]),
+              glasses: pct(d[2]),
+              mask: pct(d[3]),
+              sunglasses: pct(d[4])
+            }
+          }]
+        } else items = []
       }
 
       self.postMessage({

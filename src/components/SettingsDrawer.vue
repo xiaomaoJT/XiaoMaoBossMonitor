@@ -67,6 +67,22 @@
             <em v-else-if="t.key === 'detect'" :class="opts.analysisEnabled ? 'ok' : 'muted'">
               {{ opts.analysisEnabled ? 'on' : 'off' }}
             </em>
+            <!--
+              拆出来的三页各读各自的总开关，绝不共用：
+              区域规则看「进入/离开/徘徊」是否至少开了一项；
+              人脸识别看 opts.face.enabled；人形姿态看 opts.pose.enabled。
+              三项都还依赖「检测识别」页的 analysisEnabled + aiEnabled，
+              所以总闸关掉时这里即便显示 on，也只是「预设为开、暂不生效」。
+            -->
+            <em v-else-if="t.key === 'zone'" :class="zoneAnyOn ? 'ok' : 'muted'">
+              {{ zoneAnyOn ? 'on' : 'off' }}
+            </em>
+            <em v-else-if="t.key === 'face'" :class="opts.face && opts.face.enabled ? 'ok' : 'muted'">
+              {{ opts.face && opts.face.enabled ? 'on' : 'off' }}
+            </em>
+            <em v-else-if="t.key === 'pose'" :class="opts.pose && opts.pose.enabled ? 'ok' : 'muted'">
+              {{ opts.pose && opts.pose.enabled ? 'on' : 'off' }}
+            </em>
             <em v-else-if="t.key === 'backend'" :class="opts.backend && opts.backend.enabled ? 'ok' : 'muted'">
               {{ opts.backend && opts.backend.enabled ? 'on' : 'off' }}
             </em>
@@ -85,8 +101,8 @@
           </div>
           <p class="hint">
             拖动每行左侧手柄可调整顺序；关掉「显示」开关可临时隐藏该画面。
-            每行里的「人脸 / 姿态 / 区域」是这一路的附加分析开关 —— 它们都要在
-            「检测识别」页开过对应总开关才会真正生效，把不看的通道关掉最省算力。
+            每行里的「人脸 / 姿态 / 区域」是这一路的附加分析开关 —— 它们都要在左侧
+            「人脸识别 / 人形姿态 / 区域规则」页开过对应总开关才会真正生效，把不看的通道关掉最省算力。
             每路下方可以单独设置「这一路推送到哪些渠道」（钉钉 / 企业微信 / Telegram），
             关掉总开关则三个渠道都不推。渠道本身的凭据与频率限制在对应的推送标签页里配置。
           </p>
@@ -225,7 +241,7 @@
                 <span class="tag-sep"></span>
                 <!--
                   人形识别之上的附加能力（通道级分流开关）。
-                  与「检测识别」页的全局总开关是两层：全局开 + 这里开 才真正生效。
+                  与「人脸识别 / 人形姿态 / 区域规则」页的全局开关是两层：全局开 + 这里开 才真正生效。
                   三项都建立在人形检测之上，所以本路人形识别关着时这里置灰不可点。
                 -->
                 <button
@@ -1366,22 +1382,46 @@
             <SelectField cls="mini" v-model.number="opts.aiIntervalMs" :options="OPT_AI_INTERVAL" />
           </div>
 
-          <!-- ==================== AI 扩展分析 ==================== -->
-          <div class="block-head sub">
-            <h3>AI 扩展分析</h3>
-            <span class="state-chip" :class="gpuReady ? 'ready' : ''">{{ gpuText }}</span>
+          <!-- ---------- 推送信息（消息页脚：这一行会写进每条推送） ---------- -->
+          <div class="sub-title">
+            推送信息
+            <em>每条消息都会带上这一行，方便分辨是哪个端发出来的</em>
+          </div>
+          <div class="opt">
+            <span>
+              <strong>运行设备</strong>
+              <em>自动识别，无需配置</em>
+            </span>
+            <!--
+              item 107：原来是原生 title 气泡 —— 延迟一秒、样式不可控、长文案
+              会被挤成窄高的一竖条。改成跟随鼠标的浮层，并把完整设备信息摊成多行。
+            -->
+            <InfoTip multiline :text="runtimeTipText">
+              <template #trigger>
+                <span class="state-chip">{{ runtimeLine(BRAND) }}</span>
+              </template>
+            </InfoTip>
+          </div>
+        </section>
+
+        <!--
+          ==================== 区域规则 ====================
+          从「检测识别」里拆出来单独成页：识别相关设置太多，全挤在一页要一直往下翻。
+          本页零额外模型（靠人形轨迹判断），所以就算显卡不行也能开。
+        -->
+        <section class="block" v-show="tab === 'zone'">
+          <div class="block-head">
+            <h3>区域规则</h3>
+            <span class="state-chip" :class="zoneAnyOn ? 'ready' : ''">
+              {{ zoneAnyOn ? '已启用' : '未启用' }}
+            </span>
           </div>
           <p class="hint">
-            以下三项都建立在人形检测之上，<b>默认全部关闭</b>，可以按需单独开启。
-            实测单次推理耗时：人脸检测 19ms、人脸特征 39ms、姿态 48ms（都走 WebGPU）；
-            没有 WebGPU 的设备会回退 WASM，慢 5~10 倍 —— 那种情况下建议只开「区域规则」。
+            零额外模型：靠人形轨迹判断，几乎不增加算力。前提是「检测识别」页的
+            <b>人形识别（AI）</b> 已开启；圈选区域请在画面上点「虚线框」按钮拖拽绘制。
+            实测单次推理耗时：人脸检测 19ms、人脸特征 39ms、姿态 48ms（都走 WebGPU），
+            没有 WebGPU 的设备会回退 WASM、慢 5~10 倍 —— 那种情况建议只开本页。
           </p>
-
-          <!-- ---------- 区域规则 ---------- -->
-          <div class="sub-title">
-            区域规则
-            <em>零额外模型：靠人形轨迹判断，几乎不增加算力</em>
-          </div>
 
           <label class="opt">
             <span>
@@ -1510,11 +1550,27 @@
             <p class="hint tight" v-else>还没有圈定任何区域。区域规则加上去之后，进入 / 离开 / 徘徊才会有事件。</p>
           </div>
 
-          <!-- ---------- 人脸识别 ---------- -->
-          <div class="sub-title">
-            人脸识别
-            <em>SCRFD 人脸检测 + MobileFaceNet 特征 · 本地人脸库</em>
+        </section>
+
+        <!--
+          ==================== 人脸识别 ====================
+          从「检测识别」里拆出来单独成页：这一块含阈值、命中策略、待录入队列、
+          人脸库、命中修正、反例名单，原本 800+ 行全堆在检测页里，翻起来极累。
+        -->
+        <section class="block" v-show="tab === 'face'">
+          <div class="block-head">
+            <h3>人脸识别</h3>
+            <span class="head-chips">
+              <span class="state-chip" :class="opts.face.enabled ? 'ready' : ''">
+                {{ opts.face.enabled ? '已启用' : '未启用' }}
+              </span>
+              <span class="state-chip" :class="gpuReady ? 'ready' : ''">{{ gpuText }}</span>
+            </span>
           </div>
+          <p class="hint">
+            SCRFD 人脸检测 + MobileFaceNet 特征 + 本地人脸库。识别到已录入的人会用姓名播报与推送，
+            并输出性别 / 年龄与口罩、眼镜等属性。前提是「检测识别」页的<b>人形识别（AI）</b>已开启。
+          </p>
 
           <label class="opt">
             <span>
@@ -2356,11 +2412,24 @@
             </div>
           </template>
 
-          <!-- ---------- 人形姿态 ---------- -->
-          <div class="sub-title">
-            人形姿态
-            <em>YOLOv8n-pose 17 关键点 · 每帧每人约 48ms（WebGPU）</em>
+        </section>
+
+        <!--
+          ==================== 人形姿态 ====================
+          同样从「检测识别」里拆出来：姿态模型最吃算力，单独一页才说得清
+          「没有 WebGPU 别开」这件事。
+        -->
+        <section class="block" v-show="tab === 'pose'">
+          <div class="block-head">
+            <h3>人形姿态</h3>
+            <span class="state-chip" :class="opts.pose.enabled ? 'ready' : ''">
+              {{ opts.pose.enabled ? '已启用' : '未启用' }}
+            </span>
           </div>
+          <p class="hint">
+            YOLOv8n-pose 17 关键点，每帧每人约 48ms（WebGPU）。无 WebGPU 的设备会回退 WASM，
+            慢 5~10 倍，不建议开启。前提是「检测识别」页的<b>人形识别（AI）</b>已开启。
+          </p>
 
           <label class="opt">
             <span>
@@ -2422,26 +2491,6 @@
             </div>
           </template>
 
-          <!-- ---------- 推送信息（消息页脚：这一行会写进每条推送） ---------- -->
-          <div class="sub-title">
-            推送信息
-            <em>每条消息都会带上这一行，方便分辨是哪个端发出来的</em>
-          </div>
-          <div class="opt">
-            <span>
-              <strong>运行设备</strong>
-              <em>自动识别，无需配置</em>
-            </span>
-            <!--
-              item 107：原来是原生 title 气泡 —— 延迟一秒、样式不可控、长文案
-              会被挤成窄高的一竖条。改成跟随鼠标的浮层，并把完整设备信息摊成多行。
-            -->
-            <InfoTip multiline :text="runtimeTipText">
-              <template #trigger>
-                <span class="state-chip">{{ runtimeLine(BRAND) }}</span>
-              </template>
-            </InfoTip>
-          </div>
         </section>
 
         <!--
@@ -4719,6 +4768,16 @@ const flowTabOn = computed(() => {
   return list.some((f) => f.enabled && flowValid(f, flowCams.value).valid)
 })
 
+/**
+ * 「区域规则」页签的 on/off 徽标：进入 / 离开 / 徘徊 至少开一项才算 on。
+ * 只陈述「这一页的规则有没有开」，不代表此刻真的会报警 ——
+ * 还要叠加「检测识别」页的人形识别与通道级区域开关（那是另一层，见各条 hint）。
+ */
+const zoneAnyOn = computed(() => {
+  const z = opts.zone || {}
+  return !!(z.enterAlarm || z.exitAlarm || z.loiterAlarm)
+})
+
 const props = defineProps({
   cameras: { type: Array, required: true },
   options: { type: Object, required: true },
@@ -4880,7 +4939,10 @@ const CAM_CHANNELS = [
  * 页签顺序 = 使用动线，刻意按「先画面/性能 → 再看报警链路 → 再钻进检测细节 → 收尾维护」排：
  *   ① 监控通道 / 播放性能           —— 最常动的两页（加通道、调解码），必须最先够到
  *   ② 报警提醒 / 状态巡检           —— 「什么时候响、怎么响」，接着就是它
- *   ③ 检测识别 / 后端检测           —— 「拿什么判定」；本机算法在前、搬去服务端在后，成对出现
+ *   ③ 检测识别 → 区域规则 → 人脸识别 → 人形姿态 —— 「拿什么判定」；
+ *      原来这四块全挤在一页（人脸一块就 800+ 行），现在按模块拆成独立大标签，
+ *      顺序按「零额外算力 → 中等 → 最吃算力」排，各自带 on/off 徽标
+ *   ③' 人员流向 / 后端检测          —— 建立在上面的识别能力之上；本机 vs 服务端成对出现
  *   ④ 三个推送渠道 → 推送模板       —— 「发去哪、长什么样」，渠道按 TG / 企微 / 钉钉
  *   ⑤ 隐私遮罩 / 外观布局 / 配置方案 —— 低频外观与整体方案
  *   ⑥ 系统维护 / 关于系统           —— 只看不改的信息收在最后，不打断前面的操作动线
@@ -4913,8 +4975,31 @@ const TABS = [
   {
     key: 'detect',
     label: '检测识别',
-    desc: '移动检测与人形识别参数',
+    desc: '移动检测、人形识别与推理设置',
     icon: 'M4 18a9 9 0 0 1 16 0M7.5 18a5.5 5.5 0 0 1 9 0M12 18h.01'
+  },
+  /*
+   * 以下三页原来都挤在「检测识别」里（人脸一块就 800+ 行），纵向翻查极累。
+   * 拆成独立大标签：入口一眼可见、各自带 on/off 徽标，页签顺序仍按依赖关系排 ——
+   * 区域规则（不额外吃算力）→ 人脸识别 → 人形姿态（最吃算力）。
+   */
+  {
+    key: 'zone',
+    label: '区域规则',
+    desc: '走入 / 走出 / 徘徊：基于人形轨迹，零额外算力',
+    icon: 'M4 6.5h16v11H4zM8.5 10.5h7v4h-7z'
+  },
+  {
+    key: 'face',
+    label: '人脸识别',
+    desc: '人脸检测、特征比对、本地人脸库与待录入队列',
+    icon: 'M12 4.2a3.8 3.8 0 1 1 0 7.6 3.8 3.8 0 0 1 0-7.6M4.6 20a7.4 7.4 0 0 1 14.8 0'
+  },
+  {
+    key: 'pose',
+    label: '人形姿态',
+    desc: '跌倒 / 举手 / 蹲下 / 站立等动作识别',
+    icon: 'M12 3.8a1.7 1.7 0 1 1 0 3.4 1.7 1.7 0 0 1 0-3.4M12 7.4v6.2m0 0l-3.2 5.4M12 13.6l3.2 5.4M7 10.2l5 1.1 5-1.1'
   },
   /* 人员流向（跨摄像头走向）紧跟检测识别：它建立在人形轨迹 / 人脸之上，依赖上面的识别能力 */
   {
@@ -6089,7 +6174,7 @@ watch(
   () => [backendState.value, opts.backend && opts.backend.enabled],
   () => {
     if (backendState.value === 'polling' && !backendWatchdog.value) refreshBackendWatchdog(opts)
-    // 后端模式下未录入人脸是在服务端抓的，进「检测识别」页就把待录入队列拉回来，
+    // 后端模式下未录入人脸是在服务端抓的，进「人脸识别」页就把待录入队列拉回来，
     // 否则用户看到的是空列表，以为「抓到的脸没进库」
     if (faceBackendOn.value) {
       refreshBackendPending()
@@ -6128,7 +6213,7 @@ const behindBackend = computed(() => localRev.value > 0 && syncRev.value > local
 
 /* ==================== 通道级附加能力（人脸 / 姿态 / 区域） ==================== */
 /**
- * 和「检测识别」页的全局总开关是**两层**控制：
+ * 和「人脸识别 / 人形姿态 / 区域规则」三个页签的全局开关是**两层**控制：
  *   全局开着 + 本通道开着 → 这一路才真的跑。
  * 这里管的是"这一路要不要参与"，目的是把算力集中到真正在看的那几路上。
  */
@@ -6154,7 +6239,7 @@ function camExtTitle(cam, e) {
   if (!extGlobalOn(e.key, cam)) {
     return e.key === 'enterExit'
       ? `先开启这一路的「区域规则」（更多操作 → 区域规则），走入/走」才会生效`
-      : `「${e.globalLabel}」的全局总开关还没开（在「检测识别」页），这里只是预设这一路是否参与`
+      : `「${e.globalLabel}」的全局总开关还没开（在左侧「${e.globalLabel}」页），这里只是预设这一路是否参与`
   }
   return `点击让这一路不再跑${e.globalLabel}（省这一路的算力）`
 }
@@ -9210,6 +9295,15 @@ function loadHidden() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* 页头右侧并排的状态芯片（「已启用/未启用」+ GPU 后端） */
+.head-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 /* 「恢复初始化」的二次确认说明（配置方案页） */

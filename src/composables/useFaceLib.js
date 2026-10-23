@@ -1827,7 +1827,7 @@ export const PENDING_MAX = 24
  *                          <=0 = 关闭去重。缺省回落 vecMatch.PENDING_DEDUPE.sec.def
  * @returns {{added:boolean, id?:number}}
  */
-export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, dedupeSec, metrics }) {
+export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, dedupeSec, metrics, gender, age, attr }) {
   if (!vector || !vector.length || !thumb) return { added: false }
   const list = pendingFaces.value
   const now = at || Date.now()
@@ -1840,6 +1840,11 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, 
     hit.hits = (hit.hits || 1) + 1
     // 同一张脸刷新时间，但「后来抓到的这帧」往往更清晰/更完整，顺手更新原图
     if (full) hit.full = full
+    // 属性「空则填」：首帧模型可能还没加载完（本地模式懒加载），
+    // 不补的话这条记录会一直显示不出徽标。已有值不覆盖（与后端 addPendingFace 同口径）。
+    if (hit.gender == null && gender) hit.gender = gender
+    if (hit.age == null && age != null) hit.age = Number(age)
+    if (!hit.attr && attr) hit.attr = attr
     return { added: false, id: hit.id }
   }
   const id = (list[0] ? list[0].id : 0) + 1
@@ -1863,7 +1868,12 @@ export function pushPendingFace({ vector, thumb, full, at, camId, camName, max, 
     yaw: Number(m.yaw) || 0,
     sharp: Number(m.sharp) || 0,
     frameW: Number(m.frameW) || 0,
-    frameH: Number(m.frameH) || 0
+    frameH: Number(m.frameH) || 0,
+    // 属性（性别/年龄/口罩眼镜）：本地识别模式与后端 store.addPendingFace 同字段，
+    // 让待录入卡片的徽标在「纯前端模式」下也能显示（后端模式本就走 SQLite，不走这里）
+    gender: gender || null,
+    age: age == null ? null : Number(age),
+    attr: attr || null
   })
   const cap = Math.max(1, Math.round(Number(max) || PENDING_MAX))
   if (list.length > cap) list.splice(cap)

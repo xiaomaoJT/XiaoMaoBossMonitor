@@ -20,6 +20,7 @@ import {
   detectFaces,
   detectFacesInHead,
   detectPose,
+  faceAttributes,
   faceEmbedding,
   faceThumb,
   frameShotWithFace,
@@ -532,6 +533,10 @@ export function useAiExtras(options) {
         (f) => Math.abs((f.x + f.w / 2) - (face.x + face.w / 2)) < 0.02 &&
                Math.abs((f.y + f.h / 2) - (face.y + face.h / 2)) < 0.02
       )
+      // 属性（性别/年龄/口罩/眼镜）：本地识别模式与后端 analyzer 同口径；
+      // 失败静默兜底，绝不拖累人脸识别主流程（与后端 faceAttributes 一致）
+      let attrs = null
+      try { attrs = await faceAttributes(frame, face) } catch (e) { attrs = null }
 
       /*
        * 命中质量门槛：检测置信度太低 / 脸太小 / 侧脸转太多，不许认成库内某人
@@ -546,6 +551,9 @@ export function useAiExtras(options) {
         if (slot) {
           slot.name = who
           slot.known = true
+          slot.gender = attrs && attrs.gender
+          slot.age = attrs && attrs.age
+          slot.attr = attrs && attrs.attr
         }
         if (!fc.eventOnKnown) continue
         /*
@@ -572,6 +580,9 @@ export function useAiExtras(options) {
           thumb: thumb || '',
           trackId: track.id,
           at: now,
+          gender: attrs && attrs.gender,
+          age: attrs && attrs.age,
+          attr: attrs && attrs.attr,
           text: `识别到「${who}」（相似度 ${(hit.score * 100).toFixed(0)}%）`,
           source: 'face'
         })
@@ -580,6 +591,9 @@ export function useAiExtras(options) {
         if (slot) {
           slot.name = ''
           slot.known = false
+          slot.gender = attrs && attrs.gender
+          slot.age = attrs && attrs.age
+          slot.attr = attrs && attrs.attr
         }
         if (fc.collectUnknown && thumb) {
           pushPendingFace({
@@ -591,7 +605,10 @@ export function useAiExtras(options) {
             camName: cam.name,
             max: fc.fullAt,
             dedupeSec: fc.dedupeWin,
-            metrics: sampleMetrics(frame.canvas, face, aligned)
+            metrics: sampleMetrics(frame.canvas, face, aligned),
+            gender: attrs && attrs.gender,
+            age: attrs && attrs.age,
+            attr: attrs && attrs.attr
           })
         }
         if (!fc.eventOnUnknown) continue
@@ -610,6 +627,9 @@ export function useAiExtras(options) {
           thumb: thumb || '',
           trackId: track.id,
           at: now,
+          gender: attrs && attrs.gender,
+          age: attrs && attrs.age,
+          attr: attrs && attrs.attr,
           text: '检测到未录入的人脸',
           source: 'face'
         })

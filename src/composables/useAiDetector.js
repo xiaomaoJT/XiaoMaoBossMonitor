@@ -49,10 +49,13 @@ const FACE_SIZE = 112
 const SLOT_FILE = {
   face: 'scrfd-500m',
   faceemb: 'mobilefacenet',
-  pose: 'yolov8n-pose'
+  pose: 'yolov8n-pose',
+  // 性别/年龄 + 属性（口罩/眼镜）：与后端 detector.mjs SLOT_DEF 同一批模型文件
+  genderage: 'genderage',
+  faceattr: 'face_attrib_net'
 }
 /** 各槽位的推荐输入边长 */
-const SLOT_SIZE = { detector: 640, face: 640, pose: 640, faceemb: FACE_SIZE }
+const SLOT_SIZE = { detector: 640, face: 640, pose: 640, faceemb: FACE_SIZE, genderage: 96, faceattr: 128 }
 
 /* ==================== Worker 管理 ==================== */
 let worker = null
@@ -698,6 +701,103 @@ export async function detectFacesInHead(source, box, detect, opts = {}) {
     return []
   }
   return dets.map((d) => mapCropBack(d, crop))
+}
+
+/* ==================== 人脸属性（性别/年龄 + 口罩/眼镜） ==================== */
+
+/**
+ * 框心 1.5×max 方裁 → size×size 的 RGBA buffer（越界填灰 114）。
+ * 与后端 detector.cropSquareResize 完全等价 —— 前端本地识别要得到和后端一致的结果。
+ * 注意：归一化交给 Worker 的 toTensor（按 SLOT_NORM，genderage=raw / faceattr=unit），
+ * 这里只裁图、不动数值。
+ * @param {Uint8ClampedArray} full 全帧 RGBA
+ * @param {number} sw @param {number} sh
+ * @param {number} cx 框心 x（像素） @param {number} cy 框心 y（像素）
+ * @param {number} half 半边长（像素）= 0.75 × max(框宽,框高)
+ * @param {number} size 目标边长
+ * @returns {Uint8ClampedArray} 长度 size*size*4，alpha=255
+ */
+export function cropAttrBuffer(full, sw, sh, cx, cy, half, size) {
+  const buf = new Uint8ClampedArray(size * size * 4)
+  const side = 2 * half
+  for (let y = 0; y < size; y++) {
+    const sy = cy - half + ((y + 0.5) / size) * side
+    const siy = Math.floor(sy)
+    const oobY = siy < 0 || siy >= sh
+    for (let x = 0; x < size; x++) {
+      const sx = cx - half + ((x + 0.5) / size) * side
+      const six = Math.floor(sx)
+      const di = (y * size + x) * 4
+      if (oobY || six < 0 || six >= sw) {
+        buf[di] = 114
+        buf[di + 1] = 114
+        buf[di + 2] = 114
+        buf[di + 3] = 255
+      } else {
+        const si = (siy * sw + six) * 4
+        buf[di] = full[si]
+        buf[di + 1] = full[si + 1]
+        buf[di + 2] = full[si + 2]
+        buf[di + 3] = 255
+      }
+    }
+  }
+  return buf
+}
+
+/**
+ * 一次性跑「性别/年龄」+「口罩/眼镜」两个小模型（前端**本地识别模式**）。
+ * 与后端 detector.faceAttributes 同口径；任一槽位未加载则对应字段为 null，
+ * 失败静默兜底（.catch 吞掉），绝不拖累人脸识别主流程。
+ *
+ * ⚠️ 与后端唯一差别：后端在启动时 ensureAll 一并加载；前端这里**懒加载**
+ * （首次进入本地识别、人脸槽位就绪后才触发），所以前几帧属性可能为空，属正常。
+ *
+ * @param {object} frame 带 canvas 的画面（{ canvas }）
+ * @param {object} box 归一化人脸框 {x,y,w,h}
+ * @returns {Promise<{gender:'male'|'female'|null, age:number|null, attr:object|null}>}
+ */
+export async function faceAttributes(frame, box) {
+  const sw = frame.canvas.width
+  const sh = frame.canvas.height
+  const result = { gender: null, age: null, attr: null }
+  if (!sw || !sh) return result
+  // 懒加载（与后端"随人脸启动"等效，只是延后到真正用到时）
+  if (!isSlotReady('genderage')) await loadModel('genderage', SLOT_FILE.genderage, SLOT_SIZE.genderage).catch(() => {})
+  if (!isSlotReady('faceattr')) await loadModel('faceattr', SLOT_FILE.faceattr, SLOT_SIZE.faceattr).catch(() => {})
+  const gaReady = isSlotReady('genderage')
+  const faReady = isSlotReady('faceattr')
+  if (!gaReady && !faReady) return result
+
+  let full = null
+  try {
+    const ctx = frame.canvas.getContext('2d', { willReadFrequently: true })
+    full = ctx.getImageData(0, 0, sw, sh).data
+  } catch (e) {
+    return result
+  }
+  const bw = Math.max(1, box.w * sw)
+  const bh = Math.max(1, box.h * sh)
+  const cx = box.x * sw + bw / 2
+  const cy = box.y * sh + bh / 2
+  const half = 0.75 * Math.max(bw, bh) // 1.5×max → 半边长
+
+  if (gaReady) {
+    const buf = cropAttrBuffer(full, sw, sh, cx, cy, half, SLOT_SIZE.genderage)
+    const res = await request('genderage', SLOT_SIZE.genderage, buf.buffer, {}, 15000).catch(() => [])
+    const item = res && res[0]
+    if (item && item.gender) {
+      result.gender = item.gender
+      result.age = item.age
+    }
+  }
+  if (faReady) {
+    const buf = cropAttrBuffer(full, sw, sh, cx, cy, half, SLOT_SIZE.faceattr)
+    const res = await request('faceattr', SLOT_SIZE.faceattr, buf.buffer, {}, 15000).catch(() => [])
+    const item = res && res[0]
+    if (item && item.attr) result.attr = item.attr
+  }
+  return result
 }
 
 /* ==================== 向量工具 ==================== */

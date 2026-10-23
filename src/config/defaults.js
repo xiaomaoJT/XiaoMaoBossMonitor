@@ -1652,7 +1652,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.5.0'
+  version: '1.6.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
