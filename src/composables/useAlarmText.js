@@ -110,13 +110,42 @@ export function alarmTitle(r) {
   return alarmLabel(r && r.type)
 }
 
+/**
+ * 从走向事件的正文里把路线抠出来。
+ *
+ * 为什么要这一步：`flow_path` / `flow_name` 两列是**后来才加进 `makeRecord` 的**（10-23），
+ * 在那之前落库的走向事件这两列全是空串 —— 但正文从走向功能第一天起就写着
+ * 「🚶【规则名】谁 从 A·1 → B·2（间隔 3 秒）」。路线一直在正文里，只是没人回去读。
+ *
+ * 只认带箭头的那一段，避免把「从 门口 走过」这种自然语言当成路线；也没有
+ * 用贪婪匹配，防止把后面的「（间隔…）」一起吃进去。
+ *
+ * @param {string} text 事件正文（record.text）
+ * @returns {string} 路线文本（如 `电梯·2 → 大厅·2`）；解析不出返回空串
+ */
+export function flowRouteFromText(text) {
+  const s = String(text || '')
+  if (!s || !s.includes('→')) return ''
+  const m = s.match(/从\s*([^（()）]*?→[^（()）]*?)\s*(?:[（(]|$)/)
+  return m ? String(m[1] || '').trim() : ''
+}
+
 /** 走向事件的路线文本（多跳 A→B→C）。alarmDetail / alarmTitle / 汇总分区共用一份，避免两处漂移。 */
 export function flowRouteText(r) {
   if (Array.isArray(r.flowPath) && r.flowPath.length) {
     return r.flowPath.map((p) => `${p.camName || '?'}·${p.zoneName || '?'}`).join(' → ')
   }
   // 兼容早期事件（仅含 from/to）
-  return `${r.fromCamName || r.fromCam || '?'}·${r.fromZoneName || r.fromZone || '?'} → ${r.toCamName || r.toCam || '?'}·${r.toZoneName || r.toZone || '?'}`
+  if (r.fromCamName || r.fromCam || r.toCamName || r.toCam) {
+    return `${r.fromCamName || r.fromCam || '?'}·${r.fromZoneName || r.fromZone || '?'} → ${r.toCamName || r.toCam || '?'}·${r.toZoneName || r.toZone || '?'}`
+  }
+  /*
+   * ③ 兜底：两列都没存下来的老事件，路线还留在正文里（见 flowRouteFromText）。
+   * 不兜这一步的话，汇总会把它们全塞进「?·? → ?·?」——而现场明明有规则、也真有人走过。
+   */
+  const fromText = flowRouteFromText(r.text)
+  if (fromText) return fromText
+  return '?·? → ?·?'
 }
 
 /**

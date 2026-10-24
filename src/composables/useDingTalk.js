@@ -704,6 +704,18 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     const cfgFlows = Array.isArray(ctx.flows) ? ctx.flows.filter((f) => f && f.name) : []
     cfgFlows.forEach((f) => add(f.name, f.route))
     const cfgKeys = new Set(map.keys())
+    /*
+     * 路线 → 规则名反查表。存在的意义：老事件的 `flow_name` / `flow_path` 两列是空的
+     * （这两列 10-23 才进 makeRecord），只有正文里还留着路线。没有这张表，那些事件
+     * 只能按「没规则名」处理 —— 要么被塞进「规则已删除」的孤儿行，要么另开一行同名路线，
+     * 而现场其实**规则还在、也真的命中了**，只是当年没把路线存成列。
+     * 另外规则改过名时也走这张表：老事件带着旧名字，按路线仍能归到现在的规则上。
+     */
+    const routeToName = new Map()
+    cfgFlows.forEach((f) => {
+      const rt = String(f.route || '').trim()
+      if (rt) routeToName.set(rt, f.name)
+    })
     // ② 事件里出现过的
     list.forEach((r) => {
       if (!isFlowEvent(r)) return
@@ -712,14 +724,20 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
       /*
        * 行名判定（避免把「?·? → ?·?」这种解析不出路线的占位当行名，
        * 老事件 / 已删除规则没存路线信息时尤其常见）：
-       *   · 有规则名且不等于路线 → 用规则名（同规则的事件归到一行）
-       *   · 没规则名但有可解析路线 → 用路线当行名（无名规则按路线聚合）
-       *   · 既没规则名、路线也解析不出 → 退化为「未命名走向」，不印 ?·?
+       *   · 有规则名且不在当前配置里 → 先按路线反查（规则改名 / 老事件空列两种情况都能救），
+       *     反查不到才落成独立行并标「规则已删除」
+       *   · 有规则名 → 用规则名（同规则的事件归到一行）
+       *   · 没规则名 → 按路线反查配置规则；再没有才用路线当行名，路线也解析不出就「未命名走向」
        */
-      const key =
-        named && named !== route
-          ? named
-          : named || (route && route !== UNRESOLVED_ROUTE ? route : '未命名走向')
+      const byRoute = routeToName.get(String(route || '').trim()) || ''
+      let key = named
+      if (key && !cfgKeys.has(key)) {
+        // 规则名已不在配置里（改名 / 删除）：先按路线试归到现名，救回改了名字的那批
+        if (byRoute) key = byRoute
+      } else if (!key) {
+        // 名字列是空的（老事件）：按路线反查配置规则，实在没有才退回路线 / 未命名走向
+        key = byRoute || (route && route !== UNRESOLVED_ROUTE ? route : '未命名走向')
+      }
       const row = add(key, route)
       if (!cfgKeys.has(row.name)) row.orphan = true
       row.count += 1
