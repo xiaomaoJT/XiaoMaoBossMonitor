@@ -11,12 +11,14 @@
  *     同一个 key —— 语义是「同一时刻每条 flow 只跟踪一条匿名链路」。单人场景（一个人
  *     走完整条路径）完全够用；多人同窗并行会串链，要精确配对请把 requireFace 打开并录入人脸。
  *   · **多跳（A→B→C…）**：path 是有序节点数组，逐跳推进状态机；任一跳超时或错序即断链。
+ *   · **相反流向防抖**：同一身份在防抖窗口（options.flow.oppositeSec，默认 60s、0=关）内
+ *     走完一条流向后又走完它的反向流向时，第二次不上抛 —— 见 recordArrival 完成分支。
  *
  * ⚠️ 本模块**不碰任何图像 / 推送 / 渲染**——只做「多路本地进出事件按身份 + 时间窗串起来」。
  *    截图由调用方在 record 时传入 `shot`（人形小图）与 `fullShot`（整帧原图），
  *    引擎只存不取：shot 供推送 / 列表缩略，fullShot 供详情页「流向轨迹节点看原图」。
  */
-import { flowValid, clampFlowWindowSec, isFlowFullZone } from '../config/defaults.js'
+import { flowValid, clampFlowWindowSec, isFlowFullZone, clampFlowOppositeSec } from '../config/defaults.js'
 
 /** 进行中的链路硬上限（与 useAlertPush 的 BUFFER_CAP 同源思路） */
 export const FLOW_ENGINE_MAX = 2000
@@ -49,22 +51,33 @@ export function createFlowEngine() {
   const stats = {
     departures: 0, // 进入匹配的出场次数（该 (cam,zone) 是某条生效 flow 的出发节点）
     arrivals: 0, // 进入匹配的入场次数
-    matched: 0, // 走完全程成功配对的次数
+    matched: 0, // 走完全程成功配对的次数（不含被防抖抑制的）
     hopTimeout: 0, // 单跳超时断链（半路断开，1 秒宽限后整链淘汰）
     expired: 0, // 整链 TTL / LRU 淘汰次数（含单跳超时后的宽限淘汰）
     droppedNoGid: 0, // requireFace:true 但拿不到人脸身份 → 丢弃
-    anonReplaced: 0 // 匿名在途链路被同 flow 的新出发覆盖（多人同窗会串链的风险计数）
+    anonReplaced: 0, // 匿名在途链路被同 flow 的新出发覆盖（多人同窗会串链的风险计数）
+    oppositeSuppressed: 0 // 相反流向防抖抑制的次数（窗口内走完反向流向，第二次不推送）
   }
 
   const state = {
     flows: [],
-    cameras: []
+    cameras: [],
+    /** 相反流向防抖窗口（秒）；0 = 关闭。见 setConfig 第三参 */
+    oppositeSec: clampFlowOppositeSec(undefined)
   }
 
-  /** 运行时喂入当前配置（flows + 通道列表）。配置变化即重设，引擎据此判断哪些 flow 生效 */
-  function setConfig(flows, cameras) {
+  /**
+   * 每个身份 key 最近一次**走完**的流向：{ sig, at }。
+   * 只服务相反流向防抖（见 recordArrival 完成分支），不参与配对。
+   */
+  const lastDone = new Map()
+
+  /** 运行时喂入当前配置（flows + 通道列表 + 流向全局设置）。配置变化即重设，引擎据此判断哪些 flow 生效 */
+  function setConfig(flows, cameras, flowCfg) {
     state.flows = Array.isArray(flows) ? flows : []
     state.cameras = Array.isArray(cameras) ? cameras : []
+    // 第三参缺省（老调用方 / 探针）时落默认值 —— 与 defaults 的 flow.oppositeSec 同源
+    state.oppositeSec = clampFlowOppositeSec(flowCfg && flowCfg.oppositeSec)
   }
 
   /** 找出「出场」命中该 (cam, zone) 的所有 (flow, 段下标)，要求 flow 有效 */
@@ -108,6 +121,19 @@ export function createFlowEngine() {
     return `${flowId}|${key}`
   }
 
+  /**
+   * 一条流向路径的稳定签名：`cam:zone>cam:zone>…`。
+   * 两条流向「互为反向」的判据就是 `sigA === reverse(sigB)`
+   * （如「门外→门内」与「门内→门外」）—— 用于相反流向防抖。
+   */
+  function pathSig(flow) {
+    const path = Array.isArray(flow && flow.path) ? flow.path : []
+    return path.map((n) => `${n && n.cam}:${n && n.zone}`).join('>')
+  }
+  function reverseSig(sig) {
+    return String(sig).split('>').reverse().join('>')
+  }
+
   /** 惰性淘汰过期链路 + LRU 硬上限 */
   function evictExpired(now) {
     for (const [pk, st] of progress) {
@@ -124,6 +150,18 @@ export function createFlowEngine() {
         progress.delete(pk)
         if (st.head >= 0) stats.expired++
       }
+    }
+    /*
+     * 防抖记录表惰性清理：超过窗口的记录不可能再抑制任何事件（窗口判定是
+     * `now - at <= window`），留着只会让表无限增长。关闭防抖时整表清掉。
+     */
+    if (state.oppositeSec > 0) {
+      const ttl = state.oppositeSec * 1000
+      for (const [k, v] of lastDone) {
+        if (now - v.at > ttl) lastDone.delete(k)
+      }
+    } else if (lastDone.size) {
+      lastDone.clear()
     }
   }
 
@@ -242,17 +280,40 @@ export function createFlowEngine() {
           flowShots.push(s)
           flowFulls.push(f)
         }
-        matches.push({
-          flow,
-          startedAt: st.startedAt,
-          arrivedAt: now,
-          spanSec,
-          shot: p.shot || null,
-          departureShot,
-          flowShots,
-          flowFulls
-        })
-        stats.matched++
+        /*
+         * 相反流向防抖：同一身份在防抖窗口内刚走完一条流向，又立刻走完它的
+         * **反向**流向（A「走入」后几秒 B「走出」）—— 第二次大概率是同一次
+         * 进出的重复触发（检测抖动 / 在门口犹豫 / 身份在两条 flow 间跳变），
+         * 不再上抛（不推送、不进事件库），只计数。
+         *
+         * 判据是路径签名互为反向（cam:zone 序列反转），不是"任意两条 flow"：
+         * 同方向重复走（A→B 紧接着 A→B）是另一回事，不在此列。
+         * 防抖记录**无论抑制与否都更新**：连续反弹时每条都在延伸窗口，
+         * 表现为"每个方向在窗口内最多推一条"。
+         */
+        const sig = pathSig(flow)
+        const prev = lastDone.get(key)
+        const bounced =
+          state.oppositeSec > 0 &&
+          !!prev &&
+          now - prev.at <= state.oppositeSec * 1000 &&
+          prev.sig === reverseSig(sig)
+        lastDone.set(key, { sig, at: now })
+        if (bounced) {
+          stats.oppositeSuppressed++
+        } else {
+          matches.push({
+            flow,
+            startedAt: st.startedAt,
+            arrivedAt: now,
+            spanSec,
+            shot: p.shot || null,
+            departureShot,
+            flowShots,
+            flowFulls
+          })
+          stats.matched++
+        }
         progress.delete(pk)
       } else {
         st.expireAt = now + clampFlowWindowSec(flow.windowSec) * 1000
@@ -308,6 +369,7 @@ export function createFlowEngine() {
   /** 清空缓冲（探针 / 重置用） */
   function reset() {
     progress.clear()
+    lastDone.clear()
     seq = 0
     for (const k of Object.keys(stats)) stats[k] = 0
   }

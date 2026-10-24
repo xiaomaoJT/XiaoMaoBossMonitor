@@ -71,6 +71,13 @@ const HARD_LIMIT = 20
 const WINDOW_MS = 60000
 
 /**
+ * 全局硬静默（远程 /until）期间要挡下的关键事件 kind。
+ * 'silence' / 'summary' 不在其列：它们是免打扰机制自己的开始 / 结束宣告，
+ * 不是被监测的事件（与 sendDirect 的「提醒发去哪」同一口径）。
+ */
+const HARD_SILENT_BLOCKED_KINDS = new Set(['face', 'flow', 'pending'])
+
+/**
  * 各渠道的配置读取与可用性判断。
  * 注意：必须做成工厂函数——配置对象是外面传进来的（响应式 options），
  * 写成模块级常量会在运行时报 "options is not defined"（闭包里根本没有它）。
@@ -274,6 +281,9 @@ export function useAlertPush(options, hooks = {}) {
    *                （远程 /check duty 查岗要按它划查询区间），参与静默判定的仍是 tempUntil。
    *   tempChannels 临时静默覆盖的渠道；为空则沿用 channels（三端）
    *   tempLabel    可选的用途备注，会写进状态文案
+   *   tempHard     「全局硬静默」标记（远程 /until 指令的语义）：窗口内**所有**事件
+   *                都不推 —— 含人脸命中 / 走向关键事件这类平时能穿透静默的关键事件；
+   *                到点后汇总以关键事件形式推送。缺省 / false = 普通临时静默。
    */
   function tempSilentState(now) {
     const c = silentCfg()
@@ -286,6 +296,7 @@ export function useAlertPush(options, hooks = {}) {
     if (!chans.length) return { active: false, expired: true, endMs: until }
     return {
       active: true,
+      hard: c.tempHard === true,
       startMs: tempStartMs(c, now),
       endMs: until,
       channels: chans,
@@ -348,12 +359,14 @@ export function useAlertPush(options, hooks = {}) {
       return {
         active: true,
         temp: true,
+        hard: !!temp.hard,
         startMs: temp.startMs,
         endMs: temp.endMs,
         channels: temp.channels,
         // 用途备注要一路带到提醒文案里，否则「临时静默已开启」看不出是为什么静默的
         reason: temp.reason || '',
-        rangeLabel: `临时静默（至 ${p2t(e.getHours())}:${p2t(e.getMinutes())}）`,
+        // 硬静默的文案要区别开：它连关键事件一起吃掉，用户看到的"时段名"必须对得上
+        rangeLabel: `${temp.hard ? '全局静默' : '临时静默'}（至 ${p2t(e.getHours())}:${p2t(e.getMinutes())}）`,
         endLabel: `${p2t(e.getHours())}:${p2t(e.getMinutes())}`,
         leftLabel
       }
@@ -747,9 +760,23 @@ export function useAlertPush(options, hooks = {}) {
       /*
        * 静默窗口若在停机期间已经结束 → 新鲜进程读不到 prev，不会触发结束汇总，
        * 缓冲会卡死。这里兜底：不在窗口里却还有缓冲 → 立刻补发一条（数据可回收）。
+       *
+       * 若停机期间结束的正好是**硬静默**窗口（/until：tempHard 还留着、
+       * tempUntil 已过期），补发按关键事件形式强推（承诺过的交付），
+       * 并把过期标记清掉 —— 不清的话它会一直躺在持久化配置里。
        */
       if (silentBuffer.length && !currentWindow(Date.now())) {
-        flushSilentSummary({ endMs: Date.now() }).catch(() => {})
+        const c0 = silentCfg()
+        const hardEnded =
+          c0.tempHard === true && Number(c0.tempUntil) > 0 && Number(c0.tempUntil) <= Date.now()
+        if (hardEnded) {
+          c0.tempHard = false
+          c0.tempUntil = 0
+          c0.tempSince = 0
+          c0.tempLabel = ''
+          markDirty()
+        }
+        flushSilentSummary({ endMs: Date.now(), hardEnd }).catch(() => {})
       }
     } catch (e) {
       loading = false
@@ -779,6 +806,7 @@ export function useAlertPush(options, hooks = {}) {
     return {
       key: `${st.temp ? 'temp' : 'slot'}:${st.endMs}`,
       temp: !!st.temp,
+      hard: !!st.hard,
       startMs: st.startMs,
       endMs: st.endMs,
       rangeLabel: st.rangeLabel,
@@ -848,6 +876,8 @@ export function useAlertPush(options, hooks = {}) {
    * @param {boolean}[opts.manual]  手动触发：没收到报警就不发（纯提醒按钮场景）
    * @param {boolean}[opts.test]    设置页试发：只生成并发送，不动真实缓冲
    * @param {string[]}[opts.onlyIds] 限定只发这几个渠道（试发用；缺省 = 全部已配置渠道）
+   * @param {boolean}[opts.hardEnd]  调用方已知"这是硬静默窗口的结束"（停机恢复兜底
+   *                                 读不到 window 对象时用它补上），汇总按关键事件形式强推
    */
   async function flushSilentSummary(opts = {}) {
     const now = Date.now()
@@ -969,16 +999,24 @@ export function useAlertPush(options, hooks = {}) {
         text: summary.plain,
         html: summary.html || summary.plain
       }
+      /*
+       * 硬静默窗口（/until）的结束汇总：**以关键事件形式推送**—— force 掉静默判定。
+       * 到点时刻若仍压在另一个免打扰窗口里（夜间时段没结束），普通路径会被
+       * throughSilence 挡下；而这条汇总是硬静默承诺过的交付，必须出去。
+       * 日常渠道那条不受影响（照旧按各自开关发）。
+       */
+      const hardEnd = !!(opts.hardEnd || (closedWin && closedWin.hard))
+      const sumOpts = hardEnd ? { force: true } : {}
       if (dailyIds.length) {
         // 日常推送还有渠道在发：关键事件这条是"再单独发一份"，照旧即发即忘
-        pushDirectToUsers('summary', summaryPayload).catch(() => {})
+        pushDirectToUsers('summary', summaryPayload, sumOpts).catch(() => {})
       } else {
         /*
          * 全接管：关键事件这条是**唯一**的送达通道。三端一个都没发出去时，
          * 把缓冲放回头部 —— 与日常推送「全渠道失败」同一规矩（整批放回、
          * 下轮再发）；有任一端发成就此打住，不放回，否则成功的端会收到重复第二条。
          */
-        const r = await pushDirectToUsers('summary', summaryPayload).catch(() => null)
+        const r = await pushDirectToUsers('summary', summaryPayload, sumOpts).catch(() => null)
         if (!r || !r.sent) silentBuffer.unshift(...buf)
       }
     }
@@ -1827,32 +1865,48 @@ export function useAlertPush(options, hooks = {}) {
     const reason = String(win.reason || '').trim()
     const reasonMd = reason ? [`> **用途**：${reason}`] : []
     const reasonPlain = reason ? [`用途：${reason}`] : []
+    /*
+     * 硬静默（/until）的开始提醒要把"关键事件也静默"写进正文 ——
+     * 否则用户会以为在库人脸来了照样单独提醒（普通临时静默确实如此），
+     * 从而错过整段时间。标题也跟着改，跟 /status 的「全局静默」口径一致。
+     */
+    const hard = !!win.hard
+    const titleText = hard ? '🔕 全局静默已开启' : '🔕 临时静默已开启'
+    const scopeLine = hard
+      ? '这段时间内<b>所有事件都不推送</b>（含人脸命中等关键事件），但监控与事件统计照常进行，不会漏记。'
+      : '这段时间内<b>不再实时逐条推送</b>，但监控与事件<b>统计照常进行</b>，不会漏记。'
+    const scopeMd = hard
+      ? '> 这段时间内**所有事件都不推送**（含人脸命中等关键事件），但监控与事件**统计照常进行**，不会漏记。'
+      : '> 这段时间内**不再实时逐条推送**，但监控与事件**统计照常进行**，不会漏记。'
+    const scopePlain = hard
+      ? '这段时间内所有事件都不推送（含人脸命中等关键事件），但监控与事件统计照常进行。'
+      : '这段时间内不再实时逐条推送，但监控与事件统计照常进行。'
 
     return {
-      title: '🔕 临时静默已开启',
+      title: titleText,
       markdown: [
-        '### 🔕 临时静默已开启',
+        `### ${titleText}`,
         '>',
         `> **截止**：${endLabel}　（时长约 ${durText}）`,
         ...reasonMd,
         '>',
-        '> 这段时间内**不再实时逐条推送**，但监控与事件**统计照常进行**，不会漏记。',
+        scopeMd,
         `> 到 **${endLabel}** 自动结束，届时会**推送结束提醒 + 汇总**本时段内捕获的全部报警。`
       ].join('\n'),
       html: [
-        '🔕 <b>临时静默已开启</b>',
+        titleText,
         '',
         `截止：<b>${endLabel}</b>（时长约 ${durText}）`,
         ...reasonPlain.map((s) => s.replace('用途：', '用途：<b>') + '</b>'),
         '',
-        '这段时间内<b>不再实时逐条推送</b>，但监控与事件<b>统计照常进行</b>，不会漏记。',
+        scopeLine,
         `到 <b>${endLabel}</b> 自动结束，届时会<b>推送结束提醒 + 汇总</b>本时段内捕获的全部报警。`
       ].join('\n'),
       plain: [
-        '🔕 临时静默已开启',
+        titleText,
         `截止：${endLabel}（时长约 ${durText}）`,
         ...reasonPlain,
-        '这段时间内不再实时逐条推送，但监控与事件统计照常进行。',
+        scopePlain,
         `到 ${endLabel} 自动结束，届时会推送结束提醒并汇总本时段内捕获的全部报警。`
       ].join('\n')
     }
@@ -2037,13 +2091,18 @@ export function useAlertPush(options, hooks = {}) {
    *   - 传 untilAt（时间戳，必须晚于现在）：静默到该时刻（跨零点也没问题）。
    * 两者都传时 untilAt 优先。立即重排汇总定时器，把原先排在夜里的那个换成这条窗口。
    *
+   * opts.hard = true 时是「全局硬静默」（远程 /until 的语义）：窗口内所有事件都不推
+   * （含关键事件），到点后汇总以关键事件形式推送。设置页手动开的临时静默不走这个
+   * （那是"保留关键事件"的老语义），只有 TG 远程 /until 会传。
+   *
    * @param {number} [hours] 时长（小时），支持小数
    * @param {string[]} [channels] 覆盖渠道，缺省沿用配置里的三端
    * @param {string} [label] 用途备注（会出现在状态文案里）
    * @param {number} [untilAt] 绝对截止时间戳（"静默到几点"用这个）
+   * @param {{hard?:boolean}} [opts] 硬静默标记
    * @returns {{ok:boolean, until?:number, reason?:string}}
    */
-  function startTempSilent(hours, channels, label, untilAt) {
+  function startTempSilent(hours, channels, label, untilAt, opts = {}) {
     /*
      * 渠道先校验，且必须在**任何写入之前** —— 下面一旦开始写 tempUntil，
      * 中途 return 就会留下"静默开着但没有渠道"的半截状态。
@@ -2073,6 +2132,12 @@ export function useAlertPush(options, hooks = {}) {
 
     const c = silentCfg()
     c.tempUntil = until
+    /*
+     * 硬静默标记（/until）：**每次开启都显式写**，不传就清掉。
+     * 不能"只写 true 不清 false"—— 上一轮硬静默若因异常没走到 endTempSilent
+     * （进程被杀 / 配置被外部改），残留的 true 会让下一轮普通静默也吃掉关键事件。
+     */
+    c.tempHard = opts && opts.hard === true
     /*
      * 记下本次静默的**开始时刻**。两个用途：
      *   - 「静默查岗」（/check duty）要按它划第一次查询的区间；
@@ -2120,6 +2185,8 @@ export function useAlertPush(options, hooks = {}) {
     const win = currentWindow(Date.now()) // 先取：清掉 tempUntil 就取不到了
     c.tempUntil = 0
     c.tempLabel = ''
+    // 硬静默标记一并清掉：留着会让下一次静默（或 /status 判定）误以为还在全局静默
+    c.tempHard = false
     // 开始时刻一并清掉：留着会让下一次静默的下界错判（查岗会多推一段本不属于它的区间）
     c.tempSince = 0
     if (silentTimer) {
@@ -2157,6 +2224,7 @@ export function useAlertPush(options, hooks = {}) {
     const dayPrefix = dayDiff === 0 ? '' : dayDiff === 1 ? '明天 ' : dayDiff === 2 ? '后天 ' : `${dayDiff} 天后 `
     return {
       active: true,
+      hard: !!t.hard,
       endMs: t.endMs,
       untilLabel: `${dayPrefix}${p2(e.getHours())}:${p2(e.getMinutes())}`,
       leftLabel: hh ? `${hh} 小时 ${mm} 分后` : `${mm} 分后`,
@@ -2708,7 +2776,22 @@ export function useAlertPush(options, hooks = {}) {
      * 它只影响这个集合，看起来却像在实现"汇总归整体"，很能误导人。
      */
     let buffered = false
-    if (!faceHitRoute && !isFlowCritical(record)) {
+    /*
+     * 全局硬静默（/until）期间，关键事件（在库人脸命中 / 走向关键事件）也收存：
+     * 它们平时不走静默缓冲（要的就是"静默了也想第一时间知道"），但硬静默的语义是
+     * "所有事件都静默、到点一并汇总" —— 不收的话，结束汇总会漏掉这段时间的命中，
+     * 与"汇总"二字矛盾。收进**整体**缓冲（关键事件本就无通道归属）。
+     * 急推那侧由 pushDirectToUsers 的硬静默门控挡下（见 HARD_SILENT_BLOCKED_KINDS）。
+     */
+    const hardNow = hardSilentActive(now)
+    if (hardNow && (faceHitRoute || isFlowCritical(record))) {
+      if (!silentSeen.has(record.key)) {
+        silentSeen.add(record.key)
+        capPush(silentBuffer, silentSnapshot(record))
+      }
+      scheduleSilentFlush()
+      buffered = true
+    } else if (!faceHitRoute && !isFlowCritical(record)) {
       const suppressIds = [...byGlobal, ...byCam]
       if (suppressIds.length) {
         send = send.filter((id) => !suppressIds.includes(id))
@@ -3109,6 +3192,22 @@ export function useAlertPush(options, hooks = {}) {
   }
 
   /**
+   * 「全局硬静默」是否生效中 —— 远程 /until 指令的语义，**全项目唯一判定**。
+   *
+   * 与普通静默的区别：普通静默下关键事件（人脸命中 / 走向 / 满库提醒）按各端
+   * `throughSilence`（缺省开）照样穿透；硬静默下**一律不推**，到点才以关键事件
+   * 形式推送汇总。只有 tempHard 标记的临时静默窗口算硬静默；夜间定时时段 /
+   * 设置页手动开的临时静默都不算（那是用户明确要「保留关键事件」的老语义）。
+   *
+   * 只回答"在不在窗口里"，挡不挡由调用方决定（pushDirectToUsers 挡事件类，
+   * flushSilentSummary 到点后照发汇总）。
+   */
+  function hardSilentActive(now = Date.now()) {
+    const s = silentState(now)
+    return !!(s.active && s.hard)
+  }
+
+  /**
    * 关键事件单独提醒 —— 入口。
    *
    * 现在 fan-out 到**三路独立通道**，各自用自己独立的凭据 / 开关 / 事件筛选，
@@ -3123,8 +3222,19 @@ export function useAlertPush(options, hooks = {}) {
    * @param {object} [opts] { camId } 该事件所属通道（有就把它自己的通道静默也算进静默判定）
    */
   async function pushDirectToUsers(kind, payload = {}, opts = {}) {
+    /*
+     * 全局硬静默（/until）：窗口内**事件类**关键事件一律不推。
+     *
+     * 只挡 face / flow（以及将来同类的事件类 kind）—— 'silence' / 'summary' 是
+     * 免打扰机制**自己的宣告**（开始 / 结束各一条），不是被监测的事件，照旧发；
+     * 这与 sendDirect 里「提醒发去哪不看 silent.channels」是同一条既定口径。
+     * force（结束汇总用）连事件类也放行：窗口已结束，这条汇总是承诺过的交付。
+     */
+    if (!opts.force && HARD_SILENT_BLOCKED_KINDS.has(kind) && hardSilentActive()) {
+      return { ok: false, sent: 0, parts: [], reason: '' }
+    }
     // 「此刻在不在静默时段」只算一次，三端共用 —— 各端自己再算一遍迟早会漂
-    const silentBlocked = criticalSilentBlocked(opts)
+    const silentBlocked = opts.force ? false : criticalSilentBlocked(opts)
     const parts = await Promise.all([
       pushDirectTg(kind, payload, silentBlocked),
       pushCriticalDing(kind, payload, silentBlocked),
@@ -3699,6 +3809,11 @@ export function useAlertPush(options, hooks = {}) {
     channels,
     /** 关键事件单独提醒（私聊推送）；导出来是为了单测与设置页「试发」 */
     pushDirectToUsers,
+    /**
+     * 全局硬静默（/until）是否生效中。导出供探针 / 诊断直接问这一件事，
+     * 免得外部靠 tempSilentInfo().hard 猜（那还要先判 active）。
+     */
+    hardSilentActive,
     directPushRecipients,
     /**
      * 通道静默：立即汇总 / 状态一览 / 临时静默开关。

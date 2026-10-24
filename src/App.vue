@@ -492,7 +492,7 @@ const hiddenIds = ref(saved && Array.isArray(saved.hiddenIds) ? saved.hiddenIds 
 
 // 人员走向引擎：把当前 flows + 通道列表喂给模块级单例，供各摄像头跨实例配对。
 // 配置（flows 增删改、通道区域增删）变化时实时重设，引擎据此判断哪些 flow 生效。
-getFlowEngine().setConfig(options.flows, cameras.value)
+getFlowEngine().setConfig(options.flows, cameras.value, options.flow)
 /*
  * 流向自动保活检测前提：已启用的流向，其路径节点所在的摄像头必须「参与区域分析」、
  * 且节点区域必须「开启进出检测」—— 否则 tracker 不会产生 enter/exit 事件，流向静默失效。
@@ -510,16 +510,22 @@ enforceFlowZonePrerequisites(options.flows, cameras.value)
 watch(
   () => options.flows,
   () => {
-    getFlowEngine().setConfig(options.flows, cameras.value)
+    getFlowEngine().setConfig(options.flows, cameras.value, options.flow)
     const ch = enforceFlowZonePrerequisites(options.flows, cameras.value)
     if (ch.length) schedulePersist()
   },
   { deep: true }
 )
+// 相反流向防抖的时长改了也要即时重设引擎（flows 数组没动，上面那个 watch 不会触发）
+watch(
+  () => options.flow,
+  () => getFlowEngine().setConfig(options.flows, cameras.value, options.flow),
+  { deep: true }
+)
 // 通道（摄像头 / 区域）增删改时不改流向前提，但仍要重设引擎，使其按最新区域判定生效。
 watch(
   cameras,
-  () => getFlowEngine().setConfig(options.flows, cameras.value),
+  () => getFlowEngine().setConfig(options.flows, cameras.value, options.flow),
   { deep: true }
 )
 const layoutKey = ref((saved && saved.layoutKey) || 'auto')

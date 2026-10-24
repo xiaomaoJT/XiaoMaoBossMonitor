@@ -516,6 +516,29 @@ export function blockMaxAgeDays(c) {
   return Math.max(BLOCK_MAX_AGE.min, Math.min(BLOCK_MAX_AGE.max, n))
 }
 
+/*
+ * 相反流向防抖窗口（秒）默认值 / 上限 / 归一化。
+ *
+ * 场景：同时配了两条方向相反的流向（A「门外→门内」走入、B「门内→门外」走出）时，
+ * 同一个人可能在几秒内接连走完两条 —— 大概率是同一次进出的重复触发
+ * （检测抖动、在门口犹豫、人脸身份在两条 flow 间跳变），第二条再推一条就是纯噪音。
+ * 防抖窗口内「刚走完一条流向、又走完它的反向流向」时，第二条不再推送。
+ *
+ * 0 = 关闭（老行为：两条都推）。上限 600s 与时间窗上限对齐。
+ * 判定在 useFlowMatch 引擎里（前后端共用同一份），配置在 options.flow.oppositeSec。
+ * ⚠️ 必须声明在 HIDDEN_OPTIONS 之前：那里的 flow 块直接引用这个常量（TDZ）。
+ */
+export const FLOW_OPPOSITE_DEFAULT = 60
+export const FLOW_OPPOSITE_MAX = 600
+
+/** 相反流向防抖窗口归一化：undefined/非数字 → 默认值；≤0 → 0（关闭）；其余夹到上限 */
+export function clampFlowOppositeSec(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return FLOW_OPPOSITE_DEFAULT
+  if (n <= 0) return 0
+  return Math.min(FLOW_OPPOSITE_MAX, Math.round(n))
+}
+
 export const HIDDEN_OPTIONS = {
   /** 是否解码音频（枪机一般无音轨，关闭可降低 CPU 占用） */
   hasAudio: false,
@@ -1521,7 +1544,12 @@ export const HIDDEN_OPTIONS = {
    * 默认空 = 不启用任何走向（用户需在「人员流向」tab 里手动添加）。
    * 配置语义见 useFlowMatch.js；UI 在设置页「人员流向」tab。
    */
-  flows: []
+  flows: [],
+
+  /* 人员流向的**全局**设置（与 flows 数组里的单条规则分开）：
+   * oppositeSec = 相反流向防抖窗口（秒）。同一个人在窗口内接连走完两条方向
+   * 相反的流向时，第二条不再推送（默认 60 秒，0 = 关闭）。见 clampFlowOppositeSec。 */
+  flow: { oppositeSec: FLOW_OPPOSITE_DEFAULT }
 }
 
 /**
@@ -2940,6 +2968,13 @@ export function normalizeFlows(opts) {
   if (!opts || typeof opts !== 'object') return opts
   if (!Array.isArray(opts.flows)) opts.flows = []
   opts.flows = opts.flows.filter((f) => f && typeof f === 'object').map(normalizeFlow)
+  /*
+   * 顺带归一化流向的**全局**块（相反流向防抖窗口）。老存档没有这个块，
+   * 这里补上默认值 —— 少了它，引擎会走自己的兜底默认（也是 60），但设置页
+   * 的下拉会显示不出当前值，用户以为没配。
+   */
+  if (!opts.flow || typeof opts.flow !== 'object') opts.flow = {}
+  opts.flow.oppositeSec = clampFlowOppositeSec(opts.flow.oppositeSec)
   return opts
 }
 

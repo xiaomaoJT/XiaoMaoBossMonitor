@@ -23,6 +23,14 @@
       （离开判定依赖轨迹消失，通常有几秒延迟；该选项只服务流向，不会当成走进 / 走出报警，也不计入人员计数）。
     </p>
 
+    <div class="opt col">
+      <span>
+        <strong>相反流向防抖</strong>
+        <em>同一个人短时间内接连走完两条方向相反的流向（如先 A「走入」、几秒后又 B「走出」）时，第二条不再推送 —— 多半是同一次进出的重复触发。选「关闭」则两条都推（老行为）</em>
+      </span>
+      <SelectField cls="mini" v-model.number="flowOppositeSec" :options="OPT_FLOW_OPPOSITE" />
+    </div>
+
     <div class="flow-head">
       <strong>已配置流向（{{ (opts.flows || []).length }} 条）</strong>
       <button class="btn small primary" @click="addFlow">＋ 新增流向</button>
@@ -133,6 +141,6 @@ import { inject } from 'vue'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { FLOW_MAX_NODES, OPT_FLOW_WINDOW, SelectField, addFlow, addFlowNode, camHasZones, camOptions, emit, flowStateOf, flowSummary, opts, props, removeFlow, removeFlowNode, zoneOptions } = sd
+const { FLOW_MAX_NODES, OPT_FLOW_WINDOW, OPT_FLOW_OPPOSITE, SelectField, addFlow, addFlowNode, camHasZones, camOptions, emit, flowOppositeSec, flowStateOf, flowSummary, opts, props, removeFlow, removeFlowNode, zoneOptions } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
 </script>
