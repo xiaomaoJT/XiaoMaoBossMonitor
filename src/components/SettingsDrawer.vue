@@ -4116,9 +4116,9 @@ const TG_COMMANDS = [
   {
     cmd: 'until',
     usage: '/until <HH:MM> [渠道]',
-    desc: '全局静默到指定时刻（已过则顺延到明天）：期间所有事件都不推（含关键事件），到点以关键事件形式推送汇总；同样可以跟渠道'
+    desc: '全局静默到指定时刻（已过则顺延到明天）：期间所有事件都不推（含关键事件），到点以关键事件形式推送汇总；同样可以跟渠道。想提前取消就发 /resume（也可 /until off）'
   },
-  { cmd: 'resume', usage: '/resume', desc: '立刻结束静默，并推送结束提醒 + 汇总' },
+  { cmd: 'resume', usage: '/resume', desc: '立刻结束静默（临时静默与 /until 的全局静默都管用），并推送结束提醒 + 汇总' },
   { cmd: 'patrol', usage: '/patrol', desc: '立即推送一次巡检报告' },
   {
     cmd: 'status',

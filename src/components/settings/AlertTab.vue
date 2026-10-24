@@ -263,10 +263,18 @@
       <!-- ---------- ② 临时静默 ---------- -->
       <div class="grp-body temp-silent" :class="{ active: tempActive }">
         <div class="sub-label">
-          临时静默
+          {{ tempActive && tempInfo.hard ? '全局静默' : '临时静默' }}
           <em class="live-tag" v-if="tempActive">静默中 · 至 {{ tempInfo.untilLabel }}</em>
+          <em class="live-tag hard" v-if="tempActive && tempInfo.hard">含关键事件</em>
         </div>
-        <p class="hint tight">
+        <!-- 硬静默（远程 /until 下发）与本地临时静默是两档语义，必须在这里讲明白，
+             否则用户在设置页只看到「静默中」，不知道会连人脸命中一起吞掉 -->
+        <p class="hint tight" v-if="tempActive && tempInfo.hard">
+          本次是远程 <code>/until</code> 下发的<b>全局静默</b>：<b>所有事件都不推</b>（含人脸命中等关键事件），
+          到点以关键事件形式推送汇总。要提前取消：设置页点「结束并立即汇总」，或远程发
+          <code>/resume</code> / <code>/until off</code>。
+        </p>
+        <p class="hint tight" v-else>
           会议 / 演示 / 临时排查时用：选一个时长或直接指定"静默到几点"，立刻生效，到点自动汇总。
           <b>优先级高于上面的定时静默</b>。
         </p>

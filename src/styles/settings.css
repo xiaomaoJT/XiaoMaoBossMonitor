@@ -1990,6 +1990,15 @@
   padding: 1px 7px;
 }
 
+/* 「含关键事件」标记：全局静默（远程 /until）比本地临时静默更狠一档，
+   用警示色单独标出来，别和普通「静默中」混成同一个绿标签 */
+.sd-scope .live-tag.hard{
+  margin-left: 4px;
+  color: var(--warn-text, #ffce7a);
+  background: color-mix(in srgb, var(--warn, #ffb020) 16%, transparent);
+  border-color: color-mix(in srgb, var(--warn, #ffb020) 40%, transparent);
+}
+
 .sd-scope .hint.tight{
   margin: 0;
   font-size: 11px;
