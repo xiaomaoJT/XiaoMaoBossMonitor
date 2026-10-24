@@ -684,6 +684,10 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
    *      追加并标「规则已删除」，否则这段时间的历史会凭空消失。
    * ctx.flows 没传时退化为「只按事件里的 flowName 分组」，老调用方行为不变。
    */
+  // flowRouteText 在「路线信息完全缺失」时返回的占位（老事件 / 已删除规则没存路线）。
+  // 它不该被当成行名或路线印进汇总，否则会出现「?·? → ?·? · 规则已删除」这种看不懂的一行。
+  const UNRESOLVED_ROUTE = '?·? → ?·?'
+
   const flowRows = (() => {
     const map = new Map()
     const add = (name, route) => {
@@ -705,8 +709,17 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
       if (!isFlowEvent(r)) return
       const route = flowRouteText(r)
       const named = String(r.flowName || '').trim()
-      // flowName 退化成路线文本时（emitFlowEvent 的口径），名字就是路线，别拆成两行
-      const key = named && named !== route ? named : route
+      /*
+       * 行名判定（避免把「?·? → ?·?」这种解析不出路线的占位当行名，
+       * 老事件 / 已删除规则没存路线信息时尤其常见）：
+       *   · 有规则名且不等于路线 → 用规则名（同规则的事件归到一行）
+       *   · 没规则名但有可解析路线 → 用路线当行名（无名规则按路线聚合）
+       *   · 既没规则名、路线也解析不出 → 退化为「未命名走向」，不印 ?·?
+       */
+      const key =
+        named && named !== route
+          ? named
+          : named || (route && route !== UNRESOLVED_ROUTE ? route : '未命名走向')
       const row = add(key, route)
       if (!cfgKeys.has(row.name)) row.orphan = true
       row.count += 1
@@ -729,8 +742,8 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
       const bits = [`**${r.name}**`, r.count ? `${r.count} 次` : '0 次']
       if (r.who.size) bits.push(`${r.who.size} 人`)
       if (r.lastAt) bits.push(`最近 ${fmtClockSec(r.lastAt)}`)
-      // 名字就是路线时别重复印一遍
-      if (r.route && r.route !== r.name) bits.push(r.route)
+      // 名字就是路线时别重复印一遍；路线解析不出（?·? 占位 / 老事件无路线记录）也别印
+      if (r.route && r.route !== r.name && r.route !== UNRESOLVED_ROUTE) bits.push(r.route)
       if (r.orphan) bits.push('规则已删除')
       return `- ${bits.join(' · ')}`
     })
