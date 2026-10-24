@@ -3292,7 +3292,31 @@ export function useAlertPush(options, hooks = {}) {
    * 钉钉「关键事件独立机器人」推送。
    * 用 dingtalk.critical 里的独立 webhook + 加签密钥，与日常推送完全分离。
    * 不依赖日常推送 / TG 是否配置，只认自己的开关与凭据。
+   *
+   * ⚠️ 标题必须带简略详情：钉钉 markdown 的 title 就是通知栏 / 群列表那行预览，
+   * 过去只写 `【监控报警】` 几个字，点进去才看得到命中谁、哪条走向 —— 用户明确要
+   * 在标题就看到「命中了谁 / 哪个走向命中了」。事件类（face/flow/pending）从
+   * payload.text 取前几段（去掉末尾时间戳）拼进标题；机制宣告（silence/summary）
+   * 保持只带前缀，避免标题过长。
    */
+  function criticalDingTitle(kind, payload, prefix) {
+    const EVENT_KINDS = { face: 1, flow: 1, pending: 1 }
+    if (!EVENT_KINDS[kind]) return prefix
+    const base = String(payload.text || payload.caption || '').trim()
+    if (!base) return prefix
+    // payload.text 形如「人脸命中 · 门口 / 张三（相似度87%）/ 时间」、
+    // 「人员走向 · 规则名 / 张三 / 路线 / 时间」——取前几段拼成标题（去掉末尾时间戳），
+    // 既含「谁」也含「哪条走向」，标题又短；机制宣告类不进这里（上面已 return）。
+    const segs = base.split(' / ')
+    let end = segs.length
+    // 末尾若是时间戳（2026-10-24 14:21 / 14:21 / 14:21:03）则去掉，保持标题聚焦事件本身
+    while (end > 1 && /\d{4}-\d{1,2}-\d{1,2}|\d{1,2}:\d{2}(:\d{2})?/.test(segs[end - 1].trim())) {
+      end -= 1
+    }
+    const brief = segs.slice(0, Math.min(3, end)).join(' / ')
+    return brief ? `${prefix} ${brief}` : prefix
+  }
+
   async function pushCriticalDing(kind, payload = {}, silentBlocked = false) {
     let dt
     try {
@@ -3338,7 +3362,7 @@ export function useAlertPush(options, hooks = {}) {
     }
     try {
       await sendDingTalk(cfg, {
-        title: crit.titlePrefix || '【监控报警】',
+        title: criticalDingTitle(kind, payload, crit.titlePrefix || '【监控报警】'),
         text,
         msgType: crit.msgType || 'markdown',
         atAll,
