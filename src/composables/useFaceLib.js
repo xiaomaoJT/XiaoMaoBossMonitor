@@ -22,6 +22,7 @@ import {
 } from './useAiDetector.js'
 import { netErrorText, timeoutReason } from './useNet.js'
 import { cosineOrRaw, looksSame, pendingDedupeTarget, blockMergeTarget, hitMarginPassed } from './vecMatch.js'
+import { sampleScoreBreakdown, sampleQualityLabel, hitRecommend } from './faceSampleScore.js'
 
 /** 默认比对阈值：余弦相似度高于它才认为是同一个人 */
 export const DEFAULT_FACE_THRESHOLD = 0.38
@@ -2067,19 +2068,43 @@ export const backendFaceHitsLoadedAt = ref(0)
 function normBackendFaceHits(base, list) {
   return (Array.isArray(list) ? list : [])
     .filter((h) => h && h.id)
-    .map((h) => ({
-      id: `h${h.id}`, // 加前缀，避免与待录入条目的 id 撞号
-      backendId: Number(h.id),
-      vector: h.vector, // 后端返回普通数组，addFace 直接收
-      thumb: h.thumb || '',
-      full: h.full || '', // 命中时的整帧原图（点缩略图看大图用）
-      name: h.name || '', // 当时认定的名字（可能就是认错了的那个）
-      score: Number(h.score) || 0,
-      at: Number(h.at) || Date.now(),
-      camId: h.camId || '',
-      camName: h.camName || '',
-      fromBackend: true
-    }))
+    .map((h) => {
+      // 命中样本也按待录入同口径打分：从库里存的几何量回算分项与总分
+      const faceScore = Number(h.faceScore)
+      const breakdown = sampleScoreBreakdown({
+        boxW: h.boxW,
+        boxH: h.boxH,
+        yaw: h.yaw,
+        sharp: h.sharp
+      })
+      // 未量过几何量（breakdown 为 null）→ 显示「未评分」，不能显示成「差」
+      // （与 pfQuality 同口径：把"不知道"和"很差"分开，避免用户白扔好样本）
+      const qualityLabel = breakdown ? sampleQualityLabel(breakdown.total) : { key: 'unknown', text: '未评分', tone: 'muted' }
+      const score = Number(h.score) || 0
+      return {
+        id: `h${h.id}`, // 加前缀，避免与待录入条目的 id 撞号
+        backendId: Number(h.id),
+        vector: h.vector, // 后端返回普通数组，addFace 直接收
+        thumb: h.thumb || '',
+        full: h.full || '', // 命中时的整帧原图（点缩略图看大图用）
+        name: h.name || '', // 当时认定的名字（可能就是认错了的那个）
+        score, // 余弦相似度（命中确信度）
+        // 命中样本质量分（与待录入同口径：尺寸 / 清晰度 / 正脸程度）
+        faceScore: Number.isFinite(faceScore) ? faceScore : -1,
+        boxW: Number(h.boxW) || 0,
+        boxH: Number(h.boxH) || 0,
+        yaw: Number(h.yaw) || 0,
+        sharp: Number(h.sharp) || 0,
+        scoredAt: Number(h.scoredAt) || 0,
+        qualityLabel, // { key, text, tone }：优 / 良 / 一般 / 差 / 未评分
+        breakdown, // { sizeScore, sharpScore, frontScore, total } 或 null
+        recommend: hitRecommend(score, Number.isFinite(faceScore) ? faceScore : -1), // 相似度高 + 质量好 → 推荐录入
+        at: Number(h.at) || Date.now(),
+        camId: h.camId || '',
+        camName: h.camName || '',
+        fromBackend: true
+      }
+    })
 }
 
 /** 拉一次后端命中样本（默认 20 条：设置页「命中修正」就展示最近 20 条） */

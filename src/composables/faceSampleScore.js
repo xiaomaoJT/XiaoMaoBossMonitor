@@ -221,6 +221,54 @@ function round2(v) {
 }
 
 /**
+ * 只用「库里存下来的几何量」回算**分项**（尺寸 / 清晰度 / 正脸 各自的 0..1，
+ * 以及总分）。给「命中修正」卡片做明细展示用（命中样本也按待录入同口径打分）。
+ *
+ * 与 sampleScoreFromMetrics 的关系：它只回算总分，这个函数回算**分项**。
+ * 两者共用同一份 scoreParts，不会算出两个分数。
+ *
+ * 判据同 sampleScoreFromMetrics：`boxW > 0 && boxH > 0` 才算量过几何量；
+ * 否则返回 null（界面按「未评分」处理，不显示假分项）。
+ *
+ * @param {{boxW:number,boxH:number,yaw:number,sharp:number,det?:number}} m
+ * @returns {{boxW:number,boxH:number,yaw:number,sharp:number,
+ *            sizeScore:number,sharpScore:number,frontScore:number,total:number}|null}
+ */
+export function sampleScoreBreakdown(m) {
+  const w = Math.round(Number(m && m.boxW) || 0)
+  const h = Math.round(Number(m && m.boxH) || 0)
+  if (w <= 0 || h <= 0) return null
+  return scoreParts(w, h, m && m.sharp, m && m.yaw, m && m.det)
+}
+
+/**
+ * 命中样本「推荐录入人脸库」的判定。
+ *
+ * 用户诉求：相似度高 + 角度好（质量好）的命中样本，推荐一键补录进人脸库，
+ * 强化该人在库底（addFace 按名字归组，向已存在的人名下补样本即强化底库）。
+ *
+ * 两个门槛：
+ *   ① 余弦相似度要高（HIT_RECOMMEND_SIMILARITY）—— 模型对「就是这个人」很确信；
+ *   ② 样本质量要好（>= SAMPLE_SCORE_RECOMMEND，即「良」）—— 脸够大、清晰、正脸。
+ * 任一不满足都不推荐：相似度低说明可能是临界误命中，质量差说明录进去会拉低底库。
+ * 质量分 < 0（未评分 / 没量过几何量）一律不推荐 —— 没把握的样本不该被鼓励录入。
+ *
+ * @param {number} similarity 命中时的余弦相似度（0..1，即 hit.score）
+ * @param {number} faceScore 命中样本的质量总分（0..1；<0 表示未评分）
+ * @returns {boolean}
+ */
+export function hitRecommend(similarity, faceScore) {
+  const s = Number(similarity)
+  const q = Number(faceScore)
+  if (!Number.isFinite(s) || !Number.isFinite(q)) return false
+  if (q < 0) return false
+  return s >= HIT_RECOMMEND_SIMILARITY && q >= SAMPLE_SCORE_RECOMMEND
+}
+
+/** 「推荐录入」的余弦相似度门槛：高于它才说明模型对「就是这个人」足够确信 */
+export const HIT_RECOMMEND_SIMILARITY = 0.6
+
+/**
  * 总分 → 一句话结论（给界面直接显示）。
  * 阈值与分项解耦：这里只解释「这张样本值不值得录」，不重复算分。
  */

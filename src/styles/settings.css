@@ -689,6 +689,57 @@
   word-break: keep-all;
 }
 
+/* 命中样本质量分标签：与属性胶囊同款，但按优/良/一般/差给不同色（与待录入同口径） */
+.sd-scope .face-quality{
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.45;
+  border-radius: 8px;
+  text-align: center;
+  white-space: normal;
+  word-break: keep-all;
+  color: var(--text-dim-2);
+  background: color-mix(in srgb, var(--tint) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+}
+.sd-scope .face-quality .q-detail{
+  opacity: .85;
+}
+.sd-scope .face-quality.q-great, .sd-scope .face-quality.q-good{
+  color: var(--ok-text, #7ee0a0);
+  background: color-mix(in srgb, var(--ok, #43c97a) 16%, transparent);
+  border-color: color-mix(in srgb, var(--ok, #43c97a) 40%, transparent);
+}
+.sd-scope .face-quality.q-fair{
+  color: var(--warn-text, #f3c969);
+  background: color-mix(in srgb, var(--warn, #e0a93a) 16%, transparent);
+  border-color: color-mix(in srgb, var(--warn, #e0a93a) 40%, transparent);
+}
+.sd-scope .face-quality.q-poor{
+  color: var(--err-text, #ff8a8a);
+  background: color-mix(in srgb, var(--err, #e25555) 16%, transparent);
+  border-color: color-mix(in srgb, var(--err, #e25555) 40%, transparent);
+}
+
+/* 推荐录入徽标（相似度高 + 质量好）：醒目金绿渐变，提示一键强化底库 */
+.sd-scope .rec-badge{
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.45;
+  border-radius: 8px;
+  text-align: center;
+  white-space: normal;
+  word-break: keep-all;
+  color: #0b2a17;
+  background: linear-gradient(90deg, #6fe39a, #b6f06a);
+  border: 1px solid color-mix(in srgb, #6fe39a 60%, transparent);
+  font-weight: 600;
+}
+
 /* 改名输入框：原本复用 .face-meta 会继承 overflow:hidden，而 .field.mini 宽 118px
    远超卡片内容区（88−12=76px），被裁成"截断"。这里单独成类、不裁剪，
    并把输入框收到卡片内（width:100% + border-box），既不被截断也能看清在改谁。 */
@@ -1173,6 +1224,18 @@
 
 .sd-scope .mini-btn.danger:hover{
   background: color-mix(in srgb, var(--err) 26%, transparent);
+}
+
+/* 主操作按钮（命中卡片「录入」在推荐态时高亮）：金绿，提示这是被推荐的强化动作 */
+.sd-scope .mini-btn.primary{
+  background: color-mix(in srgb, var(--ok, #43c97a) 28%, transparent);
+  border-color: color-mix(in srgb, var(--ok, #43c97a) 55%, transparent);
+  color: var(--ok-text, #7ee0a0);
+  font-weight: 600;
+}
+
+.sd-scope .mini-btn.primary:hover{
+  background: color-mix(in srgb, var(--ok, #43c97a) 44%, transparent);
 }
 
 /* 被强制保持开启的开关（钉钉/企微开着时 TG 不可关） */

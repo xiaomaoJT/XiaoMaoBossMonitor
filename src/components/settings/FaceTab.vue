@@ -510,6 +510,13 @@
                 <span class="face-meta">相似度 {{ (h.score * 100).toFixed(0) }}%</span>
                 <span class="face-meta">{{ h.camName || '未知通道' }}</span>
                 <span class="face-time" v-if="h.at">{{ fmtPendingAt(h.at) }}</span>
+                <!-- 命中样本质量分（与待录入同口径）：尺寸/清晰度/正脸程度 → 优/良/一般/差/未评分 -->
+                <span class="face-quality" :class="'q-' + (h.qualityLabel && h.qualityLabel.key)" v-if="h.qualityLabel">
+                  质量 {{ (h.qualityLabel && h.qualityLabel.text) || '未评分' }}
+                  <span class="q-detail" v-if="h.breakdown">· 脸 {{ h.boxW }}×{{ h.boxH }} · 清晰{{ Math.round(h.breakdown.sharpScore * 100) }} · {{ h.breakdown.frontScore >= 0.8 ? '正脸' : (h.breakdown.frontScore >= 0.5 ? '微侧' : '侧脸') }}</span>
+                </span>
+                <!-- 相似度高 + 质量好 → 推荐把这条样本补录进人脸库强化该人底库 -->
+                <span class="rec-badge" v-if="h.recommend" title="相似度高且角度好，建议录进人脸库强化该人底库">★ 推荐录入</span>
                 <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现）；
                      同待录入卡片，换行显示 + :title 悬停全文 -->
                 <span class="face-attrs" v-if="faceAttrText(h)" :title="faceAttrText(h)">{{ faceAttrText(h) }}</span>
@@ -543,6 +550,17 @@
                 认错
               </button>
               <button class="mini-btn ghost" :disabled="fixingHit[h.id]" @click="doIgnoreHit(h)">忽略</button>
+              <!-- 录入：按当时认成的名字把这条命中样本补录进人脸库（强化该人在库底）；
+                   推荐态（相似度高 + 质量好）高亮成主操作，普通态为低调次级操作 -->
+              <button
+                class="mini-btn"
+                :class="{ primary: h.recommend }"
+                :disabled="fixingHit[h.id]"
+                :title="(h.recommend ? '相似度高且质量好，' : '') + '按「' + (h.name || '未识别') + '」把这条命中样本补录进人脸库'"
+                @click="doEnrollHit(h)"
+              >
+                {{ fixingHit[h.id] ? '录入中' : '录入' }}
+              </button>
             </div>
           </div>
         </div>
@@ -898,6 +916,6 @@ import { inject } from 'vue'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile } = sd
+const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
 </script>
