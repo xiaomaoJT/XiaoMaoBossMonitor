@@ -18,6 +18,7 @@
       @toggle-events="toggleEventPanel"
       @toggle-mask="maskNow"
       @settings="settingsOpen = true"
+      @open-appearance="appearanceOpen = true"
       @open-system-info="systemInfoOpen = true"
     />
 
@@ -112,8 +113,6 @@
       @patrol="runPatrol('manual')"
       @update:layout-key="setLayout"
       @update-cameras="onUpdateCameras"
-      @reset-free="resetFreeRects"
-      @update-theme="onThemeChange"
       @update-keepawake="onKeepAwakeChange"
       @force-exit="onForceExit"
       @watch-sync="onWatchSync"
@@ -139,6 +138,27 @@
       :layout-key="layoutKey"
       :events="events"
       @close="systemInfoOpen = false"
+    />
+
+    <!--
+      外观布局抽屉：原设置里的「外观布局」页（画面布局 + 报警通知位置 + 界面主题），
+      同样从顶栏「设置」下拉进入、按需加载。
+      保存只合选项（不重连画面，换个通知位置不该让全屏闪一下）。
+    -->
+    <AppearanceDrawer
+      v-if="appearanceOpen"
+      :cameras="cameras"
+      :options="options"
+      :hidden-ids="hiddenIds"
+      :layouts="LAYOUTS"
+      :layout-key="layoutKey"
+      :native="isNativeApp"
+      :events="events"
+      @close="appearanceOpen = false"
+      @save="onAppearanceSave"
+      @update:layout-key="setLayout"
+      @reset-free="resetFreeRects"
+      @update-theme="onThemeChange"
     />
 
     <EventPanel
@@ -258,6 +278,12 @@ const SettingsDrawer = defineAsyncComponent(() => import('./components/SettingsD
  * 系统信息抽屉（原设置里的「关于系统」页）同样不在首屏关键路径上，按需加载。
  */
 const SystemInfoDrawer = defineAsyncComponent(() => import('./components/SystemInfoDrawer.vue'))
+/*
+ * 外观布局抽屉（原设置里的「外观布局」页）同样不在首屏关键路径上，按需加载。
+ * 首次打开的下载由 TopBar 的「意图预取」兜底（hover/点开齿轮菜单时就开始拉），
+ * 见 TopBar.vue 的 prefetchDrawers。
+ */
+const AppearanceDrawer = defineAsyncComponent(() => import('./components/AppearanceDrawer.vue'))
 import {
   BRAND,
   DECODER_PATH,
@@ -637,6 +663,8 @@ const settingsOpen = ref(false)
 const settingsTab = ref('')
 /** 系统信息抽屉（设备信息 + 数据统计，从顶栏「设置」下拉进入） */
 const systemInfoOpen = ref(false)
+/** 外观布局抽屉（画面布局 + 通知位置 + 主题，从顶栏「设置」下拉进入） */
+const appearanceOpen = ref(false)
 const eventPanelOpen = ref(false)
 /**
  * 事件面板组件引用。
@@ -3152,6 +3180,19 @@ function applyConfig({ cameras: cams, options: opts, hiddenIds: hidden }) {
 }
 
 /**
+ * 外观布局抽屉的保存：只合选项（报警通知位置 / 开关 / 主题），
+ * 不碰通道与隐藏名单。
+ *
+ * 为什么不复用 applyConfig：它结尾会 reconnect 全部画面 —— 换个通知停靠角
+ * 就让全屏闪一下重连，明显是多此一举；且本抽屉不改通道，没有 cameras 可给。
+ */
+function onAppearanceSave(opts) {
+  Object.assign(options, opts)
+  appearanceOpen.value = false
+  showToast('外观设置已保存')
+}
+
+/**
  * 恢复初始化。
  *
  * ⚠️ 这里必须做到「一步到位」，否则就会出现用户报告过的怪事：
@@ -3912,6 +3953,7 @@ function onKeydown(e) {
   if (e.key === 'Escape') {
     if (zoomIndex.value !== null) zoomIndex.value = null
     else if (settingsOpen.value) settingsOpen.value = false
+    else if (appearanceOpen.value) appearanceOpen.value = false
     else if (systemInfoOpen.value) systemInfoOpen.value = false
     else if (eventPanelOpen.value) eventPanelOpen.value = false
   }
@@ -4054,9 +4096,18 @@ onMounted(() => {
    * 它已从首屏主包移出（defineAsyncComponent），这里等首屏稳定后再悄悄拉回来 ——
    * 既不占首屏下载带宽/解析时间，又让第一次点「设置」无需等待。
    * 用 requestIdleCallback 优先，退化为 1.5s 延时；失败无所谓（打开时会重新拉）。
+   *
+   * 两个独立抽屉（系统信息 / 外观布局）挂在同一条链的末端：设置 chunk 就绪后再拉，
+   * 不跟它抢带宽。真正的首开保障在 TopBar 的「意图预取」——用户 hover/点开齿轮菜单
+   * 时就开始下载（拆分后首次打开唯一可能变慢的就是这两个懒加载 chunk，见 prefetchDrawers）。
    */
   const prefetchSettings = () => {
-    import('./components/SettingsDrawer.vue').catch(() => {})
+    import('./components/SettingsDrawer.vue')
+      .catch(() => {})
+      .finally(() => {
+        import('./components/SystemInfoDrawer.vue').catch(() => {})
+        import('./components/AppearanceDrawer.vue').catch(() => {})
+      })
   }
   if (typeof requestIdleCallback === 'function') requestIdleCallback(prefetchSettings, { timeout: 4000 })
   else setTimeout(prefetchSettings, 1500)

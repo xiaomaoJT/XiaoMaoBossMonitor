@@ -109,7 +109,7 @@
           <span class="lbl">事件</span>
           <span class="badge" v-if="unread">{{ unread > 99 ? '99+' : unread }}</span>
         </button>
-        <!-- 设置：齿轮按钮 + 下拉菜单（完整配置 / 系统信息两个入口） -->
+        <!-- 设置：齿轮按钮 + 下拉菜单（完整配置 / 外观布局 / 系统信息三个入口） -->
         <div class="gear-wrap">
           <button
             ref="gearBtnEl"
@@ -119,6 +119,7 @@
             aria-haspopup="true"
             :aria-expanded="menuOpen ? 'true' : 'false'"
             @click.stop="toggleMenu"
+            @pointerenter="prefetchDrawers"
           >
             <svg viewBox="0 0 24 24" width="14" height="14">
               <path
@@ -165,6 +166,20 @@
               </svg>
               <span class="gi-main">打开设置</span>
               <span class="gi-sub">完整配置</span>
+            </button>
+            <button class="gear-item" role="menuitem" @click="pickAppearance">
+              <svg viewBox="0 0 24 24" width="14" height="14">
+                <path
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M3 3h8v8H3zM13 3h8v5h-8zM13 10h8v11h-8zM3 13h8v8H3z"
+                />
+              </svg>
+              <span class="gi-main">外观布局</span>
+              <span class="gi-sub">画面布局 · 通知位置 · 主题</span>
             </button>
             <button class="gear-item" role="menuitem" @click="pickSystemInfo">
               <svg viewBox="0 0 24 24" width="14" height="14">
@@ -224,6 +239,7 @@ const emit = defineEmits([
   'toggle-events',
   'toggle-mask',
   'settings',
+  'open-appearance',
   'open-system-info'
 ])
 
@@ -261,8 +277,9 @@ onBeforeUnmount(() => {
 
 /* ==================== 设置下拉菜单 ==================== */
 /*
- * 顶栏「设置」现在是个下拉菜单：完整配置（SettingsDrawer，原有入口不变）
- * 和系统信息（SystemInfoDrawer，从设置里拆出来的「只看 / 低频」模块）。
+ * 顶栏「设置」现在是个下拉菜单：完整配置（SettingsDrawer，原有入口不变）、
+ * 外观布局（AppearanceDrawer，从设置里拆出来的「低频但要看」模块）和
+ * 系统信息（SystemInfoDrawer，从设置里拆出来的「只看 / 低频」模块）。
  * 菜单挂到 body 并用 fixed 定位：窄屏时按钮组是横向滚动容器（overflow 裁剪），
  * 写在按钮旁边会被切掉；Teleport 之后任何宽度下都能完整显示。
  */
@@ -270,11 +287,28 @@ const menuOpen = ref(false)
 const gearBtnEl = ref(null)
 const menuStyle = ref({})
 
+/*
+ * 意图预取：独立抽屉都是懒加载 chunk，首次打开要现下载（实测系统信息 66KB、
+ * 本地 60ms / 慢网几百 ms），而重构前它们是设置里已加载好的 tab —— 这是
+ * 「拆分后首次打开反而变慢」的唯一来源。用户 hover 齿轮 = 明确的打开意图，
+ * 从他 hover/点开到看清菜单再点项约有几百毫秒，足够把 chunk 拉回来。
+ * 与 App.vue 的空闲预取是同一条兜底链的两端；import 失败无所谓（打开时会重拉）。
+ * 同一路径的 import 命中同一 chunk 与模块缓存，App 里 defineAsyncComponent 直接受益。
+ */
+let _drawersPrefetched = false
+function prefetchDrawers() {
+  if (_drawersPrefetched) return
+  _drawersPrefetched = true
+  import('./SystemInfoDrawer.vue').catch(() => {})
+  import('./AppearanceDrawer.vue').catch(() => {})
+}
+
 function toggleMenu() {
   if (menuOpen.value) {
     closeMenu()
     return
   }
+  prefetchDrawers()
   const el = gearBtnEl.value
   if (el) {
     const r = el.getBoundingClientRect()
@@ -293,6 +327,11 @@ function closeMenu() {
 function pickSettings() {
   closeMenu()
   emit('settings')
+}
+
+function pickAppearance() {
+  closeMenu()
+  emit('open-appearance')
 }
 
 function pickSystemInfo() {
