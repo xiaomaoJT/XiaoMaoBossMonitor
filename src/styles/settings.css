@@ -669,21 +669,24 @@
   word-break: break-all;
 }
 
-/* 属性徽标（性别 / 年龄 / 口罩眼镜等）：一行小胶囊，与通道名/时间区分开 */
+/* 属性徽标（性别 / 年龄 / 口罩眼镜等）：一行小胶囊，与通道名/时间区分开。
+   文案最长约「女 · 45-59岁 · 口罩 · 闭眼」（≈120px @10px 字号），而卡片内容区只有 74px ——
+   曾经 nowrap + ellipsis 会把年龄/口罩直接截没了（用户看不到属性，只会看到「女 · 45-59…」）。
+   现在允许整条换行显示（keep-all 防止把 45-59岁 这类从连接符处拆断），
+   FaceTab.vue 另给徽标绑了 :title 悬停提示兜底。 */
 .sd-scope .face-attrs{
   grid-column: 1 / -1;
   margin-top: 2px;
-  padding: 1px 6px;
+  padding: 1px 5px;
   font-size: 10px;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--accent, #5ad1ff);
   background: color-mix(in srgb, var(--accent, #5ad1ff) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent, #5ad1ff) 36%, transparent);
   border-radius: 8px;
   text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  word-break: keep-all;
 }
 
 /* 改名输入框：原本复用 .face-meta 会继承 overflow:hidden，而 .field.mini 宽 118px

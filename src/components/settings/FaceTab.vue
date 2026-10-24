@@ -410,8 +410,10 @@
             >
             <span class="face-meta">{{ pf.camName || '未知通道' }}</span>
             <span class="face-time" v-if="pf.at">{{ fmtPendingAt(pf.at) }}</span>
-            <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现） -->
-            <span class="face-attrs" v-if="faceAttrText(pf)">{{ faceAttrText(pf) }}</span>
+            <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现）。
+                 文案最长约 120px 而卡片内容区只有 74px，故 CSS 允许换行整条显示（.face-attrs），
+                 :title 再给一份悬停全文兜底 -->
+            <span class="face-attrs" v-if="faceAttrText(pf)" :title="faceAttrText(pf)">{{ faceAttrText(pf) }}</span>
             <!-- 录入时手动归入：选已知的人（同名归到他那一堆）或自定义名字；留空=自动编号，保持旧行为 -->
             <div class="face-assign" v-if="faceNameOptions.length">
               <FaceAssignSelect
@@ -508,8 +510,9 @@
                 <span class="face-meta">相似度 {{ (h.score * 100).toFixed(0) }}%</span>
                 <span class="face-meta">{{ h.camName || '未知通道' }}</span>
                 <span class="face-time" v-if="h.at">{{ fmtPendingAt(h.at) }}</span>
-                <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现） -->
-                <span class="face-attrs" v-if="faceAttrText(h)">{{ faceAttrText(h) }}</span>
+                <!-- 属性徽标：性别 / 年龄 / 口罩眼镜（后端检测顺手算；无则整行不出现）；
+                     同待录入卡片，换行显示 + :title 悬停全文 -->
+                <span class="face-attrs" v-if="faceAttrText(h)" :title="faceAttrText(h)">{{ faceAttrText(h) }}</span>
               </div>
             </div>
             <!-- 正确名字：选库里已有的人，或选「自定义」填一个；修正 = 按这个名字把样本录进人脸库 -->
