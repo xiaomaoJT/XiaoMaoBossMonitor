@@ -566,6 +566,14 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
 
   const camNames = Object.keys(byCamera)
   const typeLabel = (t) => alarmLabel(t) || t
+  /*
+   * 静默期间已实时推送过的关键事件（在库人脸命中 / 走向关键事件）条数。
+   * useAlertPush.handleAlarm 在非硬静默窗口里收存关键事件时打的 critPushed 标记：
+   * 这些条目当时已经通过关键事件机器人单独推送过，收进缓冲只是为了在结束汇总的
+   * 统计里留名（否则群里明明弹过、汇总却写 0 次，账对不上）。
+   * 概览里要显式点破，否则「已统一汇总于此」会让人以为这些事件此前被扣着没发。
+   */
+  const critN = list.filter((r) => r && r.critPushed).length
   const durMin = Math.max(1, Math.round((endMs - startMs) / 60000))
   const durText = durMin >= 60 ? `${(durMin / 60).toFixed(durMin % 60 ? 1 : 0)} 小时` : `${durMin} 分钟`
   const knownNames = [...knownSet]
@@ -774,6 +782,7 @@ export function buildSilentSummary(records, cfg, ctx = {}) {
     '',
     '**📊 概览**',
     `- 报警总数：${total} 条`,
+    ...(critN ? [`- 关键事件：${critN} 条（已实时推送，此处一并计入统计）`] : []),
     `- 覆盖通道：${camNames.join(' / ') || '无'}（${camNames.length} 路）`,
     `- 时段跨度：${rangeLabel}（约 ${durText}）`,
     '',

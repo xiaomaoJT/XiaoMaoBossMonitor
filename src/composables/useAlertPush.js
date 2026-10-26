@@ -465,6 +465,17 @@ export function useAlertPush(options, hooks = {}) {
       zoneName: record.zoneName,
       dwellMs: record.dwellMs,
       text: record.text,
+      /*
+       * 走向事件的规则名与路线两端。汇总的「人员走向」分区按规则归行时，
+       * flowRouteText 的前两档（flowPath / from·to 字段）直接读这里 ——
+       * 只靠 text 正文兜底要多一层解析，能带字段就带字段。
+       * 又是手写字段清单：漏了的话走向事件在汇总里退化为正文反查（不报错）。
+       */
+      flowName: record.flowName || '',
+      fromCamName: record.fromCamName || '',
+      fromZoneName: record.fromZoneName || '',
+      toCamName: record.toCamName || '',
+      toZoneName: record.toZoneName || '',
       // 报警后补发的「完整人形」原图是否并入了本批（由 pushExtraShot 在 digest 激活时打标）
       personShot: !!record.personShot
     }
@@ -2791,6 +2802,42 @@ export function useAlertPush(options, hooks = {}) {
       }
       scheduleSilentFlush()
       buffered = true
+    } else if (faceHitRoute || isFlowCritical(record)) {
+      /*
+       * 非硬静默（普通临时静默 / 定时免打扰时段）期间的关键事件。
+       *
+       * 实时急推**照发不误**（pushDirectToUsers，throughSilence 缺省放行，下面不动
+       * send/queue —— 它们在上游已被清空，关键事件只走急推），但**也要收进缓冲做
+       * 统计记录**：不收的话，结束汇总里「人脸命中 0 次、走向 0 次」，而群里明明
+       * 实时弹过好几条，账对不上（用户实测反馈：12:00-13:30 免打扰期间关键机器人
+       * 推了 2 条人脸命中 + 1 条走向，结束汇总三项全 0）。
+       * 与日常汇总「关键事件记录但不抑制」同一先例；硬静默走上面的分支（那里拦了
+       * 急推，收存时不打 critPushed —— 结束汇总不该把没推过的说成推过）。
+       *
+       * 归属与普通事件同一套判据：被全局静默覆盖 → 整体缓冲；只被通道静默覆盖 →
+       * 那一路的通道缓冲。窗口没有覆盖任何渠道时不收（此时也没有"结束汇总"可进）。
+       */
+      const suppressIds = [...byGlobal, ...byCam]
+      if (suppressIds.length) {
+        if (byGlobal.length) {
+          if (!silentSeen.has(record.key)) {
+            silentSeen.add(record.key)
+            const snap = silentSnapshot(record)
+            snap.critPushed = true
+            capPush(silentBuffer, snap)
+          }
+          scheduleSilentFlush()
+        } else {
+          const st = camSlot(record.id)
+          if (!st.seen.has(record.key)) {
+            st.seen.add(record.key)
+            const snap = silentSnapshot(record)
+            snap.critPushed = true
+            capPush(st.buf, snap)
+          }
+          scheduleCamFlush(record.id, now)
+        }
+      }
     } else if (!faceHitRoute && !isFlowCritical(record)) {
       const suppressIds = [...byGlobal, ...byCam]
       if (suppressIds.length) {
