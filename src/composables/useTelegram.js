@@ -10,7 +10,7 @@
  *   并且允许 content-type 头的预检，所以浏览器可以直连，无需代理。
  *
  * 关于 chat_id：超级群 / 频道的 id 必须带 -100 前缀
- *   （例如群里显示的 1234567890 → 实际要填 -1001234567890），
+ *   （例如群里显示的 123456789 → 实际要填 -100123456789），
  *   否则接口会返回 400 chat not found。
  */
 import { buildEventFields, formatDuration, formatTime, stateLabel, switchText, techText } from './useDingTalk.js'
@@ -163,7 +163,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 function translateError(desc) {
   const d = String(desc || '')
   if (/chat not found/i.test(d)) {
-    return '找不到该会话：群/频道的 ID 需要带 -100 前缀（例如 1234567890 → -1001234567890），且机器人必须已在群里'
+    return '找不到该会话：群/频道的 ID 需要带 -100 前缀（例如 123456789 → -100123456789），且机器人必须已在群里'
   }
   if (/Unauthorized|invalid token/i.test(d)) return 'Token 无效，请检查是否复制完整'
   if (/not enough rights|CHAT_WRITE_FORBIDDEN/i.test(d)) return '机器人没有在该群发言的权限'
@@ -444,7 +444,7 @@ function cleanGroupUsername(cfg) {
 
 /**
  * 生成「在 Telegram 里打开这条消息」的链接。
- * 优先用配置里的群用户名（形如 https://t.me/my_monitor_group/2105，最通用）；
+ * 优先用配置里的群用户名（形如 https://t.me/your_group/2105，最通用）；
  * 没填时按 chat_id 推断：私有超级群用 /c/<去掉 -100 前缀的 id>/<message_id>。
  */
 export function telegramMessageLink(cfg, messageId) {

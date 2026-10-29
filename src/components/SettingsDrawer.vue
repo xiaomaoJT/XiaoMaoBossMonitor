@@ -107,6 +107,8 @@
         <button class="btn" @click="emit('close')">取消</button>
         <button class="btn primary" @click="save">保存并应用</button>
         <input ref="fileEl" type="file" accept="application/json,.json" hidden @change="importConfig" />
+        <!-- 「配置方案 → 载入本地配置文件」用的文件选择器（入口在 ProfilesTab） -->
+        <input ref="hiddenFileEl" type="file" accept="application/json,.json" hidden @change="loadHiddenFile" />
       </footer>
     </aside>
 
@@ -138,7 +140,6 @@ import {
   clampDigestMinutes,
   cloneDefaultCameras,
   cloneDefaultOptions,
-  cloneHiddenConfig,
   DEFAULT_BACKEND_URL,
   DEFAULT_CAM_DIGEST_CHANNELS,
   DEFAULT_CAM_SILENT_CHANNELS,
@@ -156,7 +157,6 @@ import {
   WEEK_MODES,
   matchSilentSlotAt,
   parseSilentSlots,
-  HIDDEN_PASSCODE_HASH,
   syncChannelCameras,
   defaultFlow,
   flowValid,
@@ -170,6 +170,7 @@ import {
   FLOW_FULL_ZONE_NAME
 } from '../config/defaults'
 import { SECRET_SCOPE } from '../config/auth'
+import { parseConfigFile } from '../config/configFile'
 import { secretDigest, secretMatches } from '../composables/sha256'
 import { resetPushStats } from '../composables/usePushStats'
 import {
@@ -4462,7 +4463,7 @@ async function save() {
 /** 「恢复初始化」的二次确认状态（内联确认条，不用弹窗） */
 const resetAsk = ref(false)
 
-/** 打开确认条（入口在「配置方案」页，紧挨着「加载内置配置」） */
+/** 打开确认条（入口在「配置方案」页，紧挨着「载入本地配置文件」） */
 function askResetInit() {
   tab.value = 'profiles'
   resetAsk.value = true
@@ -4593,54 +4594,44 @@ function pickFile() {
   fileEl.value && fileEl.value.click()
 }
 
+/**
+ * 把一份**已归一化**的配置填进抽屉的局部副本。
+ * 两条入口（导入配置 / 载入配置文件）共用，避免两边各写一遍"填哪些字段"。
+ *
+ * ⚠️ 这里**不再调 syncChannelCameras**：parseConfigFile 已经按通道级推送开关
+ *   重算过渠道名单了。两边都算一次不算错，但那是两份判定，迟早有一边忘改。
+ */
+function applyParsedConfig(parsed) {
+  const cfg = parsed.config
+  cams.value = cfg.cameras
+  Object.keys(opts).forEach((k) => delete opts[k])
+  Object.assign(opts, cfg.options)
+  hidden.value = Array.isArray(cfg.hiddenIds) ? [...cfg.hiddenIds] : []
+  syncCustomFlags()
+  pruneAutoPlayIds(cams.value)
+  return cfg
+}
+
+/**
+ * 从文件导入配置。
+ *
+ * ⚠️ 归一化只有一份（config/configFile.js），这里**不再手写字段清单** ——
+ *   以前这里是一份手抄的通道字段表，导进来的通道会把「通道静默 / 日常汇总」
+ *   丢掉（配置有值但不生效），而且每加一个通道字段就得记着来这儿补一笔。
+ */
 function importConfig(e) {
   const file = e.target.files && e.target.files[0]
   if (!file) return
   const reader = new FileReader()
   reader.onload = () => {
-    try {
-      const data = JSON.parse(String(reader.result))
-      if (Array.isArray(data.cameras)) {
-        cams.value = data.cameras.map((c, i) => ({
-          id: c.id || uid(),
-          name: c.name || `画面 ${i + 1}`,
-          url: c.url || '',
-          motion: c.motion !== false,
-          ai: !!c.ai,
-          blind: !!c.blind,
-          roi: c.roi && typeof c.roi === 'object' ? { ...c.roi } : null,
-          rect: c.rect && typeof c.rect === 'object' ? { ...c.rect } : null,
-          push: c.push !== false,
-          channels:
-            c.channels && typeof c.channels === 'object'
-              ? { ding: c.channels.ding !== false, wecom: c.channels.wecom !== false, tg: c.channels.tg !== false }
-              : { ding: true, wecom: true, tg: true },
-          // 附加能力（人脸 / 姿态 / 区域）与区域列表必须一起带过来，
-          // 否则导入配置后"圈好的区域全没了、通道开关也回到默认"
-          aiExt:
-            c.aiExt && typeof c.aiExt === 'object'
-              ? { face: c.aiExt.face !== false, pose: c.aiExt.pose !== false, zone: c.aiExt.zone !== false, enterExit: c.aiExt.enterExit !== false }
-              : { face: true, pose: true, zone: true, enterExit: true },
-          zones: Array.isArray(c.zones)
-            ? c.zones.map((z) => ({ ...z, rect: z && z.rect ? { ...z.rect } : z.rect }))
-            : []
-        }))
-      }
-      if (data.options) {
-        const merged = { ...cloneDefaultOptions(), ...data.options }
-        Object.keys(opts).forEach((k) => delete opts[k])
-        Object.assign(opts, merged)
-      }
-      hidden.value = Array.isArray(data.hiddenIds) ? data.hiddenIds : []
-      // 导入进来的名单可能是旧格式（跟通道级开关对不上），按通道级重算一次
-      syncChannelCameras(cams.value, opts)
-      syncCustomFlags()
-      pruneAutoPlayIds(cams.value)
-      testState.kind = 'ok'
-      testState.text = '配置已导入，点右下角「保存并应用」生效'
-    } catch (err) {
-      alertDialog({ title: '导入失败', message: '配置文件解析失败：' + err.message, variant: 'danger' })
+    const parsed = parseConfigFile(reader.result)
+    if (!parsed.ok) {
+      alertDialog({ title: '导入失败', message: parsed.error, variant: 'danger' })
+      return
     }
+    const cfg = applyParsedConfig(parsed)
+    testState.kind = 'ok'
+    testState.text = `配置已导入（${cfg.cameras.length} 路通道），点右下角「保存并应用」生效`
   }
   reader.readAsText(file)
   e.target.value = ''
@@ -4683,44 +4674,62 @@ function clearMaskPwd() {
   maskPwdState.text = '已清除，改为免密码；点右下角「保存并应用」后生效'
 }
 
-/* ---------- 加载内置隐藏配置 ---------- */
-const hiddenPwd = ref('')
+/* ---------- 载入本地配置文件（整份配置：通道 + 凭据 + 摆放坐标） ---------- */
+/*
+ * 以前这里是「输入访问密码 → 载入内置配置」。内置那一份会被原样打进前端产物，
+ * 等于把真实拉流地址和三个渠道的机器人凭据一起发出去 —— 谁拿到 dist 谁就有。
+ * 现在改成用户自己从本机选一份 .json：文件在谁的机器上，谁才拿得到那份配置。
+ *
+ * 口令也随之取消：文件本身就是凭证。多一道口令只是多一个能被离线穷举的摘要，
+ * 并不增加任何实际保护（能打开设置页的人本来就能读到当前配置）。
+ */
 const hiddenState = reactive({ kind: '', text: '' })
+const hiddenFileEl = ref(null)
 
-function loadHidden() {
-  if (!hiddenPwd.value) {
-    hiddenState.kind = 'fail'
-    hiddenState.text = '请先输入访问密码'
-    return
+function pickHiddenFile() {
+  hiddenFileEl.value && hiddenFileEl.value.click()
+}
+
+/**
+ * 选中文件后：解析 → 归一化 → 填进抽屉的局部副本（不落盘，等「保存并应用」）。
+ *
+ * ⚠️ 提示语必须写明"点保存并应用才生效"：这里改的是局部副本，
+ *   用户会以为选完就完事了。
+ */
+function loadHiddenFile(e) {
+  const file = e.target.files && e.target.files[0]
+  e.target.value = ''
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    const parsed = parseConfigFile(reader.result)
+    if (!parsed.ok) {
+      hiddenState.kind = 'fail'
+      hiddenState.text = parsed.error
+      return
+    }
+    const cfg = applyParsedConfig(parsed)
+    const st = parsed.stats
+    const creds = [st.credentials.ding && '钉钉', st.credentials.wecom && '企微', st.credentials.tg && 'TG'].filter(Boolean)
+    hiddenState.kind = 'ok'
+    hiddenState.text =
+      `已载入「${file.name}」：${cfg.cameras.length} 路通道（大屏显示 ${st.visible} 路）` +
+      (st.flows ? ` · ${st.flows} 条流向` : '') +
+      (creds.length ? ` · 含 ${creds.join(' / ')} 凭据` : ' · 未含推送凭据') +
+      '，点右下角「保存并应用」生效'
   }
-  /*
-   * 只比摘要（secretMatches 内部走 secretDigest + 定长异或）。
-   * 这里**没有** HIDDEN_PASSCODE 这样的明文常量可对 —— 代码里那份已经换成摘要了。
-   */
-  if (!secretMatches(SECRET_SCOPE.HIDDEN, hiddenPwd.value, HIDDEN_PASSCODE_HASH)) {
+  reader.onerror = () => {
     hiddenState.kind = 'fail'
-    hiddenState.text = '访问密码不正确'
-    hiddenPwd.value = ''
-    return
+    hiddenState.text = '文件读取失败，请重新选择'
   }
-  const { cameras: hc, options: ho, hiddenIds: hh } = cloneHiddenConfig()
-  cams.value = hc
-  Object.keys(opts).forEach((k) => delete opts[k])
-  Object.assign(opts, ho)
-  // 内置配置自带「哪几路默认不显示」，一并带过来（大屏只留大门外 / 电梯 / 大门内）
-  hidden.value = Array.isArray(hh) ? [...hh] : []
-  hiddenPwd.value = ''
-  syncCustomFlags()
-  pruneAutoPlayIds(cams.value)
-  hiddenState.kind = 'ok'
-  hiddenState.text = `内置配置已载入（${hc.length} 路通道），点右下角「保存并应用」生效`
+  reader.readAsText(file)
 }
 /*
  * 把全部状态 / 函数 / emit / props 下发给各分区子组件（见 ./settings/*Tab.vue）。
  * 子组件 inject("sd") 后同名解构：ref/computed/reactive/函数按引用共享，
  * 故子组件里改 opts、调 emit(...) 与在父组件里做完全等价（事件仍由本组件 defineEmits 冒泡给 App）。
  */
-provide('sd', {AI_MODELS, AI_MODELS_AS_OPTIONS, AUTO_COUNT_PRESETS, BLOCK_MAX_AGE, BLOCK_MERGE, BRAND, CAM_CHANNELS, CH_LABELS, COUNT_INTERVAL_PRESETS, CRIT_EVENTS, DEFAULT_BACKEND_URL, DEFAULT_CAM_DIGEST_CHANNELS, DEFAULT_CAM_SILENT_CHANNELS, DEFAULT_FACE_MAX, DEFAULT_FACE_THRESHOLD, DEFAULT_SILENT_CHANNELS, DIGEST_INTERVAL_CHOICES, DIGEST_INTERVAL_MAX, DIGEST_INTERVAL_MIN, DIRECT_EVENT_OPTS, EMPTY_CAM_SILENT, EVENT_DEFAULTS, EVENT_GROUPS, EXT_ITEMS, FACE_CARD_W, FACE_DET_SIZES, FACE_GAP, FACE_QUALITY, FACE_ROWS, FIELD_KEYS, FLOW_FULL_ZONE, FLOW_FULL_ZONE_NAME, FLOW_MAX_NODES, FLOW_WINDOW_DEFAULT, FLOW_WINDOW_MAX, FLOW_WINDOW_MIN, FaceAssignSelect, GROUP_SIM_KEY, HIDDEN_PASSCODE_HASH, HIT_MARGIN, InfoTip, MAX_DECODE_PRESETS, OPEN_GUARD_MS, OPT_AI_INTERVAL, OPT_AUTO_PLAY, OPT_CONFIRM_FRAMES, OPT_FLOW_WINDOW, OPT_FLOW_OPPOSITE, flowOppositeSec, OPT_LOITER_RADIUS, OPT_MAX_DECODE, OPT_MOTION_LEVEL, OPT_SAMPLE_FPS, OPT_SHOT_WIDTH, PROFILE_KEY, PushTemplatePanel, SAMPLE_SCORE_RECOMMEND, SECRET_SCOPE, SelectField, SilentSlotRow, TABS, TEMP_CHANNEL_OPTS, TEMP_HOURS, TG_COMMANDS, WAKE_BACKEND_LABEL, WEEKDAYS, WEEK_MODES, _DEFAULTS, _isIsoDate, _silentTick, activeProfileId, activeSlotLabel, addAllowId, addCamSilSlot, addCamera, addDirectId, addFace, addFaceBlock, addFaceSplits, addFlow, addFlowNode, addHoliday, addMakeup, addSlot, aiBackend, aiCost, aiError, aiModel, aiSlotBackend, aiSlotState, aiState, aiStateText, alertDialog, allDigestOn, allPendingFaces, allowIdError, applyMaskPwd, applyProfile, applyWakeLock, armRowDrag, askExitApp, askResetInit, assigningGroup, assigningSample, autoCountCustom, autoPlayIds, backendBase, backendDesc, backendEnabled, backendFaceHits, backendFaceHitsError, backendFaceHitsLoadedAt, backendModeOn, backendOn, backendPendingError, backendPendingFaces, backendPendingLoadedAt, backendState, backendStateText, backendStatus, backendTesting, backendText, backendWatchdog, behindBackend, blockLibOpen, blockMergeThreshold, botState, buildAlarmMessage, bulkSplitting, cal, camDigestCfg, camDigestInfo, camDigestState, camExtOn, camExtTitle, camHasZones, camOptions, camPushOn, camSilActive, camSilCfg, camSilChannels, camSilInfo, camSilentState, cams, channelOn, checkBot, checkWecom, clampDigestMinutes, clampFlowWindowSec, clearFaces, clearHitAssign, clearMaskPwd, clearPendingAssign, clearPendingFaces, clearPrimaryFace, clone, cloneDefaultCameras, cloneDefaultOptions, cloneHiddenConfig, closePendingShot, commitRenameGroup, commitSampleAssign, computed, confirmDialog, countCols, countIntervalChoices, countIntervalPicked, critBlockOf, critOn, critSummaryOnly, critThroughSilence, currentFaceBlocks, currentSplits, currentTab, dayTypeOf, dbExporting, defaultCamDigest, defaultCamSilent, defaultFlow, deleteBackendTgWebhook, deleteFaces, deleteTgWebhookNow, deletingFace, deletingSample, digestCfgOf, digestIntervalLabel, dingShotHint, directEventOn, directIdError, directRecipients, directState, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doExitApp, doFixHit, doGroupAssign, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doEnrollHit, doMergeGroup, doResetInit, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, dragArmedIndex, dragFrom, dropBackendFaceHit, dropBackendPendingFace, dt, dtCritState, emit, endTempNow, enrollFileEl, enrollFromImage, enrollMsg, enrollOk, enrollState, enrollingPending, ensureCamDigest, ensureCamSil, ensureChannels, ensureLibMaxRoom, estimateUsage, evOn, exitAsk, exportConfig, exportDatabase, extGlobalOn, faceAttrText, faceBackendOn, faceBlocksVersion, faceColsRO, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceRowsVersion, faceSplitsVersion, faceTuneOpen, faceWriteErrKind, faceWriteFailMessage, faceWriteTimeoutStreak, fieldLabel, fileEl, fixingHit, flowCams, flowStateOf, flowSummary, flowTabOn, flowValid, flushSilentNow, fmtPendingAt, fmtRestartTime, formatBytes, formatCountdown, formatDate, formatInterval, getAllFaces, getBotInfo, getChatInfo, gpuReady, gpuText, groupAssign, groupBySim, groupFaces, groupThreshold, groupedExtra, hidden, hiddenPwd, hiddenState, hitAssign, hitAssignName, hitCustom, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, holidayInput, importConfig, libCols, libGridEl, libPage, libPageCount, libPageSize, loadBackendFaceHits, loadBackendPendingFaces, loadHidden, loadPersonModel, loadProfiles, localRev, localRevText, makeupInput, maskDownAt, maskPwdNew, maskPwdState, matchSilentSlotAt, maxDecodeCustom, measureFaceCols, mergeAllChecked, mergeFaces, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, modelDesc, motionLevelHint, move, newAllowId, newDirectId, nextTick, normalizeDingTalk, normalizeTelegram, normalizeWeCom, normalizeWeComWebhook, notifyCls, notifyLine, nowTs, observeFaceGrids, onAutoCountSelect, onBackendPull, onBackendSync, onBackendTest, onDragEnd, onDragOver, onDragStart, onEnrollFile, onGroupAssign, onMaskClick, onMaskDown, onMaxDecodeSelect, onMounted, onPendingShotKey, onSampleAssign, onUnmounted, openPendingShot, openPicker, openedAt, opts, otherNames, pagedFaceGroups, pagedPending, parseMobiles, parseSilentSlots, pendingAssign, pendingAssignName, pendingCols, pendingCustom, pendingEmpty, pendingFaces, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingPageSize, pendingRefreshNote, pendingRefreshing, pendingShot, pendingSort, persistProfiles, persistSlots, pfQuality, pfRecommended, pfScoreTip, pickFile, planEvictOldest, playBadgeClass, playBadgeText, pollRestartResult, profileName, profiles, props, pruneAutoPlayIds, pullError, pullState, pushCamCount, pushFacesSkipped, pushOverwrote, rawFaceRows, reactive, readGroupSim, readRemoteDefaultChannels, realMixedGroups, ref, refreshBackendFaceHits, refreshBackendPending, refreshBackendStatus, refreshBackendWatchdog, refreshFaces, refreshRestartInfo, refreshStorage, refreshWatch, refreshWatchStatus, releaseModel, remoteSilentChannels, remove, removeAllowId, removeCamSilSlot, removeFaceBlock, removeFlow, removeFlowNode, removeHoliday, removeMakeup, removePendingFace, removeProfile, removeSlot, renameFace, renameFaces, renamingFace, requestNotifyPermission, resetAll, resetAsk, resetFaceTune, resetPushStats, resetWipeData, restartInfo, restartPolling, restartResultText, restartSystemNow, revealed, runtimeInfo, runtimeLine, runtimeTipText, sampleAssign, sampleCustom, sampleFpsHint, sampleQualityLabel, save, saveProfile, secretDigest, secretMatches, selectedGroup, selectedGroupKey, sendDingTalk, sendTelegramText, sendWeCom, setAllPushCameras, setCamDigestInterval, setGpuPref, setMasterDigestInterval, setPrimaryFace, setTgEnabled, settingPrimary, silentActiveNow, silentStatusText, silentYieldSlots, simPct, slotsOf, snapshot, someDigestOn, sortedPendingFaces, splitMixedGroupByName, splitNames, startRenameGroup, startTempNow, stateTextOf, statusBadgeOn, storageInfo, storageText, strangerMarks, syncChannelCameras, syncCustomFlags, syncRev, syncRevText, syncState, syncStateText, sysNotifyState, sysNotifySummary, tab, tempActive, tempChannels, tempHours, tempInfo, tempLabel, tempMode, tempPreview, tempUntilLocal, tempUntilTs, testBackendTgRemote, testDingCritical, testDirectPush, testPostSilence, testPreSilence, testPush, testState, testTelegram, testTgConnection, testWecom, testWecomCritical, tg, tgBotInfo, tgDiag, tgDirectEventOn, tgDirectRecipients, tgForced, tgPending, tgPendingClass, tgPendingText, tgProbeMsg, tgRemoteChip, tgTesting, tgWebhookSet, toLocalInput, todayDayType, toggleAi, toggleAiGpu, toggleAllCamDigest, toggleAutoPlay, toggleBackend, toggleCamChannel, toggleCamDigest, toggleCamDigestChannel, toggleCamExt, toggleCamSilChannel, toggleCamSilent, toggleChannel, toggleCritEvent, toggleCritSummaryOnly, toggleCritThroughSilence, toggleDesktopNotify, toggleDirectEvent, toggleEvent, toggleGroupBySim, toggleGroupPanel, toggleKeepAwake, toggleMergeAll, togglePendingSort, togglePushCam, togglePushCamera, toggleRemoteSilentChannel, toggleTempChannel, toggleVisible, tomorrowMorning, tonightMidnight, triggerEnrollFile, uid, verifyVectorLanded, wakeCls, wakeLine, wakeLockState, watch, watchChip, watchState, watchStatusText, wc, wcCritState, wcShotHint, wcState, zoneAnyOn, zoneOptions, zoneRemove, zoneRows, zoneUpdate})
+provide('sd', {AI_MODELS, AI_MODELS_AS_OPTIONS, AUTO_COUNT_PRESETS, BLOCK_MAX_AGE, BLOCK_MERGE, BRAND, CAM_CHANNELS, CH_LABELS, COUNT_INTERVAL_PRESETS, CRIT_EVENTS, DEFAULT_BACKEND_URL, DEFAULT_CAM_DIGEST_CHANNELS, DEFAULT_CAM_SILENT_CHANNELS, DEFAULT_FACE_MAX, DEFAULT_FACE_THRESHOLD, DEFAULT_SILENT_CHANNELS, DIGEST_INTERVAL_CHOICES, DIGEST_INTERVAL_MAX, DIGEST_INTERVAL_MIN, DIRECT_EVENT_OPTS, EMPTY_CAM_SILENT, EVENT_DEFAULTS, EVENT_GROUPS, EXT_ITEMS, FACE_CARD_W, FACE_DET_SIZES, FACE_GAP, FACE_QUALITY, FACE_ROWS, FIELD_KEYS, FLOW_FULL_ZONE, FLOW_FULL_ZONE_NAME, FLOW_MAX_NODES, FLOW_WINDOW_DEFAULT, FLOW_WINDOW_MAX, FLOW_WINDOW_MIN, FaceAssignSelect, GROUP_SIM_KEY, HIT_MARGIN, InfoTip, MAX_DECODE_PRESETS, OPEN_GUARD_MS, OPT_AI_INTERVAL, OPT_AUTO_PLAY, OPT_CONFIRM_FRAMES, OPT_FLOW_WINDOW, OPT_FLOW_OPPOSITE, flowOppositeSec, OPT_LOITER_RADIUS, OPT_MAX_DECODE, OPT_MOTION_LEVEL, OPT_SAMPLE_FPS, OPT_SHOT_WIDTH, PROFILE_KEY, PushTemplatePanel, SAMPLE_SCORE_RECOMMEND, SECRET_SCOPE, SelectField, SilentSlotRow, TABS, TEMP_CHANNEL_OPTS, TEMP_HOURS, TG_COMMANDS, WAKE_BACKEND_LABEL, WEEKDAYS, WEEK_MODES, _DEFAULTS, _isIsoDate, _silentTick, activeProfileId, activeSlotLabel, addAllowId, addCamSilSlot, addCamera, addDirectId, addFace, addFaceBlock, addFaceSplits, addFlow, addFlowNode, addHoliday, addMakeup, addSlot, aiBackend, aiCost, aiError, aiModel, aiSlotBackend, aiSlotState, aiState, aiStateText, alertDialog, allDigestOn, allPendingFaces, allowIdError, applyMaskPwd, applyProfile, applyWakeLock, armRowDrag, askExitApp, askResetInit, assigningGroup, assigningSample, autoCountCustom, autoPlayIds, backendBase, backendDesc, backendEnabled, backendFaceHits, backendFaceHitsError, backendFaceHitsLoadedAt, backendModeOn, backendOn, backendPendingError, backendPendingFaces, backendPendingLoadedAt, backendState, backendStateText, backendStatus, backendTesting, backendText, backendWatchdog, behindBackend, blockLibOpen, blockMergeThreshold, botState, buildAlarmMessage, bulkSplitting, cal, camDigestCfg, camDigestInfo, camDigestState, camExtOn, camExtTitle, camHasZones, camOptions, camPushOn, camSilActive, camSilCfg, camSilChannels, camSilInfo, camSilentState, cams, channelOn, checkBot, checkWecom, clampDigestMinutes, clampFlowWindowSec, clearFaces, clearHitAssign, clearMaskPwd, clearPendingAssign, clearPendingFaces, clearPrimaryFace, clone, cloneDefaultCameras, cloneDefaultOptions, closePendingShot, commitRenameGroup, commitSampleAssign, computed, confirmDialog, countCols, countIntervalChoices, countIntervalPicked, critBlockOf, critOn, critSummaryOnly, critThroughSilence, currentFaceBlocks, currentSplits, currentTab, dayTypeOf, dbExporting, defaultCamDigest, defaultCamSilent, defaultFlow, deleteBackendTgWebhook, deleteFaces, deleteTgWebhookNow, deletingFace, deletingSample, digestCfgOf, digestIntervalLabel, dingShotHint, directEventOn, directIdError, directRecipients, directState, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doExitApp, doFixHit, doGroupAssign, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doEnrollHit, doMergeGroup, doResetInit, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, dragArmedIndex, dragFrom, dropBackendFaceHit, dropBackendPendingFace, dt, dtCritState, emit, endTempNow, enrollFileEl, enrollFromImage, enrollMsg, enrollOk, enrollState, enrollingPending, ensureCamDigest, ensureCamSil, ensureChannels, ensureLibMaxRoom, estimateUsage, evOn, exitAsk, exportConfig, exportDatabase, extGlobalOn, faceAttrText, faceBackendOn, faceBlocksVersion, faceColsRO, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceRowsVersion, faceSplitsVersion, faceTuneOpen, faceWriteErrKind, faceWriteFailMessage, faceWriteTimeoutStreak, fieldLabel, fileEl, fixingHit, flowCams, flowStateOf, flowSummary, flowTabOn, flowValid, flushSilentNow, fmtPendingAt, fmtRestartTime, formatBytes, formatCountdown, formatDate, formatInterval, getAllFaces, getBotInfo, getChatInfo, gpuReady, gpuText, groupAssign, groupBySim, groupFaces, groupThreshold, groupedExtra, hidden, hiddenFileEl, hiddenState, pickHiddenFile, loadHiddenFile, hitAssign, hitAssignName, hitCustom, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, holidayInput, importConfig, libCols, libGridEl, libPage, libPageCount, libPageSize, loadBackendFaceHits, loadBackendPendingFaces, loadPersonModel, loadProfiles, localRev, localRevText, makeupInput, maskDownAt, maskPwdNew, maskPwdState, matchSilentSlotAt, maxDecodeCustom, measureFaceCols, mergeAllChecked, mergeFaces, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, modelDesc, motionLevelHint, move, newAllowId, newDirectId, nextTick, normalizeDingTalk, normalizeTelegram, normalizeWeCom, normalizeWeComWebhook, notifyCls, notifyLine, nowTs, observeFaceGrids, onAutoCountSelect, onBackendPull, onBackendSync, onBackendTest, onDragEnd, onDragOver, onDragStart, onEnrollFile, onGroupAssign, onMaskClick, onMaskDown, onMaxDecodeSelect, onMounted, onPendingShotKey, onSampleAssign, onUnmounted, openPendingShot, openPicker, openedAt, opts, otherNames, pagedFaceGroups, pagedPending, parseMobiles, parseSilentSlots, pendingAssign, pendingAssignName, pendingCols, pendingCustom, pendingEmpty, pendingFaces, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingPageSize, pendingRefreshNote, pendingRefreshing, pendingShot, pendingSort, persistProfiles, persistSlots, pfQuality, pfRecommended, pfScoreTip, pickFile, planEvictOldest, playBadgeClass, playBadgeText, pollRestartResult, profileName, profiles, props, pruneAutoPlayIds, pullError, pullState, pushCamCount, pushFacesSkipped, pushOverwrote, rawFaceRows, reactive, readGroupSim, readRemoteDefaultChannels, realMixedGroups, ref, refreshBackendFaceHits, refreshBackendPending, refreshBackendStatus, refreshBackendWatchdog, refreshFaces, refreshRestartInfo, refreshStorage, refreshWatch, refreshWatchStatus, releaseModel, remoteSilentChannels, remove, removeAllowId, removeCamSilSlot, removeFaceBlock, removeFlow, removeFlowNode, removeHoliday, removeMakeup, removePendingFace, removeProfile, removeSlot, renameFace, renameFaces, renamingFace, requestNotifyPermission, resetAll, resetAsk, resetFaceTune, resetPushStats, resetWipeData, restartInfo, restartPolling, restartResultText, restartSystemNow, revealed, runtimeInfo, runtimeLine, runtimeTipText, sampleAssign, sampleCustom, sampleFpsHint, sampleQualityLabel, save, saveProfile, secretDigest, secretMatches, selectedGroup, selectedGroupKey, sendDingTalk, sendTelegramText, sendWeCom, setAllPushCameras, setCamDigestInterval, setGpuPref, setMasterDigestInterval, setPrimaryFace, setTgEnabled, settingPrimary, silentActiveNow, silentStatusText, silentYieldSlots, simPct, slotsOf, snapshot, someDigestOn, sortedPendingFaces, splitMixedGroupByName, splitNames, startRenameGroup, startTempNow, stateTextOf, statusBadgeOn, storageInfo, storageText, strangerMarks, syncChannelCameras, syncCustomFlags, syncRev, syncRevText, syncState, syncStateText, sysNotifyState, sysNotifySummary, tab, tempActive, tempChannels, tempHours, tempInfo, tempLabel, tempMode, tempPreview, tempUntilLocal, tempUntilTs, testBackendTgRemote, testDingCritical, testDirectPush, testPostSilence, testPreSilence, testPush, testState, testTelegram, testTgConnection, testWecom, testWecomCritical, tg, tgBotInfo, tgDiag, tgDirectEventOn, tgDirectRecipients, tgForced, tgPending, tgPendingClass, tgPendingText, tgProbeMsg, tgRemoteChip, tgTesting, tgWebhookSet, toLocalInput, todayDayType, toggleAi, toggleAiGpu, toggleAllCamDigest, toggleAutoPlay, toggleBackend, toggleCamChannel, toggleCamDigest, toggleCamDigestChannel, toggleCamExt, toggleCamSilChannel, toggleCamSilent, toggleChannel, toggleCritEvent, toggleCritSummaryOnly, toggleCritThroughSilence, toggleDesktopNotify, toggleDirectEvent, toggleEvent, toggleGroupBySim, toggleGroupPanel, toggleKeepAwake, toggleMergeAll, togglePendingSort, togglePushCam, togglePushCamera, toggleRemoteSilentChannel, toggleTempChannel, toggleVisible, tomorrowMorning, tonightMidnight, triggerEnrollFile, uid, verifyVectorLanded, wakeCls, wakeLine, wakeLockState, watch, watchChip, watchState, watchStatusText, wc, wcCritState, wcShotHint, wcState, zoneAnyOn, zoneOptions, zoneRemove, zoneRows, zoneUpdate})
 
 </script>
 

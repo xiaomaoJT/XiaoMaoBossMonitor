@@ -1,12 +1,17 @@
 /**
- * 配置分成两层，互不污染：
+ * 配置只有**一套**源码默认值，且必须是「空白」的：
  *
- *   1. 初始化配置（DEFAULT_*）——「空白」。打开就是一块空大屏：没有任何通道、
- *      没有推送凭据、AI 附加能力全关，一切都由用户自己配。
- *      底部的「恢复初始化」就是回到这一份。
+ *   1. 初始化配置（DEFAULT_*）——打开就是一块空大屏：没有任何通道、没有推送凭据、
+ *      AI 附加能力全关，一切都由用户自己配。「恢复初始化」就是回到这一份。
  *
- *   2. 内置隐藏配置（HIDDEN_*）——完整的一份（7 路真实通道 + 推送凭据 + 摆放坐标）。
- *      只在「配置方案 → 加载内置配置」输入访问密码后载入，不会混进初始化配置里。
+ *   2. 完整的那一份配置（真实通道 / 推送凭据 / 摆放坐标）**不在源码里**。
+ *      它是一份普通的 .json 文件，由用户在「配置方案 → 载入本地配置文件」时
+ *      自己从本机选进来（读取与归一化见 src/config/configFile.js）。
+ *
+ * 为什么不再内置：内置的那份（历史代号 HIDDEN_OPTIONS）会被原样打进前端产物，
+ * 等于把 7 路真实拉流地址、三个渠道的机器人凭据、白名单 id 一起分发出去 ——
+ * 谁拿到 dist 谁就有。现在源码里只有空白默认值，凭据只存在于用户自己保存的
+ * 配置文件与运行期存档里。
  *
  * ⚠️ 相对 import 必须带 `.js`：这个文件后端 headless 也会直接 import
  *    （见 server/headless-monitor.mjs），Vite 能省略扩展名，Node 不能 ——
@@ -22,22 +27,18 @@ import { secretDigest } from '../composables/sha256.js'
 import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
 import { PENDING_DEDUPE, BLOCK_MERGE, blockMergeThreshold, blockMergeTarget, HIT_MARGIN, hitMarginThreshold } from '../composables/vecMatch.js'
 
-const BASE = 'wss://media.example.com:443/rtp/00000000000000000000_000000000000000000'
-const TAIL = '.live.flv?originTypeStr=rtp_push&videoCodec=H265'
-
 /**
  * 通道静默的默认渠道：三端全静默。
  * 用户主动为某一路配静默，本意就是"这一路别吵我"，所以默认三端都静。
  *
- * ⚠️ 定义放在文件顶部（而不是它语义上所属的「通道级静默」那一节）是因为
- * `makeCamera` 会在**模块初始化时**被执行（HIDDEN_CAMERAS = ….map(makeCamera)），
- * 那里要用到它 —— 放到文件下方会撞上 const 的 TDZ 报错。
- * 详细说明见文件下方「通道级静默」一节。
+ * ⚠️ 定义放在文件顶部（而不是它语义上所属的「通道级静默」那一节），只为让它
+ * 与同在顶部的 defaultCamSilent / defaultCamDigest 排在一起；详细说明见
+ * 文件下方「通道级静默」一节。
  */
 export const DEFAULT_CAM_SILENT_CHANNELS = ['ding', 'wecom', 'tg']
 
 /**
- * 一路通道的静默配置默认值（新建通道 / 载入内置配置都用它）。
+ * 一路通道的静默配置默认值（新建通道 / 载入配置文件都用它）。
  * 默认**关闭**：没配过的通道不参与通道静默，行为与老版本完全一致。
  */
 export function defaultCamSilent() {
@@ -74,10 +75,8 @@ export const DIGEST_INTERVAL_DEFAULT = 30
 export const DIGEST_INTERVAL_CHOICES = [1, 3, 5, 10, 15, 30, 60, 120, 180, 240]
 
 /**
- * 一路通道「日常事件静默」的默认值（新建通道 / 载入内置配置都用它）。
+ * 一路通道「日常事件静默」的默认值（新建通道 / 载入配置文件都用它）。
  * 默认**关闭**：没配过的通道行为与老版本完全一致。
- *
- * 与 defaultCamSilent() 一样放在文件顶部：makeCamera 在**模块初始化时**就要用它。
  */
 export function defaultCamDigest() {
   return {
@@ -88,116 +87,10 @@ export function defaultCamDigest() {
 }
 
 /**
- * 内置隐藏配置的通道预置（真实名称 / 检测开关 / 摆放坐标）。
- * 仅在「配置方案 → 加载内置配置」输入密码后载入，不出现在初始默认值里。
- * 数组顺序 = 大屏里的默认排列顺序；
- * rect 是「自定义摆放」布局下的百分比坐标（0~100，相对大屏可视区）。
- */
-const HIDDEN_CAMERA_PRESET = [
-  { id: 'cam-1', name: '门口', motion: true, ai: true, blind: true, push: true, rect: { x: 1.29, y: 0.62, w: 31.29, h: 31.75 } },
-  { id: 'cam-4', name: '电梯', motion: true, ai: true, blind: true, push: true, rect: { x: 1, y: 34, w: 32, h: 32 } },
-  { id: 'cam-6', name: '大厅', motion: true, ai: true, blind: true, push: true, rect: { x: 67, y: 34, w: 32, h: 32 } },
-  { id: 'cam-3', name: '厕所', motion: false, ai: false, blind: false, push: false, rect: { x: 34, y: 1, w: 32, h: 32 } },
-  { id: 'cam-2', name: '通道1', motion: false, ai: false, blind: false, push: false, rect: { x: 67, y: 1, w: 32, h: 32 } },
-  { id: 'cam-7', name: '通道2', motion: false, ai: false, blind: false, push: false, rect: { x: 1, y: 67, w: 32, h: 32 } },
-  { id: 'cam-5', name: '楼梯', motion: false, ai: false, blind: false, push: false, rect: { x: 34, y: 34, w: 32, h: 32 } }
-]
-
-/**
- * 内置隐藏配置里「默认不显示」的通道：厕所 / 通道1 / 通道2 / 楼梯。
- * 载入内置配置后大屏只留 门口 / 电梯 / 大厅 三路在跑，
- * 其余四路仍留在通道列表里（设置 → 监控通道 里把「显示」打开即可恢复）。
- */
-export const HIDDEN_HIDDEN_IDS = ['cam-3', 'cam-2', 'cam-7', 'cam-5']
-
-/** 由预置项生成一路完整通道配置（拉流地址按 cam-N 的 N 拼 01~07） */
-function makeCamera(preset) {
-  const index = Number(String(preset.id).replace('cam-', ''))
-  return {
-    id: preset.id,
-    name: preset.name,
-    url: `${BASE}${String(index).padStart(2, '0')}${TAIL}`,
-    /**
-     * 子码流地址（可空）。
-     * 网格里多路同看时拉子码流（分辨率低、软解压力小一个量级），
-     * 点开放大单路时才切主码流；留空 = 永远拉主码流（老配置无感）。
-     */
-    urlSub: '',
-    /**
-     * 后端专用流地址（可空）。
-     *
-     * 浏览器只能播 ws/wss-flv，后端却可以直接吃 **rtsp://** 或 **https://…live.mp4**
-     * 这类地址（实测该平台 rtsp:554 与 https mp4 都可用）。走这些协议时
-     * ffmpeg 原生拉流，不必把字节流先接进 WebSocket 再转一道 ——
-     * 多路并发时更稳、也更省 CPU。
-     * 留空 = 后端与页面用同一个地址（wss 走桥接）。
-     */
-    urlBackend: '',
-    /** 是否参与运动检测 */
-    motion: preset.motion,
-    /** 是否对该通道做人形识别（较吃 CPU） */
-    ai: preset.ai,
-    /**
-     * 人形识别之上的「附加能力」，这一路是否参与（默认全部参与）。
-     *
-     * ⚠️ 这里只是通道级的分流开关，真正的总闸在「检测识别」页的全局开关里：
-     *    全局开着 + 这里不是 false → 这一路才跑。
-     *    所以把不看人脸的通道关掉，就能把算力集中在真正要看的几路上。
-     *   face 人脸识别 / pose 人形姿态 / zone 区域规则（进出 · 徘徊 · 计数）
-     *   hit  人脸命中：历史残留字段，已不再参与推送收窄（见下）
-     */
-    aiExt: {
-      face: preset.face !== false,
-      pose: preset.pose !== false,
-      zone: preset.zone !== false,
-      /**
-       * 走入 / 走出捕获（通道级总闸）：这一路是否产出"进入 / 离开区域"事件。
-       * 与区域规则（zone）同属区域能力族 —— 通道没开区域规则时它无意义，故默认跟随。
-       * 区域规则里每个区域还能单独细调（zone.enterExit），二者是"通道总闸 + 区域细调"关系。
-       * undefined → 视为开启（向后兼容：旧存档没有这一项时仍按"捕获开"运行）。
-       */
-      enterExit: preset.enterExit !== false,
-      /**
-       * 人脸命中（aiExt.hit）：历史残留字段。
-       *
-       * ⚠️ 已废弃，不再参与任何推送收窄。人脸识别的"识别到人脸就推"由 face 事件类型
-       *    （各渠道 events.face）承载；"命中在库人脸"走独立的关键事件（pushDirectToUsers）。
-       *    这里只是把旧存档里的 hit 字段原样保留，避免迁移时丢失；新配置不依赖它。
-       */
-      hit: preset.hit === true
-    },
-    /** 检测区域（归一化坐标 0~1），null 表示全画面 */
-    roi: null,
-    /** 盲视模式：隐藏画面（省渲染开销），但保持解码与检测运行 */
-    blind: preset.blind,
-    /** 是否把该通道的报警推送到钉钉 / 企业微信 / Telegram（总开关） */
-    push: preset.push,
-    /** 该通道分别推送到哪些渠道（总开关打开时生效；false = 这个渠道不推这一路） */
-    channels: { ding: true, wecom: true, tg: true },
-    /**
-     * 自定义摆放坐标（百分比 0~100，相对大屏可视区）
-     * 仅在「自定义摆放」布局下生效，null 表示尚未排布（会自动套用默认网格）
-     */
-    rect: preset.rect ? { ...preset.rect } : null,
-    /** 检测区域列表（区域进出 / 徘徊检测用），空 = 不启用区域规则 */
-    zones: [],
-    /** 通道静默（对某一路在指定时段静默指定渠道）；默认关，不配就不生效 */
-    silent: defaultCamSilent(),
-    /**
-     * 日常事件静默（对某一路在**非静默时段**按固定间隔收存非关键事件，
-     * 每个间隔只推一条汇总）；默认关，不配就不生效。详见文件下方同名小节。
-     */
-    digest: defaultCamDigest()
-  }
-}
-
-/** 内置隐藏配置的通道列表（与 HIDDEN_OPTIONS 配套） */
-export const HIDDEN_CAMERAS = HIDDEN_CAMERA_PRESET.map(makeCamera)
-
-/**
  * 初始默认通道：**空的**。
  * 初始化配置是空白的 —— 打开就是一块空大屏，通道全部由用户自己「+ 新增一路」添加。
- * 那份完整的 7 路预置不在这里，在 HIDDEN_CAMERAS 里，靠密码载入。
+ * 完整的那份（真实名称 / 拉流地址 / 摆放坐标）不在这里，也不在源码里：
+ * 它是一份本地 .json 文件，靠用户在「配置方案」页自己选进来。
  */
 export const DEFAULT_CAMERAS = []
 
@@ -205,11 +98,14 @@ export const DEFAULT_CAMERAS = []
 export const DECODER_PATH = './js/decoder.js'
 
 /**
- * 后端检测服务（headless）的默认地址。
- * 那台 Windows 机器在局域网里的固定地址 —— 开启后端模式时自动填入，
- * 省得每次都要翻出 IP 再手敲一遍（手敲最容易错的就是端口）。
+ * 后端检测服务（headless）的默认地址 —— **空**。
+ *
+ * 以前这里写死着某台机器的局域网地址，那是部署信息、不该随产物分发：
+ * 拿到 dist 的人一眼就知道内网里哪台机器在跑服务。现在留空，
+ * 由用户自己在「后端检测」里填（或从载入的配置文件里带过来）。
+ * 地址为空时后端相关功能照旧不可用 —— 与"没配"完全等价。
  */
-export const DEFAULT_BACKEND_URL = 'http://10.0.0.12:8787'
+export const DEFAULT_BACKEND_URL = ''
 
 /** 布局预设 */
 export const LAYOUTS = [
@@ -249,12 +145,6 @@ export const CHANNEL_ALIASES = {
   tg: ['tg', 'telegram', 'tele', '电报']
 }
 
-/**
- * 内置隐藏配置（完整版）。
- * ⚠️ 它会被打进前端构建产物（JS 包）里，密码只是 UI 层面的门槛，
- * 不是加密——拿到安装包的人理论上可以解包提取。适合"不让界面上直接看到"，
- * 不适合防有心人逆向。
- */
 /**
  * 命中确认（「见到在库人脸要重复出现 N 次才报警」）的缺省值与上下限。
  * ----------------------------------------------------------------------------
@@ -526,7 +416,7 @@ export function blockMaxAgeDays(c) {
  *
  * 0 = 关闭（老行为：两条都推）。上限 600s 与时间窗上限对齐。
  * 判定在 useFlowMatch 引擎里（前后端共用同一份），配置在 options.flow.oppositeSec。
- * ⚠️ 必须声明在 HIDDEN_OPTIONS 之前：那里的 flow 块直接引用这个常量（TDZ）。
+ * ⚠️ 必须声明在 BASE_OPTIONS 之前：那里的 flow 块直接引用这个常量（TDZ）。
  */
 export const FLOW_OPPOSITE_DEFAULT = 60
 export const FLOW_OPPOSITE_MAX = 600
@@ -539,7 +429,18 @@ export function clampFlowOppositeSec(v) {
   return Math.min(FLOW_OPPOSITE_MAX, Math.round(n))
 }
 
-export const HIDDEN_OPTIONS = {
+/**
+ * 产品级基线配置 —— **全部是中性的产品参数，不许出现任何部署信息**。
+ *
+ * 这里曾经是那份「完整隐藏配置」：7 路真实拉流地址、三个渠道的机器人 webhook /
+ * 加签密钥 / Bot Token、TG 白名单用户 id、某台机器的内网 IP，全写在这儿，
+ * 然后被原样打进前端产物分发出去。现在源码里只保留产品级的默认值，
+ * 所有「这一家的东西」都挪到了用户自己的配置文件里。
+ *
+ * 改这里的判据：一句话能不能公开写在说明书里。能 → 放这里；不能 → 那是配置，
+ * 不是默认值（去 config.example.json 里加一行，由用户自己填）。
+ */
+const BASE_OPTIONS = {
   /** 是否解码音频（枪机一般无音轨，关闭可降低 CPU 占用） */
   hasAudio: false,
   /** 优先使用 MSE / WebCodecs 硬件解码（仅 H.264 有效，H.265 会自动回退 wasm） */
@@ -565,8 +466,9 @@ export const HIDDEN_OPTIONS = {
    * 自定义「同时播放通道」：手动指定哪几路开机即播。
    * 非空时优先于 autoPlayCount（只播列在这里的通道，仍受 maxDecode 上限约束）；
    * 留空则按「打开时自动播放」的前 N 路规则。数组顺序 = 播放优先级。
+   * 基线里留空（还没有通道）；要固定开机播哪几路，在设置里勾，或由配置文件带过来。
    */
-  autoPlayIds: ['cam-1', 'cam-4', 'cam-6'],
+  autoPlayIds: [],
   /**
    * 点播互斥：点击某一路播放时，自动关闭其它正在播放的画面。
    * 关闭后则按「同时解码路数上限」最多并行播放。
@@ -890,7 +792,7 @@ export const HIDDEN_OPTIONS = {
     /**
      * 持续异常时的重复提醒间隔（分钟），0 = 每次故障只提醒一次。
      *
-     * 内置配置给 **30**：网络抖动时同一路通道在半小时内反复掉线又恢复，
+     * 基线给 **30**：网络抖动时同一路通道在半小时内反复掉线又恢复，
      * 30 分钟内只提醒一次，不再随抖动反复播报。
      * ⚠️ 这个窗口会**跨"恢复"延续**（见 watchdog.notifyUp）：
      *    以前一恢复就把节流戳清掉，导致每次掉线都立刻再报一条，等于没有节流。
@@ -933,7 +835,8 @@ export const HIDDEN_OPTIONS = {
      * 静默时段列表（item 114）。每一项是 { start, end }，支持跨零点。
      * 空数组 = 没有定时静默（但临时静默仍然可用）。
      *
-     * 内置隐藏配置的默认两个时段：夜里 20:00 ~ 次日 08:00 + 午休 12:00 ~ 13:30。
+     * 基线的两个时段：夜里 20:00 ~ 次日 08:00 + 午休 12:00 ~ 13:30。
+     * （真实部署的时段以用户载入的配置文件为准，这里只是新装时的起点。）
      */
     slots: [
       { start: '20:00', end: '08:00' },
@@ -1131,11 +1034,10 @@ export const HIDDEN_OPTIONS = {
   dingtalk: {
     /** 是否启用推送 */
     enabled: true,
-    /** 群机器人 Webhook（完整地址） */
-    webhook:
-      'https://oapi.dingtalk.com/robot/send?access_token=YOUR_DINGTALK_ACCESS_TOKEN',
-    /** 加签密钥（安全设置=加签时填写，留空表示使用关键词或 IP 白名单） */
-    secret: 'YOUR_DINGTALK_SIGN_SECRET',
+    /** 群机器人 Webhook（完整地址）—— 属于凭据，源码里只留空，由设置页或配置文件填 */
+    webhook: '',
+    /** 加签密钥（安全设置=加签时填写，留空表示使用关键词或 IP 白名单）—— 同上，源码里不留 */
+    secret: '',
     /** 走本地代理（推荐，规避浏览器跨域限制） */
     useProxy: true,
     /**
@@ -1150,9 +1052,10 @@ export const HIDDEN_OPTIONS = {
     /**
      * 「需要推送的通道」—— 由「监控通道」页的推送开关派生（见 syncChannelCameras），
      * 不要当成第二个独立开关来理解/编辑。
-     * 内置配置里给的就是 HIDDEN_CAMERAS 中 push 为 true 的那三路：门口 / 电梯 / 大厅。
+     * 基线里是空的（还没有任何通道）；载入配置文件后由 syncChannelCameras 按
+     * 「监控通道」页的推送开关重算，别在这里手写通道 id。
      */
-    cameras: ['cam-1', 'cam-4', 'cam-6'],
+    cameras: [],
 
     /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
     events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
@@ -1303,19 +1206,19 @@ export const HIDDEN_OPTIONS = {
      * 钉钉与 Telegram 可同时开启，事件会同时推送到两边。
      */
     enabled: true,
-    /** 机器人 Token（@BotFather 里获取，形如 123456789:AA....） */
-    token: '123456789:AA_EXAMPLE_BOT_TOKEN',
+    /** 机器人 Token（@BotFather 里获取，形如 123456789:AA....）—— 凭据，源码里留空 */
+    token: '',
     /**
      * 目标会话 ID：群组 / 频道 / 私聊。
-     * 超级群与频道的 id 必须带 -100 前缀（例如 1234567890 → -1001234567890）。
+     * 超级群与频道的 id 必须带 -100 前缀（例如 123456789 → -100123456789）。
      */
-    chatId: '-1001234567890',
+    chatId: '',
     /**
      * 群 / 频道的公开用户名（就是 t.me 链接里那一段，例如 my_monitor_group）。
      * 填了它才能生成 https://t.me/my_monitor_group/<消息ID> 这种手机点开就能跳转的链接；
      * 留空则退回 t.me/c/<内部ID>/<消息ID>（这种只有装过 TG 且已入群才能打开）。
      */
-    groupUsername: 'my_monitor_group',
+    groupUsername: '',
     /** 图片发送方式：photo = 聊天里直接预览（TG 会压缩）；document = 原始文件，不压缩 */
     sendMode: 'photo',
     /** 事件有截图时一并发送图片 */
@@ -1326,7 +1229,7 @@ export const HIDDEN_OPTIONS = {
     alsoSendOriginal: false,
 
     /* ---- 需要推送的通道 id 列表（由通道级推送开关派生，见 syncChannelCameras） ---- */
-    cameras: ['cam-1', 'cam-4', 'cam-6'],
+    cameras: [],
     /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
     events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
 
@@ -1350,8 +1253,9 @@ export const HIDDEN_OPTIONS = {
        * 允许发指令的 Telegram 用户 id（数字）。
        * 空数组 = 谁都不能控制；多个 id 用逗号分隔。
        * ⚠️ 这是**唯一的身份判据**，不要为了图省事填群 id。
+       * ⚠️ 源码里必须是空的：白名单是一份**人**的名单，只该活在用户自己的配置里。
        */
-      allowUserIds: ['100000001'],
+      allowUserIds: [],
       /** 长轮询间隔（毫秒）。Telegram 建议 ≤50s；调大省流量但响应变慢 */
       pollMs: 3000,
       /**
@@ -1433,9 +1337,9 @@ export const HIDDEN_OPTIONS = {
      * 群机器人 Webhook 完整地址，形如
      *   https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=693a91f6-7xxx-4bc4-97a0-0ec2sifa5aaa
      * 只填 key 那一串也行，代码会自动补全前缀。
+     * ⚠️ 源码里留空：key 就是凭据，拿到它就能往你的群里发消息。
      */
-    webhook:
-      'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=00000000-0000-0000-0000-000000000000',
+    webhook: '',
     /**
      * 自定义代理基地址，留空 = 自动判断（与钉钉同理）：
      *   浏览器/桌面端 → /wecom-bot（同源代理）
@@ -1444,7 +1348,7 @@ export const HIDDEN_OPTIONS = {
     proxyBase: '',
 
     /** 需要推送的通道 id 列表（由通道级推送开关派生，见 syncChannelCameras） */
-    cameras: ['cam-1', 'cam-4', 'cam-6'],
+    cameras: [],
     /** 勾选要推送的事件类型（人脸 / 区域 / 姿态一并推送，计数不推） */
     events: { motion: true, person: true, face: true, zone: true, pose: true, count: true },
     /** 画面移动的变动幅度低于该百分比时不推送（0 = 不限制） */
@@ -1553,17 +1457,17 @@ export const HIDDEN_OPTIONS = {
 }
 
 /**
- * 初始化默认配置：在隐藏配置的基础上「洗」出一份**空白**配置。
+ * 初始化默认配置：在**产品级基线**上「洗」出一份空白配置。
  *
- * 洗掉的是所有「个人化」的东西：推送凭据、绑定的通道、AI 附加能力总闸、播放策略。
- * 留下的都是产品级的中性参数（变动档位、采样帧率、事件保留条数……），
- * 那些是"可用性默认"而不是"个人数据"，所以跟着隐藏配置一起演进。
+ * 基线（BASE_OPTIONS）本身已经是中性的产品参数了，所以这一层洗白现在是
+ * **第二道保险**（历史遗留，但值得留着）：万一有人往基线里又写了凭据 / 白名单，
+ * 空白配置这边也不会把它带出去 —— 「恢复初始化」永远回到"什么都没有"。
  *
  * ⚠️ 通道列表不在这里 —— 走 DEFAULT_CAMERAS（空数组）。
  */
 
 export const DEFAULT_OPTIONS = (() => {
-  const o = JSON.parse(JSON.stringify(HIDDEN_OPTIONS))
+  const o = JSON.parse(JSON.stringify(BASE_OPTIONS))
 
   /* ---- 外观主题：liquid = 液态风格（玻璃质感）；dark / light / auto 见设置「外观」 ---- */
   o.theme = 'liquid'
@@ -1603,10 +1507,9 @@ export const DEFAULT_OPTIONS = (() => {
 
   /* ---- AI 附加能力：总闸全关，用不用由用户自己决定 ---- */
   /*
-   * aiEnabled 是「人形检测」总闸。它原本在 HIDDEN_OPTIONS 里是开的，
-   * 而这里只洗了 face / pose / zone —— 结果「恢复初始化」之后首屏照样去拉
-   * 默认模型（yolo11n 10MB，选 large 则 36MB）。空白配置就该是克制的：
-   * 没配摄像头、没开推送，自然也不该先替用户下模型。
+   * aiEnabled 是「人形检测」总闸。基线里它是开的，而这里只洗了 face / pose / zone
+   * —— 结果「恢复初始化」之后首屏照样去拉默认模型（yolo11n 10MB，选 large 则 36MB）。
+   * 空白配置就该是克制的：没配摄像头、没开推送，自然也不该先替用户下模型。
    */
   o.aiEnabled = false
   o.face.enabled = false
@@ -1654,8 +1557,8 @@ export const DEFAULT_OPTIONS = (() => {
   }
 
   /*
-   * 远程控制的白名单 id **只活在隐藏配置（HIDDEN_OPTIONS）里**，不许进默认配置。
-   * 初始化配置里把它清空（没人能下发指令），只有「加载内置配置」输密码后才带回来。
+   * 远程控制的白名单 id 属于「某个人」的授权，不许进默认配置。
+   * 初始化配置里把它清空（没人能下发指令）；要恢复就载入自己的配置文件。
    * 否则「恢复初始化」之后白名单还在，等于把授权 id 写死进了空白配置。
    */
   if (o.telegram.remote) o.telegram.remote.allowUserIds = []
@@ -1671,15 +1574,6 @@ export const DEFAULT_OPTIONS = (() => {
 
   return o
 })()
-
-/**
- * 「加载内置配置」的访问口令 —— 这里只**转出摘要**，明文已从代码里删除。
- *
- * 权威定义在 config/auth.js（那里连用途域 scope 一起说明）。
- * 之所以还从这里转出一次：这个常量的历史引用方（设置页）一直是从 defaults
- * 取它的，转出可以少改一处引用；新代码**请直接从 config/auth.js 拿**。
- */
-export { HIDDEN_PASSCODE_HASH } from './auth.js'
 
 /**
  * 把所有「本地校验型口令」的存量明文换算成摘要（幂等，可反复调用）。
@@ -1729,19 +1623,45 @@ export function migrateSecretFields(opts) {
 }
 
 /**
- * 深拷贝一份内置隐藏配置（通道 + 通道可见性 + 配置）。
- * 载入后大屏只留 HIDDEN_HIDDEN_IDS 之外的三路，其余四路在通道列表里但默认不显示。
+ * 用默认值补齐一份 options（两层嵌套）。
+ * ----------------------------------------------------------------------------
+ * 覆盖两条来路：① 老版本存档里没有的新增字段；② 用户载入的配置文件只写了
+ * 一部分字段。缺什么补什么，**已有的值一律不动**（哪怕是空串 / false）。
+ *
+ * 单点定义在这里，是因为它有两个调用方，而两边判据必须一致：
+ *   - App.vue 载入存档时（saved.options 可能来自几个版本前）
+ *   - config/configFile.js 载入本地配置文件时
+ *
+ * ⚠️ 只做两层：options 的嵌套深度就是两层（dingtalk.critical、telegram.remote…），
+ *   第三层（critical.events）由各自的 normalize* 处理，这里不越界。
+ *
+ * @param {object} opts 目标配置对象，**原地修改**
+ * @returns {object} 同一个对象（便于链式调用）
  */
-export function cloneHiddenConfig() {
-  const cameras = JSON.parse(JSON.stringify(HIDDEN_CAMERAS))
-  const options = JSON.parse(JSON.stringify(HIDDEN_OPTIONS))
-  /*
-   * 渠道级「需要推送的监控」名单直接从通道级推送开关派生一次 ——
-   * 免得 HIDDEN_CAMERA_PRESET 里改了哪几路要推，这边忘了跟着改，
-   * 又出现「监控通道里开了推送、实际推不出去」的那种不一致。
-   */
-  syncChannelCameras(cameras, options)
-  return { cameras, options, hiddenIds: [...HIDDEN_HIDDEN_IDS] }
+export function fillMissingOptions(opts) {
+  const fresh = cloneDefaultOptions()
+  Object.keys(fresh).forEach((k) => {
+    const def = fresh[k]
+    const isPlainObj = def && typeof def === 'object' && !Array.isArray(def)
+    if (!isPlainObj) {
+      if (opts[k] === undefined) opts[k] = def
+      return
+    }
+    if (!opts[k] || typeof opts[k] !== 'object') {
+      opts[k] = def
+      return
+    }
+    Object.keys(def).forEach((ik) => {
+      const idef = def[ik]
+      const isNested = idef && typeof idef === 'object' && !Array.isArray(idef)
+      if (isNested) {
+        opts[k][ik] = { ...idef, ...(opts[k][ik] || {}) }
+      } else if (opts[k][ik] === undefined) {
+        opts[k][ik] = idef
+      }
+    })
+  })
+  return opts
 }
 
 /**
@@ -2769,9 +2689,6 @@ export function silentOverlapSegments(silentCfg, startMs, endMs) {
   }
   return merged
 }
-
-/** 新建摄像头时使用的默认地址模板 */
-export const URL_TEMPLATE = `${BASE}01${TAIL}`
 
 /* ============================================================================
  * 人员走向（跨摄像头）配置层

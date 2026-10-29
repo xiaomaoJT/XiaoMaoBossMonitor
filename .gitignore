@@ -20,3 +20,9 @@ server/data
 # 新机器首次启动会自动重新下载；也可在打包机上先跑 npm run ffmpeg:fetch 预取
 server/.cache
 ios/DerivedData-watch
+
+# 本地配置文件（真实拉流地址 + 推送凭据 + 白名单）—— 绝不进版本库。
+# 软件本身只带空白默认值；这一份是"这一家的配置"，由用户放在自己机器上。
+# 只放行格式示例，其余 *.json 一律忽略。
+config/*.json
+!config/config.example.json

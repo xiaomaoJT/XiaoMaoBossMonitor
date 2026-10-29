@@ -1,0 +1,65 @@
+{
+  "_readme": "配置文件的格式示例（含占位值）。真正的配置由设置页「导出配置」产出，或照着这份手写；载入方式：设置 → 配置方案 → 载入本地配置文件。所有 options 字段都可以省略，缺的自动取默认值。",
+  "version": 1,
+  "exportedAt": "",
+  "cameras": [
+    {
+      "id": "cam-1",
+      "name": "门口",
+      "url": "wss://example.com/live/camera1.flv",
+      "urlSub": "",
+      "urlBackend": "",
+      "motion": true,
+      "ai": true,
+      "blind": false,
+      "push": true,
+      "channels": { "ding": true, "wecom": true, "tg": true },
+      "aiExt": { "face": true, "pose": true, "zone": true, "enterExit": true, "hit": false },
+      "roi": null,
+      "rect": { "x": 1, "y": 1, "w": 32, "h": 32 },
+      "zones": [],
+      "silent": {
+        "enabled": false,
+        "slots": [],
+        "channels": ["ding", "wecom", "tg"],
+        "tempUntil": 0,
+        "tempSince": 0,
+        "tempChannels": [],
+        "tempLabel": ""
+      },
+      "digest": { "enabled": false, "intervalMinutes": 30, "channels": ["ding", "wecom", "tg"] }
+    }
+  ],
+  "options": {
+    "dingtalk": {
+      "enabled": true,
+      "webhook": "https://oapi.dingtalk.com/robot/send?access_token=填你自己的",
+      "secret": "SEC填你自己的加签密钥",
+      "critical": {
+        "enabled": false,
+        "webhook": "",
+        "secret": ""
+      }
+    },
+    "telegram": {
+      "enabled": false,
+      "token": "123456789:AA填你自己的",
+      "chatId": "",
+      "remote": { "enabled": false, "allowUserIds": [] }
+    },
+    "wecom": {
+      "enabled": false,
+      "webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=填你自己的",
+      "critical": { "enabled": false, "webhook": "" }
+    },
+    "backend": {
+      "enabled": true,
+      "url": "http://127.0.0.1:8787",
+      "pollMs": 10000,
+      "ffmpegPath": ""
+    },
+    "silent": { "enabled": true, "slots": [{ "start": "22:00", "end": "07:30", "scope": "all" }] },
+    "flows": []
+  },
+  "hiddenIds": []
+}

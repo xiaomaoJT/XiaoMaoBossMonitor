@@ -291,6 +291,7 @@ import {
   STORAGE_KEY,
   cloneDefaultCameras,
   cloneDefaultOptions,
+  fillMissingOptions,
   migrateSecretFields,
   normalizeCameraChannels,
   normalizeCameraDigest,
@@ -543,7 +544,7 @@ migrateCountInterval(options)
 /*
  * 「渠道级监听名单」（dingtalk / wecom / telegram 的 cameras）从通道级推送配置派生。
  *
- * 老存档里那份名单很可能已经和「监控通道」页的开关脱节（隐藏配置的默认值是
+ * 老存档里那份名单很可能已经和「监控通道」页的开关脱节（旧版内置配置的默认值是
  * 只有 cam-1 门口），而它以前是推送的第二道硬闸 —— 结果就是电梯/大厅 明明
  * 开了推送却一条都收不到。这里统一在载入时纠正一次，之后每次落盘都会再对齐。
  *
@@ -554,35 +555,10 @@ migrateCountInterval(options)
 syncChannelCameras(cameras.value, options)
 writeStorage()
 
-/**
- * 老版本 localStorage 里保存的配置没有新增字段（例如 alert.topNotify / alert.shotWidth），
- * 这里用默认值补齐（支持两层嵌套），避免升级后选项变成 undefined。
+/*
+ * 「用默认值补齐老存档缺的字段」已上移到 defaults.js 的 fillMissingOptions ——
+ * 载入本地配置文件走的是同一份判定，两处各写一遍迟早漂开。
  */
-function fillMissingOptions(opts) {
-  const fresh = cloneDefaultOptions()
-  Object.keys(fresh).forEach((k) => {
-    const def = fresh[k]
-    const isPlainObj = def && typeof def === 'object' && !Array.isArray(def)
-    if (!isPlainObj) {
-      if (opts[k] === undefined) opts[k] = def
-      return
-    }
-    if (!opts[k] || typeof opts[k] !== 'object') {
-      opts[k] = def
-      return
-    }
-    Object.keys(def).forEach((ik) => {
-      const idef = def[ik]
-      const isNested = idef && typeof idef === 'object' && !Array.isArray(idef)
-      if (isNested) {
-        opts[k][ik] = { ...idef, ...(opts[k][ik] || {}) }
-      } else if (opts[k][ik] === undefined) {
-        opts[k][ik] = idef
-      }
-    })
-  })
-  return opts
-}
 
 /**
  * 一次性迁移：早期版本默认配置里的机器人 token 是无效的
@@ -953,14 +929,19 @@ async function copyErrorLog() {
   }
 }
 
-/** 自愈：任何写配置的时机都顺带修复旧版无效 token（返回是否修复过） */
+/**
+ * 自愈：把旧版里那个**已失效**的钉钉机器人 token 清掉，让用户重新填（返回是否清过）。
+ *
+ * 以前这里是「发现旧 token → 换成硬编码的新 token + 加签密钥」，等于把一份真凭据
+ * 写进了源码随产物一起发出去。现在默认配置里没有任何凭据，所以这里只做减法：
+ * 那个 token 本来就是坏的（钉钉侧已删），清掉不会让任何能用配置失效。
+ */
 function fixLegacyDingTalk(dt) {
   const BAD = 'YOUR_DINGTALK_LEGACY_TOKEN'
   if (!dt || typeof dt.webhook !== 'string') return false
   if (dt.webhook.includes(BAD)) {
-    dt.webhook =
-      'https://oapi.dingtalk.com/robot/send?access_token=YOUR_DINGTALK_ACCESS_TOKEN'
-    dt.secret = 'YOUR_DINGTALK_SIGN_SECRET'
+    dt.webhook = ''
+    dt.secret = ''
     return true
   }
   return false

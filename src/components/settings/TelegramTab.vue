@@ -65,7 +65,7 @@
         <strong>会话 ID（chat_id）</strong>
         <em>
           群 / 频道 / 私聊的 id。<b>超级群和频道必须带 -100 前缀</b>：
-          群链接里看到的 1234567890 要写成 -1001234567890，否则会报「chat not found」
+          群链接里看到的 123456789 要写成 -100123456789，否则会报「chat not found」
         </em>
       </span>
       <div class="pw-wrap">

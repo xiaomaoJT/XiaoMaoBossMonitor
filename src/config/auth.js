@@ -24,27 +24,30 @@
  * ----------------------------------------------------------------------------
  * 这个文件同时是**全部本地校验型口令**的摘要权威 —— 不只是登录口令。
  * 「本地校验型口令」= 校验只在本机/本进程做完、不需要拿去联网换凭据的口令。
- * 目前有三处，一律只存摘要、只比摘要，代码里不存在明文常量：
+ * 目前有两处，一律只存摘要、只比摘要，代码里不存在明文常量：
  *
  *   ① 登录口令        DEFAULT_AUTH.passwordHash   （sha256(`账号:密码`)）
  *   ② 遮罩解锁密码    options.mask.passwordHash   （sha256(`boss-monitor:mask-unlock:口令`)）
- *   ③ 隐藏配置访问口令 HIDDEN_PASSCODE_HASH        （sha256(`boss-monitor:hidden-config:口令`)）
  *
- * ②③ 走 secretDigest(scope, 口令)（见 composables/sha256.js），
- * 靠 scope 做**域分隔**：三处口令就算碰巧写成同一个字符串，摘要也互不相同，
+ * ② 走 secretDigest(scope, 口令)（见 composables/sha256.js），
+ * 靠 scope 做**域分隔**：两处口令就算碰巧写成同一个字符串，摘要也互不相同，
  * 某一处泄漏的摘要不能拿去顶替另一处。
+ *
+ * ※ 历史上还有第三处「加载内置配置的访问口令」。内置配置已经不再随源码分发
+ *   （改成用户自己选本地 .json 文件载入），那把口令随之取消 —— 文件本身就是
+ *   凭证，再多一道口令只是多一个能被穷举的摘要。
  *
  * ⚠️ 为什么钉钉加签密钥 / TG Bot Token / 企微 Webhook 不在这个名单里：
  *   它们**不是本地校验型口令** —— 要原样发给第三方服务器才能用，
  *   摘要化会让功能直接失效。那类凭据的保护手段是"别进版本库、别导出、走 HTTPS"，
  *   不是哈希。别把它们也顺手摘要了。
  *
- * 生成摘要（两处都用得上 —— 登录那条不带前缀，另两条带前缀，别抄错）：
+ * 生成摘要（登录那条不带前缀，遮罩那条带前缀，别抄错）：
  *
  *   # 登录口令：sha256('账号:密码')
  *   node -e "console.log(require('crypto').createHash('sha256').update('账号:密码').digest('hex'))"
  *
- *   # 遮罩 / 隐藏配置口令（scope 换成 mask-unlock 或 hidden-config）
+ *   # 遮罩密码（scope 固定 mask-unlock）
  *   node -e "console.log(require('crypto').createHash('sha256').update('boss-monitor:mask-unlock:你的口令').digest('hex'))"
  *
  * ⚠️ 安全边界（说清楚，别自欺欺人）：
@@ -115,21 +118,5 @@ export const AUTH_PROBE_TIMEOUT_MS = 1500
  * ==========================================================================*/
 export const SECRET_SCOPE = {
   /** 隐私遮罩的解锁密码（options.mask.passwordHash） */
-  MASK: 'mask-unlock',
-  /** 「加载内置配置」的访问口令（HIDDEN_PASSCODE_HASH） */
-  HIDDEN: 'hidden-config'
+  MASK: 'mask-unlock'
 }
-
-/**
- * 「加载内置配置」的访问口令**摘要** —— 原文是 13 个字符那串，这里只是它的摘要。
- *
- * 改这个口令：跑文件顶部注释里的第二条 node 命令（scope 用 `hidden-config`），
- * 把算出来的 64 位十六进制粘回来即可。
- *
- * 为什么不留明文：这个常量会被**原样打进前端构建产物**（JS 包），
- * 而 dist 是要分发出去的东西。留明文等于把口令连同系统一起发出去；
- * 留摘要的话，拿到产物的人至少还得先跑一遍穷举。
- * 注意这只抬高门槛、不是"安全"—— 它本质仍是前端门槛（见文件顶部安全边界）。
- */
-export const HIDDEN_PASSCODE_HASH =
-  'f60f69196084fc5d3557f33301af52501735bdb55ec6eeceacc154d5470e7241'

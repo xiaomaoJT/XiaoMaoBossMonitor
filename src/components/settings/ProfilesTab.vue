@@ -76,26 +76,21 @@
 
     <div class="opt col">
       <span>
-        <strong>加载内置配置</strong>
-        <em>输入访问密码，一键载入预置的通道名称、摆放与推送配置</em>
+        <strong>载入本地配置文件</strong>
+        <em>
+          选一份本机上的 .json 配置（通道名称 / 拉流地址 / 推送凭据 / 摆放坐标全套），
+          一步填好整份配置。配置文件不在软件里，只在你自己手上。
+        </em>
       </span>
       <div class="test-row">
-        <input
-          class="field"
-          type="password"
-          v-model.trim="hiddenPwd"
-          placeholder="访问密码"
-          autocomplete="off"
-          @keyup.enter="loadHidden"
-        />
-        <button class="btn small primary" @click="loadHidden">加载</button>
+        <button class="btn small primary" @click="pickHiddenFile">选择 .json 文件</button>
       </div>
       <span class="test-state" :class="hiddenState.kind" v-if="hiddenState.text">{{ hiddenState.text }}</span>
     </div>
 
     <!--
-      恢复初始化：和上面的「加载内置配置」正好互为反向 ——
-      一个载入那份私用完整配置，一个把所有配置清回空白。
+      恢复初始化：和上面的「载入本地配置文件」正好互为反向 ——
+      一个载入那份完整配置，一个把所有配置清回空白。
       破坏性较强，所以走一次内联二次确认（不用弹窗，免得和抽屉的层叠打架）。
     -->
     <div class="opt col">
@@ -173,6 +168,6 @@ import { inject } from 'vue'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { activeProfileId, applyProfile, askExitApp, askResetInit, backendEnabled, cams, dbExporting, doExitApp, doResetInit, emit, exitAsk, exportConfig, exportDatabase, formatDate, hiddenPwd, hiddenState, loadHidden, opts, pickFile, profileName, profiles, props, removeProfile, resetAsk, resetWipeData, saveProfile, storageInfo, storageText } = sd
+const { activeProfileId, applyProfile, askExitApp, askResetInit, backendEnabled, cams, dbExporting, doExitApp, doResetInit, emit, exitAsk, exportConfig, exportDatabase, formatDate, hiddenState, pickHiddenFile, opts, pickFile, profileName, profiles, props, removeProfile, resetAsk, resetWipeData, saveProfile, storageInfo, storageText } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
 </script>
