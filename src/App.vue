@@ -934,8 +934,10 @@ async function copyErrorLog() {
  * 现在统一收口，避免「改了一处漏了另一处」。
  */
 function writeStorage() {
-  // 写盘前自愈一次，确保 localStorage 里的凭据始终有效
-  fixLegacyDingTalk(options.dingtalk)
+  // 注：这里原本还有一次 `fixLegacyDingTalk(options.dingtalk)` 的写盘前自愈。
+  // §5.77 把那个函数整条删掉后，调用点漏了 —— 结果 writeStorage 一执行就抛
+  // ReferenceError，登录后主界面直接空白（Vite 构建不检查未定义标识符）。
+  // 自愈逻辑已随旧凭据一起作废：老存档若还带失效 token，推送会在设置页报错，按提示重填即可。
   // 渠道级监听名单跟着通道级推送配置走（写盘 / 同步后端前再兜一次，幂等）
   syncChannelCameras(cameras.value, options)
   try {
@@ -1727,10 +1729,12 @@ async function applyPulledConfig(data, reason = 'manual', useFlow = false) {
     if (Array.isArray(data.faceBlocks)) {
       try {
         // 反例保留期限随配置生效（解析收口在 defaults.blockMaxAgeDays，模块级全局）
-        setBlockMaxAgeDays(opts.face)
+        // 注意：本作用域里的配置对象叫 options，不是 opts（曾误写 opts → 被 catch 吞成
+        // 一条 warning，反例实际从来没从后端拉过）。
+        setBlockMaxAgeDays(options.face)
         // 传合并阈值：同一个人在本机标过、又被远程 /hitblock 标过时，
         // 拉取会拿到两份，replaceFaceBlocks 里按这个阈值折叠成一条
-        await replaceFaceBlocks(data.faceBlocks, blockMergeThreshold(opts.face))
+        await replaceFaceBlocks(data.faceBlocks, blockMergeThreshold(options.face))
       } catch (e) {
         console.warn('⚠️  陌生人反例拉取失败：', (e && e.message) || e)
       }
