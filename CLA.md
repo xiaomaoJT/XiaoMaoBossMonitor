@@ -2,7 +2,7 @@
 
 **版本**：1.0
 **生效日期**：2026-10-29
-**许可方**：BossMonitor 项目著作权人（GitHub [@xiaomaoJT](https://github.com/xiaomaoJT)），BossMonitor 项目著作权人
+**许可方**：BossMonitor 项目著作权人（GitHub [@xiaomaoJT](https://github.com/xiaomaoJT)）
 
 > 本协议以 [Project Harmony](https://harmonyagreements.org/) 的 **HA-CLA-I（个人贡献者许可协议）** 为蓝本改写，仅保留本项目需要的条款。英文摘要见文末。若你想先理解「为什么需要它」，读 [CONTRIBUTING.md](./CONTRIBUTING.md) 的「贡献者许可协议」一节即可。
 
@@ -67,7 +67,7 @@
 
 ## 十、适用法律与争议解决
 
-本协议适用**中华人民共和国法律**（不含港澳台地区法律）。因本协议引起的争议，双方应先行协商；协商不成的，提交许可方住所地有管辖权的人民法院诉讼解决。
+本协议适用**中华人民共和国法律**（不含港澳台地区法律）。因本协议引起的争议，双方应先行协商；协商不成的，提交许可方住所地有管辖权的人民法院诉讼解决。许可方的姓名与住所信息，可在争议发生时通过 GitHub 账号 [@xiaomaoJT](https://github.com/xiaomaoJT) 书面索取——本协议不在正文中列出个人信息，但许可方主体身份明确、可识别、可送达。
 
 ## 十一、协议的完整性
 
@@ -99,6 +99,6 @@
 
 ## English Summary
 
-This Contributor License Agreement ("CLA") is adapted from **Project Harmony HA-CLA-I**. By signing it, you grant the Project Owner (the Project Owner, GitHub @xiaomaoJT) a **non-exclusive, perpetual, worldwide, royalty-free, irrevocable** copyright and patent license covering your Contributions, **including the right to sublicense through multiple tiers and to relicense your Contributions under any license the Owner chooses — open source, commercial, or proprietary**. You **retain copyright** in your Contributions. You represent that you have the right to grant these licenses and that your Contributions do not infringe third-party rights. Contributions are provided **"AS IS"** without warranty. The Outbound License of the project is at the Owner's sole discretion and may change without notice. This CLA does not grant any trademark rights. It is governed by the laws of the People's Republic of China.
+This Contributor License Agreement ("CLA") is adapted from **Project Harmony HA-CLA-I**. By signing it, you grant the Project Owner (the copyright holder of the BossMonitor project, GitHub @xiaomaoJT) a **non-exclusive, perpetual, worldwide, royalty-free, irrevocable** copyright and patent license covering your Contributions, **including the right to sublicense through multiple tiers and to relicense your Contributions under any license the Owner chooses — open source, commercial, or proprietary**. You **retain copyright** in your Contributions. You represent that you have the right to grant these licenses and that your Contributions do not infringe third-party rights. Contributions are provided **"AS IS"** without warranty. The Outbound License of the project is at the Owner's sole discretion and may change without notice. This CLA does not grant any trademark rights. It is governed by the laws of the People's Republic of China.
 
 To sign, open a Pull Request and comment: `I have read the CLA Document and I hereby sign the CLA`.
