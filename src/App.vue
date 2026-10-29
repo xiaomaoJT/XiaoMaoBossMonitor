@@ -530,8 +530,12 @@ watch(
   { deep: true }
 )
 const layoutKey = ref((saved && saved.layoutKey) || 'auto')
-// 修复早期版本默认配置里无效的钉钉机器人 token（存在旧 token 时自动替换并落盘）
-migrateDingTalkCredentials(options.dingtalk)
+/*
+ * 这里原本有一次「修复早期默认配置里失效的钉钉机器人 token」的迁移。
+ * 那个 token 已随仓库历史一并清除（连识别用的前缀都不再保留），
+ * 老存档若仍带着它，推送会直接失败并在设置页显示错误，按提示重填即可 ——
+ * 比在源码里养一个「凭据指纹」更干净。
+ */
 // 老版本默认截图宽度 1920 有点糊，一次性升级为「原图」（用户自己改过其它值则不动）
 migrateShotWidthToOriginal(options)
 // 旧版钉钉默认不带截图，这里一次性改成「复用 Telegram 的图片直链」
@@ -613,11 +617,6 @@ function migrateDingShotMode(opts) {
   } catch (e) {
     /* 存储不可用时不影响运行 */
   }
-}
-
-function migrateDingTalkCredentials(dt) {
-  if (!fixLegacyDingTalk(dt)) return
-  writeStorage()
 }
 
 /**
@@ -927,24 +926,6 @@ async function copyErrorLog() {
     // 剪贴板不可用（非 https / 无权限 / 内嵌 WebView）时展开让人手动选
     errExpanded.value = true
   }
-}
-
-/**
- * 自愈：把旧版里那个**已失效**的钉钉机器人 token 清掉，让用户重新填（返回是否清过）。
- *
- * 以前这里是「发现旧 token → 换成硬编码的新 token + 加签密钥」，等于把一份真凭据
- * 写进了源码随产物一起发出去。现在默认配置里没有任何凭据，所以这里只做减法：
- * 那个 token 本来就是坏的（钉钉侧已删），清掉不会让任何能用配置失效。
- */
-function fixLegacyDingTalk(dt) {
-  const BAD = 'YOUR_DINGTALK_LEGACY_TOKEN'
-  if (!dt || typeof dt.webhook !== 'string') return false
-  if (dt.webhook.includes(BAD)) {
-    dt.webhook = ''
-    dt.secret = ''
-    return true
-  }
-  return false
 }
 
 /**
