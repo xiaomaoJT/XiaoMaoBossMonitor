@@ -392,11 +392,11 @@ import {
   setBlockMaxAgeDays
 } from './composables/useFaceLib'
 /*
- * 待录入满库提醒的状态机与后端**共用同一份**（server/pending-full.mjs）。
+ * 待录入满库提醒的状态机与后端**共用同一份**（src/shared/pending-full.mjs）。
  * 它是纯函数、零依赖，所以能直接被前端打包进来 —— 前端模式与后端模式
  * 用同一套"每个填满周期只提醒一次"的判定，不会各写一份然后漂移。
  */
-import { createPendingFullWatcher } from '../server/pending-full.mjs'
+import { createPendingFullWatcher } from './shared/pending-full.mjs'
 import { pendingFullConf } from './composables/useTracker.js'
 import { blockMergeThreshold } from './composables/vecMatch.js'
 import {

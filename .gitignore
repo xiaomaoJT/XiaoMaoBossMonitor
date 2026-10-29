@@ -1,6 +1,22 @@
 node_modules
 release
 
+# 构建产物：本仓库不提交 dist（自己 npm run build 即可）
+dist
+
+# ── 不随仓库分发的内容 ──────────────────────────────────────────────
+# 智能分析引擎（视频解码调度 / 检测 / 姿态 / 特征比对 / 存储 / 推送执行）
+# 不在本仓库。若你在本地放了一份用于联调，这条规则会挡住误提交。
+server/
+
+# ONNX 模型权重：含 AGPL-3.0 组件，分发会触发开源义务，因此不入库。
+# 只放行说明文件。获取方式见 public/ai/models/README.md
+public/ai/models/*
+!public/ai/models/README.md
+
+# macOS 目录元数据
+.DS_Store
+
 # 服务运行期数据（事件库 / 快照 / 人脸库）
 server/data
 
@@ -17,8 +33,8 @@ server/data
 *.sqlite-shm
 
 # 自动下载的 ffmpeg 二进制（按平台各一份、几十 MB，不进版本库）
-# 新机器首次启动会自动重新下载；也可在打包机上先跑 npm run ffmpeg:fetch 预取
 server/.cache
+ios/DerivedData
 ios/DerivedData-watch
 
 # 本地配置文件（真实拉流地址 + 推送凭据 + 白名单）—— 绝不进版本库。

@@ -3,8 +3,9 @@
   "private": true,
   "version": "1.8.0",
   "type": "module",
-  "description": "视频监控多路实时预览大屏（Vue 3 + Vite + Jessibuca，支持 H.265 ws-flv；可打包为 macOS 桌面端 / iOS App / 微信小程序）",
-  "author": "Mao",
+  "description": "视频监控多路实时预览大屏（Vue 3 + Vite + Jessibuca，支持 H.265 ws-flv；可打包为 macOS 桌面端 / iOS App / 微信小程序）。本仓库为前端客户端，智能分析引擎不在其中。",
+  "author": "BossMonitor contributors",
+  "license": "Apache-2.0",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
@@ -12,7 +13,6 @@
     "preview": "vite preview --port 4173",
     "build:all": "node scripts/build-all.mjs",
     "serve": "node scripts/serve-static.mjs --open",
-    "serve:drop": "node server/headless-monitor.mjs --drop-pending",
     "pack:portable": "npm run build && node scripts/make-portable.mjs",
     "electron:dev": "node scripts/electron-dev.mjs",
     "electron:preview": "npm run build && electron .",
@@ -30,24 +30,13 @@
     "watch:build": "node scripts/build-watch.mjs",
     "watch:register": "node scripts/build-watch.mjs --register-watch",
     "mp:build": "node scripts/build-mp.mjs",
-    "mp:set-url": "node scripts/build-mp.mjs --url=",
-    "server": "node server/headless-monitor.mjs",
-    "server:status": "curl -s http://127.0.0.1:8787/api/status",
-    "win:deploy": "node scripts/make-win-deploy.mjs",
-    "win:deploy:zip": "node scripts/make-win-deploy.mjs --zip",
-    "ffmpeg:fetch": "node server/ffmpeg-fetch-cli.mjs"
+    "mp:set-url": "node scripts/build-mp.mjs --url="
   },
   "dependencies": {
     "@capacitor/app": "^8.1.1",
     "@capacitor/core": "^8.5.2",
     "@capacitor/ios": "^8.5.2",
-    "adm-zip": "^0.6.1",
-    "better-sqlite3": "^13.0.3",
-    "ffmpeg-static": "^5.3.0",
-    "jpeg-js": "^0.4.4",
-    "onnxruntime-node": "^1.30.0",
-    "vue": "^3.5.13",
-    "ws": "^8.22.0"
+    "vue": "^3.5.13"
   },
   "devDependencies": {
     "@capacitor/cli": "^8.5.2",
