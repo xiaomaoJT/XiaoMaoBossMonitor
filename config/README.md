@@ -15,7 +15,7 @@
 | 文件 | 进版本库？ | 说明 |
 |---|---|---|
 | `config.example.json` | ✅ 进 | 格式示例，全是占位值，用于说明每个字段长什么样 |
-| `hidden-config.local.json` | ❌ 不进 | 真实配置（`.gitignore` 已排除 `config/*.json`） |
+| `config.local.json`（文件名随意） | ❌ 不进 | 真实配置（`.gitignore` 已排除 `config/*.json`） |
 | 其它 `*.json` | ❌ 不进 | 导出备份、临时改法都放这里，一律不入库 |
 
 ## 注意

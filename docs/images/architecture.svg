@@ -1,84 +1,101 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
-  <rect width="960" height="600" fill="#f8fafc"/>
-  <text x="40" y="42" font-size="20" font-weight="700" fill="#0f172a">BossMonitor 整体架构</text>
-  <text x="40" y="64" font-size="12" fill="#94a3b8">示意图 · 非真实截图（仅表达组件关系）</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 650" font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+  <rect width="980" height="650" fill="#f8fafc"/>
+  <text x="40" y="42" font-size="20" font-weight="700" fill="#0f172a">BossMonitor 架构与仓库边界</text>
+  <text x="40" y="64" font-size="12" fill="#94a3b8">示意图 · 非真实截图。实线框 = 本仓库已开源；虚线框 = 独立组件，不在本仓库</text>
+
+  <!-- 图例 -->
+  <g transform="translate(716,30)">
+    <rect x="0" y="0" width="14" height="10" rx="2" fill="#ffffff" stroke="#94a3b8"/>
+    <text x="20" y="9" font-size="11" fill="#475569">已开源</text>
+    <rect x="84" y="0" width="14" height="10" rx="2" fill="#fef2f2" stroke="#f87171" stroke-dasharray="4 3"/>
+    <text x="104" y="9" font-size="11" fill="#b91c1c">未开源</text>
+  </g>
 
   <!-- 摄像头 -->
-  <rect x="40" y="110" width="200" height="92" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="56" y="138" font-size="14" font-weight="600" fill="#0f172a">摄像头信号源</text>
-  <text x="56" y="160" font-size="12" fill="#64748b">ws-flv / RTSP</text>
-  <text x="56" y="180" font-size="12" fill="#64748b">N 路 · 每路一路流</text>
+  <rect x="40" y="96" width="180" height="92" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="56" y="124" font-size="13.5" font-weight="600" fill="#0f172a">摄像头信号源</text>
+  <text x="56" y="146" font-size="11.5" fill="#64748b">ws-flv（H.264 / H.265）</text>
+  <text x="56" y="166" font-size="11.5" fill="#64748b">N 路 · 每路一路流</text>
+  <text x="40" y="212" font-size="11" fill="#94a3b8">RTSP 需自行转封装为 ws-flv</text>
 
-  <!-- 展示端 -->
-  <rect x="40" y="262" width="200" height="206" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="56" y="290" font-size="14" font-weight="600" fill="#0f172a">展示端 × 6</text>
-  <text x="56" y="312" font-size="12" fill="#64748b">同一份前端（Vue 3）</text>
-  <text x="56" y="340" font-size="12" fill="#334155">浏览器</text>
-  <text x="120" y="340" font-size="12" fill="#334155">macOS</text>
-  <text x="56" y="362" font-size="12" fill="#334155">Windows</text>
-  <text x="130" y="362" font-size="12" fill="#334155">iOS</text>
-  <text x="56" y="384" font-size="12" fill="#334155">Apple Watch</text>
-  <text x="56" y="406" font-size="12" fill="#334155">微信小程序</text>
-  <text x="56" y="438" font-size="11" fill="#94a3b8">大屏 / 事件 / 设置抽屉</text>
+  <!-- 展示端（本仓库） -->
+  <rect x="40" y="240" width="356" height="340" rx="12" fill="#ffffff" stroke="#3b82f6" stroke-width="1.6"/>
+  <path d="M40 252 a12 12 0 0 1 12 -12 h332 a12 12 0 0 1 12 12 v24 h-356 z" fill="#eff6ff"/>
+  <text x="58" y="266" font-size="13" font-weight="700" fill="#1d4ed8">展示端 × 6 · 本仓库</text>
 
-  <!-- 后端 -->
-  <rect x="330" y="90" width="360" height="440" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
-  <text x="350" y="120" font-size="15" font-weight="700" fill="#0f172a">常驻后端 · server/（Node）</text>
-  <text x="350" y="140" font-size="11" fill="#94a3b8">headless-monitor.mjs</text>
+  <text x="58" y="300" font-size="11.5" fill="#475569">浏览器 / macOS / Windows / iOS / Apple Watch / 小程序</text>
 
-  <rect x="350" y="156" width="320" height="56" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
-  <text x="366" y="180" font-size="12.5" font-weight="600" fill="#1d4ed8">拉流 · 解码</text>
-  <text x="366" y="199" font-size="11.5" fill="#3b4a63">ffmpeg → JPEG 帧</text>
+  <rect x="58" y="312" width="320" height="46" rx="7" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="72" y="331" font-size="11.5" font-weight="600" fill="#334155">大屏画面 · Jessibuca WASM 软解</text>
+  <text x="72" y="347" font-size="11" fill="#64748b">多路网格 / 布局 / 遮罩 / 单路放大</text>
 
-  <rect x="350" y="222" width="320" height="112" rx="8" fill="#ecfdf5" stroke="#a7f3d0"/>
-  <text x="366" y="246" font-size="12.5" font-weight="600" fill="#047857">AI 检测引擎 · onnxruntime-node</text>
-  <text x="366" y="268" font-size="11.5" fill="#3b4a63">人形 · 人脸（SCRFD + MobileFaceNet）</text>
-  <text x="366" y="288" font-size="11.5" fill="#3b4a63">姿态 · 区域进出 · 人员流向</text>
-  <text x="366" y="312" font-size="11" fill="#64748b">检测 100% 在后端跑（前端零本地 AI）</text>
+  <rect x="58" y="366" width="320" height="54" rx="7" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="72" y="385" font-size="11.5" font-weight="600" fill="#047857">页面内推理 · ONNX Runtime Web</text>
+  <text x="72" y="401" font-size="11" fill="#475569">人形 · 人脸 · 姿态 · 区域 · 流向</text>
+  <text x="72" y="414" font-size="10.5" fill="#b45309">需自备 7 个模型，否则不产生事件</text>
 
-  <rect x="350" y="344" width="320" height="70" rx="8" fill="#fffbeb" stroke="#fde68a"/>
-  <text x="366" y="368" font-size="12.5" font-weight="600" fill="#b45309">推送调度</text>
-  <text x="366" y="388" font-size="11.5" fill="#3b4a63">三渠道 · 限流 · 合并 · 静默 · 模板</text>
-  <text x="366" y="406" font-size="11" fill="#64748b">钉钉 / 企微 / Telegram</text>
+  <rect x="58" y="428" width="320" height="46" rx="7" fill="#fffbeb" stroke="#fde68a"/>
+  <text x="72" y="447" font-size="11.5" font-weight="600" fill="#b45309">推送调度 · useAlertPush</text>
+  <text x="72" y="463" font-size="11" fill="#475569">三渠道 · 限流 · 合并 · 免打扰 · 模板</text>
 
-  <rect x="350" y="424" width="320" height="86" rx="8" fill="#f5f3ff" stroke="#ddd6fe"/>
-  <text x="366" y="448" font-size="12.5" font-weight="600" fill="#6d28d9">HTTP API + 存储</text>
-  <text x="366" y="468" font-size="11.5" fill="#3b4a63">/api/config · /api/events · /api/stats</text>
-  <text x="366" y="488" font-size="11.5" fill="#3b4a63">SQLite（server/data/）+ 快照</text>
+  <rect x="58" y="482" width="320" height="54" rx="7" fill="#f5f3ff" stroke="#ddd6fe"/>
+  <text x="72" y="501" font-size="11.5" font-weight="600" fill="#6d28d9">本地存储 · IndexedDB</text>
+  <text x="72" y="517" font-size="11" fill="#475569">事件 / 人脸库 / 每日统计</text>
+  <text x="72" y="530" font-size="10.5" fill="#94a3b8">关掉页面即停止，不做服务端落盘</text>
+
+  <text x="58" y="562" font-size="10.5" fill="#64748b">这一整块 clone 下来就能跑</text>
+
+  <!-- 常驻引擎（未开源） -->
+  <rect x="452" y="340" width="240" height="240" rx="12" fill="#fef7f7" stroke="#f87171" stroke-width="1.6" stroke-dasharray="7 5"/>
+  <text x="470" y="368" font-size="13" font-weight="700" fill="#b91c1c">常驻分析引擎</text>
+  <text x="470" y="386" font-size="10.5" fill="#dc2626">独立组件 · 未开源</text>
+
+  <rect x="470" y="398" width="204" height="50" rx="7" fill="#ffffff" stroke="#fecaca"/>
+  <text x="482" y="417" font-size="11" font-weight="600" fill="#7f1d1d">拉流 · 解码</text>
+  <text x="482" y="433" font-size="10.5" fill="#78716c">ffmpeg → JPEG 帧</text>
+
+  <rect x="470" y="456" width="204" height="56" rx="7" fill="#ffffff" stroke="#fecaca"/>
+  <text x="482" y="475" font-size="11" font-weight="600" fill="#7f1d1d">服务端推理 · 落库</text>
+  <text x="482" y="491" font-size="10.5" fill="#78716c">onnxruntime-node · SQLite</text>
+  <text x="482" y="505" font-size="10.5" fill="#78716c">哨兵 · 自愈 · 远程指令</text>
+
+  <text x="470" y="540" font-size="10.5" fill="#b91c1c">缺它：没有 7×24 值守</text>
+  <text x="470" y="558" font-size="10.5" fill="#b91c1c">缺它：手机不能遥控</text>
 
   <!-- 推送渠道 -->
-  <rect x="740" y="120" width="180" height="150" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="756" y="148" font-size="14" font-weight="600" fill="#0f172a">推送渠道</text>
-  <text x="756" y="172" font-size="12" fill="#334155">钉钉（加签）</text>
-  <text x="756" y="194" font-size="12" fill="#334155">企业微信</text>
-  <text x="756" y="216" font-size="12" fill="#334155">Telegram Bot</text>
-  <text x="756" y="248" font-size="11.5" fill="#0d9488">→ 推送到你的手机</text>
+  <rect x="740" y="240" width="200" height="160" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="756" y="268" font-size="13" font-weight="600" fill="#0f172a">推送渠道</text>
+  <text x="756" y="294" font-size="11.5" fill="#334155">钉钉（加签）</text>
+  <text x="756" y="316" font-size="11.5" fill="#334155">企业微信</text>
+  <text x="756" y="338" font-size="11.5" fill="#334155">Telegram Bot</text>
+  <text x="756" y="364" font-size="10.5" fill="#0d9488">→ 推送到你的手机</text>
+  <text x="756" y="384" font-size="10.5" fill="#94a3b8">钉钉 / 企微经本地代理发出</text>
 
-  <!-- 旁路 -->
-  <rect x="740" y="300" width="180" height="180" rx="10" fill="#ffffff" stroke="#e2e8f0"/>
-  <text x="756" y="328" font-size="13" font-weight="600" fill="#0f172a">旁路能力</text>
-  <text x="756" y="352" font-size="11.5" fill="#334155">状态哨兵 watchdog</text>
-  <text x="756" y="374" font-size="11.5" fill="#334155">自愈重启 restart</text>
-  <text x="756" y="396" font-size="11.5" fill="#334155">系统硬重启（默认关）</text>
-  <text x="756" y="418" font-size="11.5" fill="#334155">TG 远程控制</text>
-  <text x="756" y="440" font-size="11.5" fill="#334155">静默查岗 duty-check</text>
+  <!-- 连线：摄像头 → 展示端 -->
+  <path d="M130 188 L130 240" fill="none" stroke="#3b82f6" stroke-width="1.6"/>
+  <path d="M130 240 l-4 -7 h8 z" fill="#3b82f6"/>
 
-  <!-- 箭头 -->
-  <defs>
-    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
-    </marker>
-  </defs>
+  <!-- 连线：摄像头 ⇢ 引擎（虚线） -->
+  <path d="M220 146 L572 146 L572 340" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <path d="M572 340 l-4 -7 h8 z" fill="#f87171"/>
 
-  <line x1="240" y1="156" x2="326" y2="176" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
-  <text x="248" y="150" font-size="11" fill="#64748b">拉流</text>
+  <!-- 连线：展示端 → 推送渠道（实线，从引擎上方绕过） -->
+  <path d="M396 290 L740 290" fill="none" stroke="#0d9488" stroke-width="1.6"/>
+  <path d="M740 290 l-7 -4 v8 z" fill="#0d9488"/>
+  <text x="452" y="283" font-size="9.5" fill="#0d9488">前端直接发</text>
 
-  <line x1="240" y1="366" x2="326" y2="366" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
-  <line x1="326" y1="346" x2="240" y2="346" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
-  <text x="232" y="414" font-size="11" fill="#64748b">配置推送 / 事件拉取</text>
+  <!-- 连线：展示端 ⇢ 引擎（虚线 HTTP） -->
+  <path d="M396 470 L452 470" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <path d="M452 470 l-7 -4 v8 z" fill="#f87171"/>
+  <path d="M452 490 L396 490" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <path d="M396 490 l7 -4 v8 z" fill="#f87171"/>
+  <text x="404" y="462" font-size="9.5" fill="#b91c1c">HTTP</text>
 
-  <line x1="690" y1="195" x2="736" y2="195" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#ar)"/>
-  <text x="696" y="188" font-size="11" fill="#64748b">事件</text>
+  <!-- 连线：引擎 ⇢ 推送渠道（虚线） -->
+  <path d="M692 418 L716 418 L716 320 L740 320" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <path d="M740 320 l-7 -4 v8 z" fill="#f87171"/>
 
-  <text x="40" y="580" font-size="11" fill="#94a3b8">※ 本图为结构示意图，非真实系统截图；仅表达组件关系，不代表实际尺寸与配色。</text>
+  <!-- 底部说明 -->
+  <text x="40" y="606" font-size="11.5" fill="#64748b">本仓库单独部署即可：看画面、改配置、跑页面内检测（需模型）、发三渠道推送。</text>
+  <text x="40" y="626" font-size="11.5" fill="#b91c1c">虚线部分不在本仓库、也不在任何历史提交里 —— 需要「关掉页面还在盯」时才用得上。</text>
 </svg>

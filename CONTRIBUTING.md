@@ -35,13 +35,14 @@ I have read the CLA Document and I hereby sign the CLA
 | 系统 | macOS / Windows / Linux 均可；涉及 iOS 打包需 macOS + Xcode |
 
 ```bash
-git clone <repo> && cd Monitor
+git clone https://github.com/xiaomaoJT/XiaoMaoBossMonitor.git
+cd XiaoMaoBossMonitor
 npm install
 npm run dev            # 前端开发服务器
-npm run server         # 另开一个终端：常驻检测后端（可选）
 ```
 
-首次跑 `npm run server` 会在 `server/data/` 下建 SQLite 与截图目录，**这些永远不进库**。
+本仓库只有客户端，**没有 `npm run server`**、也没有 `server/` 目录。想验证检测效果，
+把 7 个 ONNX 放进 `public/ai/models/` 后重新构建即可（清单见 [public/ai/models/README.md](./public/ai/models/README.md)）。
 
 ---
 
@@ -55,15 +56,16 @@ env -u NODE_OPTIONS npm run build
 
 前缀 `env -u NODE_OPTIONS` 不是装饰——某些环境注入的 `NODE_OPTIONS` 会让 Vite 构建静默产出坏包。构建报错时**不要**用旧 `dist/` 蒙混过去。
 
-`dist/` 在仓库中被跟踪，因此改 `src/` 的 PR **必须同时包含构建产物**，否则部署方会拿到不一致的代码。
+`dist/` **不进仓库**（`.gitignore` 已排除），构建产物由使用方自己跑出来。所以 PR 里**不要**提交 `dist/`——
+提交了会被忽略，也容易和源码对不上。`npm run build` 通过是给 PR 自己看的闸门，不是要交付的文件。
 
 ### 2. 绝不提交真实凭据
 
 以下内容一律留在本机：
 
 - `config/*.json`（`.gitignore` 已排除，只提交 `config/config.example.json`）
-- `server/data/`（事件库、人脸样本、截图）
-- 任何 Token、Webhook、群 ID、内网 IP、设备序列号
+- 任何 Token、Webhook、群 ID、内网 IP、设备序列号、真实摄像头地址
+- 真实的人脸样本、人名与截图
 
 提交前自检：
 
@@ -75,7 +77,9 @@ git diff --cached | grep -nE '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|SEC[0-9a-f]{40,}|
 
 ### 3. 别擅自替换或新增模型权重
 
-`models/` 与 `dist/ai/models/` 下的 ONNX 受**上游许可证**约束（其中人形检测与姿态模型来自 Ultralytics，为 AGPL-3.0）。换模型会改变整个项目的许可证义务，属于需要维护者决策的事项——请开 Issue 讨论，不要直接提 PR。
+`public/ai/models/` 下的 ONNX 受**上游许可证**约束（其中人形检测与姿态模型来自 Ultralytics，为 AGPL-3.0）。
+本仓库**不分发任何权重**，所以任何「把模型文件一起提交上来」的 PR 都会被拒绝——那会让整个仓库被迫适用 AGPL-3.0。
+换个模型跑通是好事，但请只提交代码与说明，权重由使用者自行获取。
 
 ---
 
@@ -107,7 +111,8 @@ git diff --cached | grep -nE '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|SEC[0-9a-f]{40,}|
 
 描述用中文，一句话说清**改了什么**，必要时在正文补「为什么」。不要写 `update`、`fix bug` 这类无法回溯的信息。
 
-请用**真实姓名与邮箱**配置 `git config user.name / user.email`，匿名提交无法与 CLA 签署记录对应。
+请配置**可长期联系的 `git config user.name / user.email`**，匿名或一次性邮箱无法与 CLA 签署记录对应。
+如果你不希望暴露真名，用项目代号或昵称也可以，但邮箱必须真实可用。
 
 ---
 
@@ -125,8 +130,8 @@ git diff --cached | grep -nE '[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|SEC[0-9a-f]{40,}|
 
 ## 七、提交前自检清单
 
-- [ ] `env -u NODE_OPTIONS npm run build` 通过，且 `dist/` 已随提交更新
-- [ ] 没有提交 `config/*.json`、`server/data/`、任何真实凭据
+- [ ] `env -u NODE_OPTIONS npm run build` 通过（`dist/` 不进仓库，不要提交）
+- [ ] 没有提交 `config/*.json`、任何真实凭据、任何模型权重文件
 - [ ] 新增/修改的配置字段，读写展示四处都已对齐
 - [ ] 改了设置抽屉的 tab 时，`provide('sd')` 与 `inject('sd')` 名字逐字对齐
 - [ ] 文档已同步（用户可见的行为变化要写进 `docs/使用手册.md`）
