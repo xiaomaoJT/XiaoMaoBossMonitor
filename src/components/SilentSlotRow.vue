@@ -8,28 +8,53 @@
  *   会让整个大组件重新渲染，下拉交互明显发「卡」。
  *   提成独立小组件后，下拉的变更只触发本行（极小）的重渲染，大组件不动 ——
  *   既修掉了卡顿，又没动任何功能（字段、校验、删除回调都和原来一致）。
+ *
+ * 时间输入：原生 `type="time"` 已改为**手动输入**（v2.2，见 §5.104）——
+ *   原生控件点一下就弹系统选择层，值守大屏上改个时间要跟弹层搏斗。
+ *   现在是普通文本框：敲 9:30 / 0930 都行，失焦时经 normalizeTimeText 归一化；
+ *   解析不出回填原值，绝不把非法值写进配置（归一化收口在 defaults.js，前后端共用）。
  */
-import { SLOT_SCOPES } from '../config/defaults.js'
+import { SLOT_SCOPES, normalizeTimeText } from '../config/defaults.js'
 
 const props = defineProps({
   slot: { type: Object, required: true },
   index: { type: Number, required: true },
-  canRemove: { type: Boolean, default: true },
-  openPicker: { type: Function, default: null }
+  canRemove: { type: Boolean, default: true }
 })
 const emit = defineEmits(['remove'])
 
-function onPicker(e) {
-  if (typeof props.openPicker === 'function') props.openPicker(e)
+/** 手动输入的时间失焦/回车时归一化；解析不出回填原值 */
+function commitTime(slot, key, e) {
+  const v = normalizeTimeText(e.target.value, slot[key])
+  slot[key] = v
+  e.target.value = v
 }
 </script>
 
 <template>
   <div class="slot-row">
     <span class="slot-idx">{{ index + 1 }}</span>
-    <input class="field mini" type="time" v-model="slot.start" @mousedown="onPicker" />
+    <input
+      class="field mini"
+      type="text"
+      inputmode="numeric"
+      maxlength="5"
+      placeholder="HH:MM"
+      title="手动输入时间，如 22:00"
+      :value="slot.start"
+      @change="commitTime(slot, 'start', $event)"
+    />
     <span class="tilde">~</span>
-    <input class="field mini" type="time" v-model="slot.end" @mousedown="onPicker" />
+    <input
+      class="field mini"
+      type="text"
+      inputmode="numeric"
+      maxlength="5"
+      placeholder="HH:MM"
+      title="手动输入时间，如 08:00"
+      :value="slot.end"
+      @change="commitTime(slot, 'end', $event)"
+    />
     <select class="field mini scope" v-model="slot.scope" title="作用域：这个时段在哪些日子生效">
       <option v-for="sc in SLOT_SCOPES" :key="sc.id" :value="sc.id">{{ sc.label }}</option>
     </select>
@@ -71,8 +96,7 @@ function onPicker(e) {
 }
 
 .slot-row .field.mini {
-  width: 104px;
-  cursor: pointer;
+  width: 84px;
 }
 
 .slot-tag {

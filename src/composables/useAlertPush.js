@@ -43,6 +43,7 @@ import {
   criticalEndSends,
   digestCfgOf,
   digestIntervalLabel,
+  faceSilentBlockPush,
   isWallAlignedInterval,
   isFaceHit,
   isFlowCritical,
@@ -2715,6 +2716,20 @@ export function useAlertPush(options, hooks = {}) {
   /** 入口：处理一条报警事件 */
   async function handleAlarm(record) {
     const now = Date.now()
+    /*
+     * 「人脸静默」闸门（v2.2 新增，见 defaults.faceSilentBlockPush）。
+     * 设置里给选中的人脸组配了静默时段时，命中这些人的事件**不推送**：
+     *   · 普通推送、合并排队不进；
+     *   · 关键事件急推（pushDirectToUsers）也在下面同一处入口，早退即全部挡下；
+     *   · 静默 / 日常汇总缓冲同样不收（这是"这个人别推我"，不是"晚点推我"）。
+     * 事件本身照常落库 / 进面板 / 计入统计 —— 只是三端安静。
+     * 陌生人脸（无 faceName）与走向事件不在「人脸组」语义内，不受影响。
+     * 判定是 defaults.js 里的纯函数，前后端共用一条（后端经 liveView 读同一份配置）。
+     */
+    if (isFaceHit(record) && !isFlowEvent(record) && faceSilentBlockPush(options.face, record.faceName, now)) {
+      onState(record.key, 'off', '人脸静默时段内，该人脸组的命中不推送')
+      return record
+    }
     /*
      * 「在库人脸命中」路由的判据。⚠️ 必须**排除走向事件**：
      * emitFlowEvent 在认出人时会带上 faceName（谁是这条走向的主角），

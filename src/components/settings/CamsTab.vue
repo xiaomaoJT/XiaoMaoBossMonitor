@@ -6,7 +6,9 @@
       <button class="btn small" @click="addCamera">+ 新增一路</button>
     </div>
     <p class="hint">
-      拖动每行左侧手柄可调整顺序；关掉「显示」开关可临时隐藏该画面。
+      拖动每行左侧手柄可调整顺序；关掉行首开关 = <b>停用这一路</b>：后端不再拉流、检测与推送，
+      大屏也不再显示（顶部会记成「已关闭 N 路」，点「恢复」可一键开回来）。
+      只想临时不看画面、监控照跑的话，用画面上的「盲视」按钮。
       每行里的「人脸 / 姿态 / 区域」是这一路的附加分析开关 —— 它们都要在左侧
       「人脸识别 / 人形姿态 / 区域规则」页开过对应总开关才会真正生效，把不看的通道关掉最省算力。
       每路下方可以单独设置「这一路推送到哪些渠道」（钉钉 / 企业微信 / Telegram），
@@ -68,7 +70,7 @@
           </span>
           <span class="index">{{ i + 1 }}</span>
           <input class="field name-input" v-model.trim="cam.name" placeholder="画面名称" />
-          <span class="switch" :class="{ on: !hidden.includes(cam.id) }" @click="toggleVisible(cam.id)" title="显示 / 隐藏"></span>
+          <span class="switch" :class="{ on: !hidden.includes(cam.id) }" @click="toggleVisible(cam.id)" title="停用 / 启用监控（停用后后端不拉流、不检测、不推送）"></span>
           <button class="icon-btn" title="上移" :disabled="i === 0" @click="move(i, -1)">
             <svg viewBox="0 0 24 24" width="15" height="15">
               <path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M6 14l6-6 6 6" />
@@ -257,7 +259,6 @@
                 :slot="s"
                 :index="si"
                 :can-remove="true"
-                :open-picker="openPicker"
                 @remove="removeCamSilSlot(cam, si)"
               />
             </div>
@@ -361,6 +362,6 @@ import { inject } from 'vue'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { CAM_CHANNELS, DIGEST_INTERVAL_CHOICES, DIGEST_INTERVAL_MAX, DIGEST_INTERVAL_MIN, EXT_ITEMS, SilentSlotRow, addCamSilSlot, addCamera, allDigestOn, armRowDrag, camDigestCfg, camDigestInfo, camExtOn, camExtTitle, camSilActive, camSilCfg, camSilChannels, camSilInfo, cams, channelOn, clampDigestMinutes, digestIntervalLabel, dragArmedIndex, emit, extGlobalOn, hidden, move, onDragEnd, onDragOver, onDragStart, openPicker, opts, props, remove, removeCamSilSlot, setCamDigestInterval, setMasterDigestInterval, silentYieldSlots, someDigestOn, toggleAllCamDigest, toggleCamChannel, toggleCamDigest, toggleCamDigestChannel, toggleCamExt, toggleCamSilChannel, toggleCamSilent, togglePushCam, toggleVisible } = sd
+const { CAM_CHANNELS, DIGEST_INTERVAL_CHOICES, DIGEST_INTERVAL_MAX, DIGEST_INTERVAL_MIN, EXT_ITEMS, SilentSlotRow, addCamSilSlot, addCamera, allDigestOn, armRowDrag, camDigestCfg, camDigestInfo, camExtOn, camExtTitle, camSilActive, camSilCfg, camSilChannels, camSilInfo, cams, channelOn, clampDigestMinutes, digestIntervalLabel, dragArmedIndex, emit, extGlobalOn, hidden, move, onDragEnd, onDragOver, onDragStart, opts, props, remove, removeCamSilSlot, setCamDigestInterval, setMasterDigestInterval, silentYieldSlots, someDigestOn, toggleAllCamDigest, toggleCamChannel, toggleCamDigest, toggleCamDigestChannel, toggleCamExt, toggleCamSilChannel, toggleCamSilent, togglePushCam, toggleVisible } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
 </script>

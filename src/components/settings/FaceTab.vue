@@ -55,6 +55,76 @@
         <span class="switch" :class="{ on: opts.face.eventOnKnown }" @click="opts.face.eventOnKnown = !opts.face.eventOnKnown"></span>
       </label>
 
+      <!--
+        人脸静默：选中的「人脸组」在指定时段内命中时**不推送**（事件照记、统计照算）。
+        判定收口在 defaults.faceSilentBlockPush，前后端共用一条推送链路（useAlertPush），
+        纯前端模式与后端检测模式行为完全一致。时段是手动输入（与全局静默同一套交互）。
+      -->
+      <div class="grp fs-grp">
+        <div class="grp-head">
+          <span class="grp-ico quiet">🔕</span>
+          <div class="grp-titles">
+            <strong>人脸静默</strong>
+            <em>
+              选中的人脸组在静默时段内命中时<b>不做推送</b>（三端安静），
+              事件仍会记录、统计仍会计数；陌生人脸与人员走向不受影响。
+            </em>
+          </div>
+          <span class="switch" :class="{ on: fsCfg.enabled }" @click="fsCfg.enabled = !fsCfg.enabled"></span>
+        </div>
+        <div class="grp-body" v-if="fsCfg.enabled">
+          <div class="sub-label">
+            静默时段
+            <em class="live-tag" v-if="fsActiveNow">当前生效</em>
+          </div>
+          <p class="hint tight">
+            手动输入时间（如 22:00），结束早于开始视为跨零点。可配多个时段。
+          </p>
+          <div class="fs-slots">
+            <div class="fs-slot-row" v-for="(s, i) in fsCfg.slots" :key="i">
+              <span class="fs-idx">{{ i + 1 }}</span>
+              <input
+                class="field mini"
+                type="text"
+                inputmode="numeric"
+                maxlength="5"
+                placeholder="HH:MM"
+                :value="s.start"
+                @change="fsTimeCommit(s, 'start', $event)"
+              />
+              <span class="fs-tilde">~</span>
+              <input
+                class="field mini"
+                type="text"
+                inputmode="numeric"
+                maxlength="5"
+                placeholder="HH:MM"
+                :value="s.end"
+                @change="fsTimeCommit(s, 'end', $event)"
+              />
+              <span class="fs-tag" v-if="s.start === s.end">起止相同，不生效</span>
+              <span class="fs-tag cross" v-else-if="s.end < s.start">跨零点</span>
+              <button class="btn tiny danger fs-del" @click="fsDelSlot(i)" :disabled="fsCfg.slots.length <= 1">删除</button>
+            </div>
+            <p class="hint tight" v-if="!fsCfg.slots.length">还没有时段：不添加时段的话，这个开关不会挡下任何推送。</p>
+          </div>
+          <div class="fs-add">
+            <button class="btn tiny" @click="fsAddSlot">+ 添加时段</button>
+          </div>
+
+          <div class="sub-label mt">静默的人脸组</div>
+          <p class="hint tight">
+            勾选要静默的人（来自下方人脸库的名字）。一个都不勾 = 不静默任何人。
+          </p>
+          <div class="ch-pick" v-if="faceGroups.length">
+            <label class="chip" v-for="g in faceGroups" :key="g.key" :class="{ on: fsCfg.groups.includes(g.name) }">
+              <input type="checkbox" :value="g.name" v-model="fsCfg.groups" /> {{ g.name }}
+            </label>
+          </div>
+          <p class="hint tight" v-else>人脸库还是空的：先在下面录入人脸，这里才会出现可勾选的人。</p>
+        </div>
+      </div>
+
       <label class="opt">
         <span>
           <strong>陌生人脸也记事件</strong>
@@ -913,9 +983,96 @@
 
 <script setup>
 import { inject } from 'vue'
+import { faceSilentBlockPush, normalizeTimeText } from '../../config/defaults.js'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile } = sd
+const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile, computed } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
+
+/* ---------------- 人脸静默（options.face.silent） ---------------- */
+/** 老存档可能没有 silent 块（loadConfig 已补，这里再兜一道）；模板需要它一直存在 */
+if (!opts.face.silent || typeof opts.face.silent !== 'object') {
+  opts.face.silent = { enabled: false, groups: [], slots: [] }
+}
+if (!Array.isArray(opts.face.silent.groups)) opts.face.silent.groups = []
+if (!Array.isArray(opts.face.silent.slots)) opts.face.silent.slots = []
+const fsCfg = opts.face.silent
+
+/** 当前是否正处在某个静默时段内（拿第一个已勾选的人当探针即可：时段判定与具体人无关） */
+const fsActiveNow = computed(() => {
+  if (!fsCfg.enabled || !fsCfg.groups.length) return false
+  return faceSilentBlockPush(opts.face, fsCfg.groups[0], Date.now())
+})
+
+function fsAddSlot() {
+  fsCfg.slots.push({ start: '22:00', end: '08:00' })
+}
+function fsDelSlot(i) {
+  fsCfg.slots.splice(i, 1)
+}
+/** 手动输入的时间：失焦/回车时归一化；解析不出就回填原值，绝不把非法值写进配置 */
+function fsTimeCommit(slot, key, e) {
+  const v = normalizeTimeText(e.target.value, slot[key])
+  slot[key] = v
+  e.target.value = v
+}
 </script>
+
+<style scoped>
+/* 人脸静默卡片的时段行：与全局静默的 slot-row 同一套视觉，尺寸按本页收敛 */
+.fs-grp .grp-body {
+  display: block;
+}
+.fs-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.fs-slot-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+}
+.fs-idx {
+  flex: 0 0 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.fs-slot-row .field.mini {
+  width: 84px;
+}
+.fs-tilde {
+  color: var(--text-dim-2);
+}
+.fs-tag {
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+}
+.fs-tag.cross {
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.fs-del {
+  margin-left: auto;
+}
+.fs-add {
+  margin: 4px 0 8px;
+}
+</style>

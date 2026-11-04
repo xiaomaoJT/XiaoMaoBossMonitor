@@ -267,12 +267,30 @@
     <div class="opt" v-if="dt.quietEnabled">
       <span>
         <strong>静默时段</strong>
-        <em>该时间段内只本地报警</em>
+        <em>该时间段内只本地报警（手动输入，如 22:00；结束早于开始视为跨零点）</em>
       </span>
       <div class="test-row">
-        <input class="field mini" type="time" v-model="dt.quietStart" @mousedown="openPicker" />
+        <input
+          class="field mini"
+          type="text"
+          inputmode="numeric"
+          maxlength="5"
+          placeholder="HH:MM"
+          title="手动输入时间，如 22:00"
+          :value="dt.quietStart"
+          @change="commitQuiet('start', $event)"
+        />
         <span class="unit">至</span>
-        <input class="field mini" type="time" v-model="dt.quietEnd" @mousedown="openPicker" />
+        <input
+          class="field mini"
+          type="text"
+          inputmode="numeric"
+          maxlength="5"
+          placeholder="HH:MM"
+          title="手动输入时间，如 08:00"
+          :value="dt.quietEnd"
+          @change="commitQuiet('end', $event)"
+        />
       </div>
     </div>
 
@@ -480,9 +498,17 @@
 
 <script setup>
 import { inject } from 'vue'
+import { normalizeTimeText } from '../../config/defaults.js'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { CRIT_EVENTS, EVENT_GROUPS, FIELD_KEYS, camPushOn, cams, critOn, critSummaryOnly, critThroughSilence, dingShotHint, dt, dtCritState, emit, evOn, fieldLabel, openPicker, opts, props, pushCamCount, revealed, setAllPushCameras, testDingCritical, testPush, testState, tg, toggleChannel, toggleCritEvent, toggleCritSummaryOnly, toggleCritThroughSilence, toggleEvent, togglePushCamera } = sd
+const { CRIT_EVENTS, EVENT_GROUPS, FIELD_KEYS, camPushOn, cams, critOn, critSummaryOnly, critThroughSilence, dingShotHint, dt, dtCritState, emit, evOn, fieldLabel, opts, props, pushCamCount, revealed, setAllPushCameras, testDingCritical, testPush, testState, tg, toggleChannel, toggleCritEvent, toggleCritSummaryOnly, toggleCritThroughSilence, toggleEvent, togglePushCamera } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
+
+/** 钉钉静默时段手动输入：失焦/回车归一化，解析不出回填原值（与全局静默同一套交互） */
+function commitQuiet(key, e) {
+  const v = normalizeTimeText(e.target.value, dt[key])
+  dt[key] = v
+  e.target.value = v
+}
 </script>

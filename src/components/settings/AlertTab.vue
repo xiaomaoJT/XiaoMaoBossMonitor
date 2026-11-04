@@ -120,7 +120,6 @@
             :slot="s"
             :index="i"
             :can-remove="slotsOf.length > 1"
-            :open-picker="openPicker"
             @remove="removeSlot(i)"
           />
         </div>
@@ -149,7 +148,17 @@
         </p>
 
         <!-- ---------- 工作日历（决定工作日 / 放假日，供时段作用域分流） ---------- -->
-        <div class="sub-label mt">工作日历（时段作用域按「工作日 / 放假日」分流）</div>
+        <!--
+          工作日历（周模式 + 法定假日 / 调休补班）：
+          默认**折叠**——这一块一年也改不了几次，平铺会把「免打扰时段」推出一屏远。
+          收起时给一行摘要（周模式 + 假日数），点开才显示完整内容。
+        -->
+        <div class="sub-label mt cal-toggle" @click="calOpen = !calOpen">
+          工作日历（时段作用域按「工作日 / 放假日」分流）
+          <em class="live-tag" v-if="!calOpen && calSummary">{{ calSummary }}</em>
+          <em class="cal-arrow">{{ calOpen ? '▴ 收起' : '▾ 展开' }}</em>
+        </div>
+        <template v-if="calOpen">
         <p class="hint tight">
           给上面的每个时段选「仅工作日 / 仅放假日」，就能让工作日和休息日用不同的免打扰时段
           （例如工作日夜里静默、周末全天静默）。放假日 = 周末 + 法定假日；调休补班日算工作日。
@@ -223,6 +232,7 @@
             <span class="muted">（用于预览时段作用域是否会命中今天）</span>
           </div>
         </div>
+        </template>
 
         <!-- 免打扰「开始 / 结束」提醒推送（preNotify，默认开） -->
         <div class="opt pre-notify">
@@ -319,7 +329,13 @@
         </div>
 
         <div class="temp-until" v-else>
-          <input class="field" type="datetime-local" v-model="tempUntilLocal" @mousedown="openPicker" />
+          <input
+            class="field"
+            type="text"
+            v-model="tempUntilLocal"
+            placeholder="如 2026-11-06 08:00 或 08:00"
+            title="手动输入：完整「YYYY-MM-DD HH:MM」，或省年份「MM-DD HH:MM」，或只给「HH:MM」（已过则算明天）"
+          />
           <button class="btn tiny" @click="tempUntilLocal = tomorrowMorning">明天早上 08:00</button>
           <button class="btn tiny" @click="tempUntilLocal = tonightMidnight">今晚 24:00</button>
         </div>
@@ -385,6 +401,42 @@ import { inject } from 'vue'
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { OPT_SHOT_WIDTH, SelectField, SilentSlotRow, TEMP_CHANNEL_OPTS, TEMP_HOURS, WEEKDAYS, WEEK_MODES, activeSlotLabel, addHoliday, addMakeup, addSlot, cal, emit, endTempNow, flushSilentNow, holidayInput, makeupInput, notifyCls, notifyLine, openPicker, opts, props, refreshWatch, remove, removeHoliday, removeMakeup, removeSlot, silentStatusText, slotsOf, startTempNow, tempActive, tempChannels, tempHours, tempInfo, tempLabel, tempMode, tempPreview, tempUntilLocal, testPostSilence, testPreSilence, tg, todayDayType, toggleDesktopNotify, toggleTempChannel, tomorrowMorning, tonightMidnight, watch, watchChip, watchState, watchStatusText } = sd
+const { OPT_SHOT_WIDTH, SelectField, SilentSlotRow, TEMP_CHANNEL_OPTS, TEMP_HOURS, WEEKDAYS, WEEK_MODES, activeSlotLabel, addHoliday, addMakeup, addSlot, cal, computed, emit, endTempNow, flushSilentNow, holidayInput, makeupInput, notifyCls, notifyLine, opts, props, ref, refreshWatch, remove, removeHoliday, removeMakeup, removeSlot, silentStatusText, slotsOf, startTempNow, tempActive, tempChannels, tempHours, tempInfo, tempLabel, tempMode, tempPreview, tempUntilLocal, testPostSilence, testPreSilence, tg, todayDayType, toggleDesktopNotify, toggleTempChannel, tomorrowMorning, tonightMidnight, watch, watchChip, watchState, watchStatusText } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
+
+/*
+ * 本页局部 UI 状态（不进配置）：
+ *   calOpen    工作日历块是否展开（默认折叠，见 §5.104）
+ *   calSummary 收起时的摘要（周模式 + 假日 / 补班数）
+ *   calWeekLabel 周模式的中文名
+ */
+const calOpen = ref(false)
+const calWeekLabel = computed(() => {
+  const w = (WEEK_MODES || []).find((x) => x.id === cal.weekMode)
+  return w ? w.label : cal.weekMode
+})
+const calSummary = computed(() => {
+  const parts = [calWeekLabel.value]
+  if (Array.isArray(cal.holidays) && cal.holidays.length) parts.push(`假日 ${cal.holidays.length}`)
+  if (Array.isArray(cal.makeups) && cal.makeups.length) parts.push(`补班 ${cal.makeups.length}`)
+  return parts.join(' · ')
+})
 </script>
+
+<style scoped>
+/* 工作日历折叠头：可点、带箭头；摘要用 live-tag 样式弱化 */
+.cal-toggle {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cal-toggle .cal-arrow {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-dim-2);
+}
+</style>

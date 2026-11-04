@@ -684,7 +684,15 @@ const BASE_OPTIONS = {
      * 解析与判定收口在 defaults.blockMaxAgeDays，归一化口径在 normalizeFaceBlocks
      * （前后端共用，避免"前端留着、后端删了"的漂移）。
      */
-    blockMaxAgeDays: BLOCK_MAX_AGE.def
+    blockMaxAgeDays: BLOCK_MAX_AGE.def,
+    /**
+     * ---------------- 人脸静默 ----------------
+     * 选中的人脸组在指定时段内命中时**不做推送**（事件照记、统计照算）。
+     *   enabled 关（默认）；groups 选中的在库人名；slots 静默时段（HH:MM，支持跨零点）。
+     * 归一化收口在 normalizeFaceSilent，推送判定在 faceSilentBlockPush（都在本文件，
+     * 前后端共用一条判定 —— 推送走同一条 useAlertPush 链路）。
+     */
+    silent: { enabled: false, groups: [], slots: [] }
   },
   /**
    * 人形姿态（YOLOv8n-pose，17 关键点）。
@@ -1661,6 +1669,8 @@ export function fillMissingOptions(opts) {
       }
     })
   })
+  /* 人脸静默块：补默认之后把时段/名单归一化一遍（幂等；只在载入/保存路径上调，不在渲染期） */
+  if (opts.face) normalizeFaceSilent(opts.face)
   return opts
 }
 
@@ -1688,7 +1698,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.8.0'
+  version: '1.9.0'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
@@ -1798,6 +1808,152 @@ export function channelUsable(options, id) {
  */
 export function isFaceHit(rec) {
   return !!(rec && rec.faceName)
+}
+
+/**
+ * 把用户**手动输入**的时间文本归一化成 "HH:MM"。
+ * ----------------------------------------------------------------------------
+ * 背景：时间输入已从原生 `type="time"` 弹层改为手动输入（见 §5.104），
+ * 用户可能敲 "9:30" / "09:30" / "0930" / "09：30"（全角冒号），都要能落成
+ * 规范的 "09:30"。解析不出就返回 fallback（调用方用它回填输入框），
+ * 绝不悄悄把非法值写进配置。
+ *
+ * 纯函数：前后端共用（后端 config.json 手改的值同样要过它，见 normalizeFaceSilent）。
+ *
+ * @param {string} v        用户输入
+ * @param {string} fallback 解析失败时返回的值
+ * @returns {string} "HH:MM" 或 fallback
+ */
+export function normalizeTimeText(v, fallback = '') {
+  const s = String(v == null ? '' : v).trim().replace('：', ':')
+  const m = s.match(/^(?:([0-9])|([01][0-9]|2[0-3]))[:h]?([0-5][0-9])$/)
+  if (!m) return fallback
+  const hh = m[1] != null ? `0${m[1]}` : m[2]
+  return `${hh}:${m[3]}`
+}
+
+/**
+ * 把手动输入的「日期时间」文本解析成本地时间戳。
+ * ----------------------------------------------------------------------------
+ * 「临时静默 → 静默到几点」原来用原生 `datetime-local`，现改为手动输入。
+ * 为了不逼用户敲完整串，按长度降级接受三种写法（年份缺省用当年）：
+ *
+ *   `2026-11-06 08:00`   完整写法（也接受 2026/11/6 8:00、2026-11-06T08:00）
+ *   `11-06 08:00`        省年份（当年）
+ *   `08:00`              只给时刻 —— 当天这个点；已过则顺延到明天
+ *
+ * 解析不出 / 字段越界返回 0，由调用方提示（绝不猜一个"差不多"的时刻）。
+ *
+ * @param {string} v   用户输入
+ * @param {Date}  [now] 当前时刻（默认取系统时间；测试可注入）
+ * @returns {number} 本地时间戳；解析失败返回 0
+ */
+export function parseLocalDateTimeText(v, now = new Date()) {
+  const s = String(v == null ? '' : v)
+    .trim()
+    .replace(/[／]/g, '/')
+    .replace('：', ':')
+    // ISO 风格的 T 分隔（2026-11-07T08:00）当成空格，与「YYYY-MM-DD HH:MM」同一条路
+    .replace(/(\d)[Tt](\d)/, '$1 $2')
+  if (!s) return 0
+  const num = (x) => Number(x)
+  const daysIn = (y, m) => new Date(y, m, 0).getDate()
+  // 拆日期与时刻两段（时刻必填；日期可缺省）
+  const parts = s.split(/\s+/)
+  const timeM = (parts[parts.length - 1] || '').match(/^([0-9]{1,2})[:.]([0-9]{2})$/)
+  if (!timeM) return 0
+  const hh = num(timeM[1])
+  const mm = num(timeM[2])
+  if (hh > 23 || mm > 59) return 0
+
+  const d = new Date(now)
+  if (parts.length === 1) {
+    // 只有时刻：当天；已过则明天（"静默到 8 点"在晚上说，指的是明早 8 点）
+    d.setHours(hh, mm, 0, 0)
+    if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1)
+    return d.getTime()
+  }
+  const dateM = parts[0].match(/^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$/)
+  if (!dateM) return 0
+  const year = dateM[1] != null ? num(dateM[1]) : d.getFullYear()
+  const month = num(dateM[2])
+  const day = num(dateM[3])
+  if (month < 1 || month > 12) return 0
+  if (day < 1 || day > daysIn(year, month)) return 0
+  const out = new Date(year, month - 1, day, hh, mm, 0, 0)
+  return out.getTime()
+}
+
+/**
+ * 「人脸静默」配置的归一化（幂等，纯函数）。
+ * ----------------------------------------------------------------------------
+ * 需求：给在库人脸配「静默时段 + 人脸组（多选）」，生效期间选中组的人脸命中
+ * **不做推送**（事件照记、统计照算，只是不推三端）。配置长在
+ * `options.face.silent`：`{ enabled, groups: [人名], slots: [{ start, end }] }`。
+ *
+ * 缺字段补默认、类型不对纠正 —— 与 normalizeCameraSilent 同一套规矩。
+ * 消费方：useAlertPush.handleAlarm（前后端共用一条推送链路，判定在 faceSilentBlockPush）。
+ *
+ * @param {object} face options.face（就地修改）
+ * @returns {object} 归一化后的 face
+ */
+export function normalizeFaceSilent(face) {
+  if (!face || typeof face !== 'object') return face
+  const raw = face.silent && typeof face.silent === 'object' && !Array.isArray(face.silent) ? face.silent : {}
+  const groups = Array.isArray(raw.groups)
+    ? [...new Set(raw.groups.map((g) => String(g || '').trim()).filter(Boolean))].slice(0, 200)
+    : []
+  const slots = Array.isArray(raw.slots)
+    ? raw.slots
+        .map((s) => {
+          const o = s && typeof s === 'object' ? s : {}
+          const start = normalizeTimeText(o.start, '')
+          let end = normalizeTimeText(o.end, '')
+          if (!start || !end) return null
+          if (start === end) end = start // 起止相同交给判定函数当"永不命中"处理
+          return { start, end }
+        })
+        .filter(Boolean)
+        .slice(0, 20)
+    : []
+  face.silent = {
+    enabled: raw.enabled === true,
+    groups,
+    slots
+  }
+  return face
+}
+
+/**
+ * 这个人脸命中此刻要不要被「人脸静默」挡下（不推送）。
+ * ----------------------------------------------------------------------------
+ * 判据三条**同时**满足才挡：
+ *   ① face.silent.enabled === true；
+ *   ② faceName 在选中的 groups 里（groups 空 = 一个组都没选，什么都不挡）；
+ *   ③ 当前时刻落在任一 slots 时段内（支持跨零点；slots 空 = 永不生效）。
+ *
+ * 陌生人脸（无 faceName）不在任何组里，永远不受影响 —— 需求只针对「选中的人脸组」。
+ *
+ * @param {object} face     options.face（已过 normalizeFaceSilent；未过也会被这里兜底）
+ * @param {string} faceName 命中的人名（record.faceName）
+ * @param {number} [now]    当前时间戳（默认系统时间）
+ * @returns {boolean}
+ */
+export function faceSilentBlockPush(face, faceName, now = Date.now()) {
+  const cfg = face && face.silent
+  if (!cfg || cfg.enabled !== true) return false
+  const groups = Array.isArray(cfg.groups) ? cfg.groups : []
+  const name = String(faceName || '').trim()
+  if (!name || !groups.includes(name)) return false
+  const slots = Array.isArray(cfg.slots) ? cfg.slots : []
+  if (!slots.length) return false
+  const d = new Date(now)
+  const cur = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  return slots.some(({ start, end }) => {
+    if (!start || !end || start === end) return false
+    // end < start = 跨零点（如 19:00~08:00）：cur >= start 或 cur < end 都算在内
+    return start < end ? cur >= start && cur < end : cur >= start || cur < end
+  })
 }
 
 /**
