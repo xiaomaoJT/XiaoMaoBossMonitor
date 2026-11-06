@@ -66,8 +66,8 @@
           <div class="grp-titles">
             <strong>人脸静默</strong>
             <em>
-              选中的人脸组在静默时段内命中时<b>不做推送</b>（三端安静），
-              事件仍会记录、统计仍会计数；陌生人脸与人员走向不受影响。
+              选中的人脸组在静默时段内命中时<b>不做任何提醒</b>（推送三端与桌面通知、
+              报警声音一起安静），事件仍会记录、统计仍会计数；陌生人脸与人员走向不受影响。
             </em>
           </div>
           <span class="switch" :class="{ on: fsCfg.enabled }" @click="fsCfg.enabled = !fsCfg.enabled"></span>
