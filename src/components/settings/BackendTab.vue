@@ -181,8 +181,13 @@
         </div>
         <div v-for="c in backendStatus.cameras || []" :key="c.id" class="backend-cam">
           <b>{{ c.name }}</b>
-          <b :class="c.alive ? 'ok-text' : 'err-text'">{{ c.alive ? '解码中' : '未出帧' }}</b>
-          <span>检出 {{ c.persons }} 人 · {{ c.zones }} 区域 · {{ c.frames }} 帧</span>
+          <!-- §5.116：/api/status 现在回全量通道（含被关掉的几路）。关掉的既不是
+               「解码中」也不是红色「未出帧」，按后端给的 offLabel 原样标注。 -->
+          <b :class="c.enabled === false ? '' : c.alive ? 'ok-text' : 'err-text'">
+            {{ c.enabled === false ? (c.offLabel || '已关闭') : c.alive ? '解码中' : '未出帧' }}
+          </b>
+          <span v-if="c.enabled === false">该通道未拉流 · 启用后自动接入</span>
+          <span v-else>检出 {{ c.persons }} 人 · {{ c.zones }} 区域 · {{ c.frames }} 帧</span>
           <em v-if="c.error" class="err-text">{{ c.error }}</em>
         </div>
       </div>
