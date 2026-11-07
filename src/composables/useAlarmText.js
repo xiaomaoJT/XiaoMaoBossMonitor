@@ -71,6 +71,18 @@ export function normalizeEvents(evt) {
 }
 
 /**
+ * 区域事件的老记录兜底文案（record.text 为空的那些）。
+ * 新记录在产生时就把「有 N 人 + 通道名 + 区域名」写进 text，这里的口径必须一致，
+ * 否则同一天的列表里会出现两种句式（托盘一眼就能看出别扭）。
+ */
+function zoneBrief(r, verb) {
+  const n = Math.max(1, Number(r.people) || 1)
+  const zone = r.zoneName || '区域'
+  const where = r.camName ? `${r.camName}「${zone}」` : `「${zone}」`
+  return verb === '徘徊' ? `有 ${n} 人在 ${where}徘徊` : `有 ${n} 人${verb} ${where}`
+}
+
+/**
  * 一条事件的「短摘要」——通知弹窗、桌面通知正文、推送标题都用它。
  * 优先用采集端给的 text（那里知道区域名、人名、停留时长等细节）。
  */
@@ -80,12 +92,14 @@ export function alarmBrief(r) {
   switch (r.type) {
     case 'face':
       return r.faceName ? `识别到「${r.faceName}」` : '检测到未录入的人脸'
+    // 区域事件：新人声事件正文自带「有 N 人走入 通道「区域」」，这里是**老记录**
+    // （text 为空）的兜底，口径与 useTracker/analyzer 的 zoneText 保持一致。
     case 'enter':
-      return `有人走入「${r.zoneName || '区域'}」`
+      return zoneBrief(r, '走入')
     case 'exit':
-      return `有人走出「${r.zoneName || '区域'}」`
+      return zoneBrief(r, '走出')
     case 'loiter':
-      return `有人在「${r.zoneName || '区域'}」徘徊`
+      return zoneBrief(r, '徘徊')
     case 'pose':
       return r.actionText ? `检测到动作：${r.actionText}` : '检测到人形动作'
     case 'count':

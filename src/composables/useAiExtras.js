@@ -357,7 +357,7 @@ export function useAiExtras(options) {
         at: evt.at,
         box: evt.box,
         dwellMs: evt.dwellMs || 0,
-        text: zoneText(evt),
+        text: zoneText(evt, cam.name),
         source: 'zone'
       }
       // 报警事件：一定进 zoneEvents（原行为），并上抛报警
@@ -806,12 +806,20 @@ export function useAiExtras(options) {
   return { step, reset, probe, tracks, faces, poses, counts, status, tracker }
 }
 
-/** 区域事件文案 */
-function zoneText(evt) {
+/**
+ * 区域事件文案（与 server/analyzer.mjs 的 zoneText 逐字一致）
+ *
+ * `有 2 人走入 电梯「1」`：人数 + 通道名 + 区域名。人数由 useTracker 产生事件时
+ * 算好（该区域此刻人数，单人恒为 1），这里只负责拼句子。
+ */
+function zoneText(evt, camName) {
   const sec = Math.round((evt.dwellMs || 0) / 1000)
-  if (evt.kind === 'enter') return `有人走入「${evt.zoneName}」`
-  if (evt.kind === 'exit') return `有人走出「${evt.zoneName}」（停留 ${sec} 秒）`
-  return `有人在「${evt.zoneName}」徘徊（已停留 ${sec} 秒）`
+  const n = Math.max(1, Number(evt.people) || 1)
+  const zone = evt.zoneName || '区域'
+  const where = camName ? `${camName}「${zone}」` : `「${zone}」`
+  if (evt.kind === 'enter') return `有 ${n} 人走入 ${where}`
+  if (evt.kind === 'exit') return `有 ${n} 人走出 ${where}（停留 ${sec} 秒）`
+  return `有 ${n} 人在 ${where}徘徊（已停留 ${sec} 秒）`
 }
 
 /**

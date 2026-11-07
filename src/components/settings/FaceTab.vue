@@ -546,10 +546,10 @@
       <!-- 命中修正（仅后端模式：命中样本由后端检测服务存着）
            已入库人脸的命中以前只发事件、不存向量 —— 想修正「认成小刘、
            实际是大刘」这种错判时，手里只剩一张图，没有 512 维向量可重新录入。
-           后端现在每次命中都存下当帧向量 + 当时认定的名字，这里列出最近 20 条，
-           确认认错后按正确名字「修正」：这条向量会作为一条正确标签的样本
-           录进人脸库（自动同步到后端），后续同一张脸的余弦相似度就会落到
-           对的人名下 —— 识别精准度随之提升。 -->
+           后端现在每次命中都存下当帧向量 + 当时认定的名字，这里列出最近 99 条
+           （每页 9 条，可翻页），确认认错后按正确名字「修正」：这条向量会作为
+           一条正确标签的样本录进人脸库（自动同步到后端），后续同一张脸的余弦
+           相似度就会落到对的人名下 —— 识别精准度随之提升。 -->
       <div class="opt col" v-if="faceBackendOn">
         <span>
           <strong>
@@ -558,14 +558,17 @@
               {{ hitReviewOpen ? '收起' : '管理' }}
             </button>
           </strong>
-          <em>最近 {{ backendFaceHits.length }} 条命中样本（带原图）；认错了就按正确名字修正，提升后续识别精准度</em>
+          <em>
+            最近 {{ backendFaceHits.length }} 条命中样本（带原图）{{ hitPageCount > 1 ? ` · 第 ${hitPage} / ${hitPageCount} 页` : '' }}；
+            认错了就按正确名字修正，提升后续识别精准度
+          </em>
         </span>
 
         <!-- 命中卡片比待录入/人脸库复杂（图 + 4 行信息 + 下拉 + 3 个按钮），
              用 hit-grid 固定 3 列摊满宽度，内部改成「图在左、信息在右」的横排，
              底部按钮行允许换行、绝不裁成半个字 -->
         <div class="face-grid hit-grid" v-if="hitReviewOpen && backendFaceHits.length">
-          <div class="face-card hit" v-for="h in backendFaceHits" :key="h.id">
+          <div class="face-card hit" v-for="h in pagedFaceHits" :key="h.id">
             <div class="hit-top">
               <img
                 :src="h.thumb"
@@ -633,6 +636,15 @@
               </button>
             </div>
           </div>
+        </div>
+
+        <!-- 分页（§5.119）：命中样本最多 99 条、每页 9 条。
+             页码只影响展示，修正 / 认错 / 忽略 / 录入都作用在当条，
+             操作后列表变短由 SettingsDrawer 的 hitPageCount watcher 把页码拉回最后一页。 -->
+        <div class="face-pager" v-if="hitReviewOpen && hitPageCount > 1">
+          <button class="mini-btn ghost" :disabled="hitPage <= 1" @click="hitPage -= 1">上一页</button>
+          <span class="face-page-text">{{ hitPage }} / {{ hitPageCount }}</span>
+          <button class="mini-btn ghost" :disabled="hitPage >= hitPageCount" @click="hitPage += 1">下一页</button>
         </div>
 
         <!-- 空态占位：把「为什么是空的」说清楚，并给一条能立刻做的动作 -->
@@ -987,7 +999,7 @@ import { faceSilentBlockPush, normalizeTimeText } from '../../config/defaults.js
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile, computed } = sd
+const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitPage, hitPageCount, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedFaceHits, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile, computed } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
 
 /* ---------------- 人脸静默（options.face.silent） ---------------- */

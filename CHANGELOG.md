@@ -22,7 +22,7 @@
 ## [未发布]
 
 > 这一小段只记录客户端源码的同步，**不提升本仓库版本号**：版本仍是 `v1.9.0`，
-> 界面显示的也是它。完整版已到 `v2.5.2`，但引擎 / 托盘的改动不在本仓库。
+> 界面显示的也是它。完整版已到 `v2.5.4`，但引擎 / 托盘的改动不在本仓库。
 
 ### 修复
 
@@ -50,6 +50,21 @@
   但会多一个 `preview:true`。本仓库 `src/components/settings/BackendTab.vue`
   同步显示「临时预览中 · 不做检测、不推送」，不报成「在线」也不说「未拉流」。
   同样**只是展示层**：临时起流、会话 TTL 与停流都由完整版后端负责。
+- **区域事件文案带人数与通道名**：`有人走入「1」` 这类文案看不出「几个人、哪一路」，
+  改为 `有 2 人走入 电梯「1」`（完整版手册 §5.119）。人数是「此刻落在该区域内的
+  轨迹数」，两人同时踏入给 1 / 2，`exit` / `loiter` 恒为 1。改动落在
+  `src/composables/useTracker.js`（`_insideCount()` + 事件 `people` 字段）、
+  `src/composables/useAiExtras.js`（`zoneText()`）与
+  `src/composables/useAlarmText.js`（老记录兜底 `zoneBrief()`），三处文案逐字一致。
+  **本仓库的这部分是页面内检测**：跨摄像头与后端落库走的是完整版引擎，文案规则同源。
+- **「命中修正」提到 99 条并分页，每页 9 条**：设置 → 人脸识别 → 命中修正原先最多
+  20 条且一屏挤满，现在展示最近 99 条、按 3 列 × 3 行分页（新增
+  `src/composables/faceHitPaging.js` 纯函数：`HIT_PAGE_SIZE / hitPageCount /
+  clampHitPage / sliceHitPage`，空列表算 1 页、页码越界自动拉回、展开「管理」回第一页），
+  `SettingsDrawer.vue` 与 `settings/FaceTab.vue` 接上页码，`useFaceLib.js` 的请求
+  改为 `?limit=99`。**后端保留上限由完整版负责**（`HIT_KEEP` 已提到 120，
+  留出余量避免正好 99 条时忽多忽少）。
+- **README 版本口径**：功能对照表标注的「完整版」版本由 `v2.5.0` 更新为 `v2.5.4`。
 
 ---
 

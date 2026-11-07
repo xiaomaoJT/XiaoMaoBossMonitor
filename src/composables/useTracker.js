@@ -246,6 +246,22 @@ export class Tracker {
     return Math.hypot(maxX - minX, maxY - minY)
   }
 
+  /**
+   * 某个区域内此刻有几个人（含刚踏入的那一个）。
+   *
+   * 只给事件文案用：`有 N 人走入 …`。以前区域事件里只有「有人」，用户看不出
+   * 这是一个人还是一群人（2026-11-07 反馈「人数和通道名都没有，不够直观」）。
+   * 口径固定为「此刻该区域内的轨迹数」—— 单人事件仍然是 1，不会出现 0。
+   */
+  _insideCount(zoneId) {
+    let n = 0
+    for (const tr of this.tracks) {
+      const z = tr.zones && tr.zones[zoneId]
+      if (z && z.inside) n += 1
+    }
+    return n
+  }
+
   /** 离开全部区域（轨迹消失时用） */
   _zoneLeaveAll(tr, t, events) {
     for (const key of Object.keys(tr.zones)) {
@@ -263,6 +279,8 @@ export class Tracker {
           box: { ...tr.box },
           dwellMs: st.since ? t - st.since : 0,
           gone: true,
+          // 走出的是「这一个人」；区域里还剩几个不影响这条事件的主体
+          people: 1,
           // 虚拟区域（人员流向的「画面全区域」）：只产事件，不计入人员计数
           virtual: !!zone.virtual
         })
@@ -297,6 +315,8 @@ export class Tracker {
             at: t,
             box: { ...tr.box },
             score: tr.score,
+            // 此刻该区域里有几个人（含刚踏入的这一个）：事件文案「有 N 人走入 …」
+            people: Math.max(1, this._insideCount(zone.id)),
             // 虚拟区域（人员流向的「画面全区域」）：只产事件，不计入人员计数
             virtual: !!zone.virtual
           })
@@ -316,10 +336,12 @@ export class Tracker {
             trackId: tr.id,
             at: t,
             box: { ...tr.box },
-          dwellMs,
-          virtual: !!zone.virtual
-        })
-        if (!zone.virtual) this.stats.totalOut += 1
+            dwellMs,
+            // 走出的是「这一个人」
+            people: 1,
+            virtual: !!zone.virtual
+          })
+          if (!zone.virtual) this.stats.totalOut += 1
         }
       }
 
@@ -339,6 +361,8 @@ export class Tracker {
               at: t,
               box: { ...tr.box },
               dwellMs: t - st.since,
+              // 徘徊的是「这一个人」
+              people: 1,
               radius
             })
           }

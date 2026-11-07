@@ -2107,7 +2107,8 @@ function normBackendFaceHits(base, list) {
     })
 }
 
-/** 拉一次后端命中样本（默认 20 条：设置页「命中修正」就展示最近 20 条） */
+/** 拉一次后端命中样本：设置页「命中修正」展示最近 99 条（每页 9 条）。
+ *  后端 HIT_KEEP=120 留了 21 条余量，99 条不会因为滚动裁剪而忽多忽少。 */
 export async function loadBackendFaceHits(url) {
   const base = String(url || '').replace(/\/+$/, '')
   if (!base) {
@@ -2121,7 +2122,7 @@ export async function loadBackendFaceHits(url) {
     const t = setTimeout(() => ctrl.abort(timeoutReason('命中样本', 8000)), 8000)
     let res
     try {
-      res = await fetch(`${base}/api/face-hits?limit=20`, { signal: ctrl.signal })
+      res = await fetch(`${base}/api/face-hits?limit=99`, { signal: ctrl.signal })
     } finally {
       clearTimeout(t)
     }
