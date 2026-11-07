@@ -426,9 +426,9 @@ function onDocKeyDown(e) {
 }
 
 .mode-chip.on {
-  color: #b6dcff;
-  background: rgba(56, 138, 221, 0.22);
-  box-shadow: inset 0 0 0 1px rgba(133, 183, 235, 0.45);
+  color: var(--accent-text, #FFC1A6);
+  background: color-mix(in srgb, var(--accent, #DA5636) 22%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent, #DA5636) 45%, transparent);
 }
 
 .mode-chip.off {
