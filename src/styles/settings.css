@@ -49,7 +49,7 @@
   padding: 2px 9px;
   border-radius: 999px;
   font-size: 11px;
-  color: var(--accent-text, #FF9E7A);
+  color: #8fc0ff;
   background: var(--accent-soft);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
 }
@@ -680,9 +680,9 @@
   padding: 1px 5px;
   font-size: 10px;
   line-height: 1.45;
-  color: var(--accent, #DA5636);
-  background: color-mix(in srgb, var(--accent, #DA5636) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent, #DA5636) 36%, transparent);
+  color: var(--accent, #5ad1ff);
+  background: color-mix(in srgb, var(--accent, #5ad1ff) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #5ad1ff) 36%, transparent);
   border-radius: 8px;
   text-align: center;
   white-space: normal;
@@ -2760,17 +2760,17 @@
 
 .sd-scope .sw-liquid{
   --sw-bg: #131c2b;
-  --sw-accent: #DA5636;
+  --sw-accent: #2f8bff;
 }
 
 .sd-scope .sw-dark{
   --sw-bg: #000000;
-  --sw-accent: #E2663F;
+  --sw-accent: #3b8dff;
 }
 
 .sd-scope .sw-light{
   --sw-bg: #f2f4f8;
-  --sw-accent: #C4482B;
+  --sw-accent: #1f6fe0;
 }
 
 .sd-scope .sw-auto{

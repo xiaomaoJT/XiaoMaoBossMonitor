@@ -14,12 +14,12 @@
   --text-soft: #c6d3e6;
   --text-dim: #8b9ab3;
   --text-dim-2: #5d6b83;
-  --accent: #DA5636;
+  --accent: #2f8bff;
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
-  --accent-text: #FF9E7A;
-  --accent-text-strong: #FFC1A6;
-  --cyan: #F0874F;
-  --purple: #E8845C;
+  --accent-text: #7db6ff;
+  --accent-text-strong: #a9cdff;
+  --cyan: #00c8ff;
+  --purple: #8c78ff;
   --ok: #2fd07a;
   --ok-text: #8ce6b4;
   --warn: #ffb020;
@@ -101,10 +101,10 @@
   --text-soft: #d7d9e0;
   --text-dim: #9a9da8;
   --text-dim-2: #6c6f7a;
-  --accent: #E2663F;
-  --accent-soft: rgba(218, 86, 54, 0.16);
-  --accent-text: #FFA584;
-  --accent-text-strong: #FFC9B0;
+  --accent: #3b8dff;
+  --accent-soft: rgba(59, 141, 255, 0.16);
+  --accent-text: #82b7ff;
+  --accent-text-strong: #aecfff;
   --ok-text: #90e8bb;
   --warn-text: #ffd57f;
   --err-text: #ffa2ab;
@@ -135,12 +135,12 @@
   --text-soft: #39485c;
   --text-dim: #5d6d82;
   --text-dim-2: #8b98ab;
-  --accent: #C4482B;
-  --accent-soft: rgba(196, 72, 43, 0.12);
-  --accent-text: #9A3412;
-  --accent-text-strong: #7C2A10;
-  --cyan: #B85A22;
-  --purple: #9A4A2A;
+  --accent: #1f6fe0;
+  --accent-soft: rgba(31, 111, 224, 0.12);
+  --accent-text: #1a5fc4;
+  --accent-text-strong: #14509f;
+  --cyan: #0891b2;
+  --purple: #7050e0;
   --ok: #16a34a;
   --ok-text: #15803d;
   --warn: #d97706;
@@ -446,9 +446,9 @@ body.free-dragging * {
 /* 背景色晕：玻璃的「折射源」 */
 html[data-theme='liquid'] body {
   background:
-    radial-gradient(1100px 620px at 82% -12%, rgba(218, 86, 54, 0.18), transparent 62%),
-    radial-gradient(900px 560px at -12% 108%, rgba(240, 135, 79, 0.12), transparent 62%),
-    radial-gradient(760px 480px at 55% 122%, rgba(232, 132, 92, 0.10), transparent 65%),
+    radial-gradient(1100px 620px at 82% -12%, rgba(47, 139, 255, 0.18), transparent 62%),
+    radial-gradient(900px 560px at -12% 108%, rgba(0, 200, 255, 0.12), transparent 62%),
+    radial-gradient(760px 480px at 55% 122%, rgba(140, 120, 255, 0.1), transparent 65%),
     var(--bg);
 }
 
@@ -479,11 +479,11 @@ html[data-theme='liquid'] .btn:hover {
 }
 
 html[data-theme='liquid'] .btn.primary {
-  background: linear-gradient(180deg, rgba(218, 86, 54, 0.34), rgba(218, 86, 54, 0.18));
-  border-color: rgba(218, 86, 54, 0.5);
+  background: linear-gradient(180deg, rgba(47, 139, 255, 0.34), rgba(47, 139, 255, 0.18));
+  border-color: rgba(47, 139, 255, 0.5);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 4px 18px rgba(218, 86, 54, 0.25);
+    0 4px 18px rgba(47, 139, 255, 0.25);
 }
 
 /* 输入框 / 开关轨道：贴着玻璃走 */
