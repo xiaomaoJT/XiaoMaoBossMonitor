@@ -289,6 +289,7 @@ import {
   DECODER_PATH,
   LAYOUTS,
   STORAGE_KEY,
+  backendOptionsSignature,
   cloneDefaultCameras,
   cloneDefaultOptions,
   fillMissingOptions,
@@ -357,11 +358,13 @@ import {
   localRev,
   markSynced,
   pullConfig,
+  readPushedOptionsSig,
   refreshRemoteStatus,
   scheduleConfigSync,
   stopConfigSync,
   syncConfigNow,
-  syncRev
+  syncRev,
+  writePushedOptionsSig
 } from './composables/useBackendSync'
 import { featureState } from './composables/useAiExtras'
 import {
@@ -1168,27 +1171,21 @@ async function backendPayload() {
   return payload
 }
 
-/** 配置里所有会影响后端检测/推送的字段（用于判断要不要重新同步） */
+/**
+ * 判断「要不要重新同步」的指纹（同步完整版 §5.133）。
+ *
+ * 以前逐字段手写了一份「后端关心的 options」清单，漏掉
+ * streamRecovery / autoRestart / systemReboot —— 改这类配置块时指纹不变：
+ * 既不触发自动推送，连「立即同步」也会被 pushPayload() 短路成 skipped，
+ * 新值永远只活在浏览器 localStorage 里。
+ *
+ * 现在整份 options 进指纹（键序无关，见 defaults.js 的 backendOptionsSignature）：
+ * 任何配置块改动都会推，新加的后端生效字段天然覆盖，不用再回来补清单。
+ * 下面这些是「不在 options 里」的独立数据源，仍要单独列。
+ */
 const backendSyncSignature = computed(() =>
   JSON.stringify({
-    backend: options.backend,
-    zone: options.zone,
-    face: options.face,
-    pose: options.pose,
-    alert: options.alert,
-    cooldownSec: options.cooldownSec,
-    aiScore: options.aiScore,
-    aiModel: options.aiModel,
-    sampleFps: options.sampleFps,
-    dingtalk: options.dingtalk,
-    wecom: options.wecom,
-    telegram: options.telegram,
-    /*
-     * 人员走向规则必须进指纹：后端 analyzer 每帧用 options.flows 喂流向引擎，
-     * 漏了它 → 改完流向规则不触发自动重推 → 后端手上还是旧规则（或根本没有），
-     * 表现就是「规则配了却永远不记录」，且 /status 也看不出后端有没有收到。
-     */
-    flows: options.flows,
+    options: backendOptionsSignature(options),
     /*
      * 人脸库手动拆分声明 + 归类偏好同理：不进指纹 → 拆了个寂寞
      * （后端识别还按老样子并着推）。依赖 faceSplitsVersion 让缓存刷新后重算。
@@ -1263,13 +1260,24 @@ async function pushPayload() {
   return await backendPayload()
 }
 
-/** 统一的推送入口：成功之后把指纹记上（所有推送点都走这里，别直接调 syncConfigNow） */
-async function pushConfigNow({ silent = true } = {}) {
+/**
+ * 统一的推送入口：成功之后把指纹记上（所有推送点都走这里，别直接调 syncConfigNow）。
+ *
+ * force = 无视「跟后端手上那份一样」的短路，必发一次。两个用途：
+ *   ① 设置页「立即同步」——用户手点了就是想发，被 skip 掉会让人以为按钮坏了；
+ *   ② 开机内容漂移修复——版本对齐但内容没对齐时，必须真发一发才能写进后端。
+ */
+async function pushConfigNow({ silent = true, force = false } = {}) {
   if (!options.backend || !options.backend.url) return { ok: false, error: '未配置服务地址' }
   // 先记下"送出去的是哪一份"：请求在飞时用户又改了配置的话，
   // 那一次改动不该被当成已同步（宁可多发一次，也不能漏发）
   const sig = pushSignature.value
-  const r = await syncConfigNow(pushPayload, { url: options.backend.url, silent })
+  const optSig = backendOptionsSignature(options)
+  const r = await syncConfigNow(force ? backendPayload : pushPayload, {
+    url: options.backend.url,
+    silent,
+    optionsSig: optSig
+  })
   if (r && r.ok) syncedPushSig.value = sig
   return r
 }
@@ -1277,6 +1285,7 @@ async function pushConfigNow({ silent = true } = {}) {
 /** 记下"后端手上就是这一份"（不推送时用：刚采用完远端配置 / 确认已对齐） */
 function markPushSynced() {
   syncedPushSig.value = pushSignature.value
+  writePushedOptionsSig(backendOptionsSignature(options))
 }
 
 /*
@@ -1363,7 +1372,11 @@ watch(
   () => {
     if (!backendActive.value) return
     if (applyingRemote) return
-    scheduleConfigSync(pushPayload, { url: options.backend.url })
+    scheduleConfigSync(pushPayload, {
+      url: options.backend.url,
+      // 自动推送也要把「这次推出去的 options 指纹」落盘，开机才不会误判漂移
+      optionsSig: backendOptionsSignature(options)
+    })
   }
 )
 
@@ -1396,10 +1409,10 @@ async function pushFacesToBackend() {
   await pushConfigNow({ silent: true })
 }
 
-/** 设置页「立即同步」按钮 */
+/** 设置页「立即同步」按钮：手点了就真发一次，不许被指纹短路成 skipped。 */
 async function onBackendSyncNow() {
   if (!options.backend || !options.backend.url) return
-  await pushConfigNow({ silent: false })
+  await pushConfigNow({ silent: false, force: true })
   await refreshRemoteStatus(options.backend.url)
 }
 
@@ -1476,6 +1489,18 @@ async function alignWithBackend() {
   }
 
   if (localRev.value > 0 && localRev.value === syncRev.value) {
+    /*
+     * 「版本对齐 ≠ 内容对齐」：localRev 只记「上次交换到哪个版本」，
+     * 某个后端生效的配置块若没进同步指纹，用户改了它、版本号根本不会动，
+     * 这一分支就会把漂移当成「已对齐」直接 markPushSynced() 放过去。
+     * 拿「上次真正推成功的整份 options 指纹」比一次：不一样就补推一次
+     * （force 绕开短路）。老版本升级上来时这份存档不存在 → 首启补推一次，
+     * 之后就不会再发生；推失败则不落盘，下次开机继续补。
+     */
+    if (readPushedOptionsSig() !== backendOptionsSignature(options)) {
+      await pushConfigNow({ silent: false, force: true })
+      return
+    }
     // 本机这份配置就是后端手上那一份，不用重复推
     // （把指纹记上：之后任何一次"改了又改回来"也不会白发一发出去）
     markPushSynced()

@@ -1703,6 +1703,44 @@ export const BRAND = {
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
 
+/**
+ * 与「对象键插入顺序」无关的序列化（配置指纹用）。
+ *
+ * 为什么不能直接 JSON.stringify(options)：从后端拉回配置时是「先删光所有键、
+ * 再按拉回来的顺序铺一遍」，同一个配置会因为键序不同得到两个字符串 ——
+ * 指纹一变就触发一次无意义的回推（rev 空涨一格）。
+ */
+export function stableJson(v) {
+  if (v === null || v === undefined) return 'null'
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`
+  if (typeof v === 'object') {
+    return `{${Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableJson(v[k])}`)
+      .join(',')}}`
+  }
+  const s = JSON.stringify(v)
+  return s === undefined ? 'null' : s
+}
+
+/**
+ * 后端生效配置的指纹 = **整份 options**，不是手写的字段清单。
+ * ----------------------------------------------------------------------------
+ * 同步完整版 §5.133 的真机事故：设置页把「持续异常多少分钟后触发系统重启恢复」
+ * 从 185 改成 320，界面显示 320、后端却仍按 185 执行。根因是 App.vue 的
+ * backendSyncSignature 逐字段手写了一份「后端关心的 options」清单，漏掉
+ * streamRecovery / autoRestart / systemReboot —— 改这三个块指纹不变，
+ * 既不触发自动推送，连「立即同步」也会被 pushPayload() 的指纹短路给 skip 掉，
+ * 于是新值永远只活在浏览器 localStorage 里。
+ *
+ * 「手写字段清单」是复发率最高的一类 bug：每加一个后端生效的配置块，
+ * 就得记得回来补一行，忘了就静默失效。改成整份 options 后天然覆盖新字段。
+ * 键序无关（见 stableJson），避免拉取配置后因键序变化白白回推一次。
+ */
+export function backendOptionsSignature(options) {
+  return stableJson(options || {})
+}
+
 /** 深拷贝一份默认配置，避免多处共享同一个对象引用 */
 export function cloneDefaultOptions() {
   return JSON.parse(JSON.stringify(DEFAULT_OPTIONS))

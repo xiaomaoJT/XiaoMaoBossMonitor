@@ -63,6 +63,15 @@ export const pushOverwrote = ref(false)
 export const pushFacesSkipped = ref(false)
 
 const SYNC_REV_KEY = 'monitor-wall-sync-rev-v1'
+/**
+ * 上一次「真正推到后端」的整份 options 指纹（同步完整版 §5.133）。
+ *
+ * 版本号对齐（localRev === syncRev）只说明**曾经**对齐过，不代表此刻内容一致：
+ * 某个后端生效的配置块没进同步指纹时，用户改了它、版本号却纹丝不动，
+ * 下次打开页面 alignWithBackend() 会直接 markPushSynced()，把这份漂移当成
+ * 「已对齐」放过去 —— 界面显示新值、后端仍是旧值。
+ */
+const PUSHED_OPTIONS_SIG_KEY = 'monitor-wall-pushed-options-sig-v1'
 
 function store() {
   try {
@@ -100,6 +109,27 @@ export function markSynced(rev) {
 }
 
 localRev.value = readSyncedRev()
+
+/** 读 / 写「上次推成功的 options 指纹」；存储不可用（隐私模式）时静默降级。 */
+export function readPushedOptionsSig() {
+  const s = store()
+  if (!s) return ''
+  try {
+    return s.getItem(PUSHED_OPTIONS_SIG_KEY) || ''
+  } catch (e) {
+    return ''
+  }
+}
+
+export function writePushedOptionsSig(sig) {
+  const s = store()
+  if (!s) return
+  try {
+    s.setItem(PUSHED_OPTIONS_SIG_KEY, String(sig || ''))
+  } catch (e) {
+    /* 写不进去只影响下次开机的漂移判定，不影响本次同步 */
+  }
+}
 
 let timer = null
 let inflight = false
@@ -167,9 +197,12 @@ export async function pullConfig(url) {
  * @param {Function} getPayload () => { options, cameras, faces } | null，可为 async（人脸库要从 IndexedDB 读）
  *        **返回 null / undefined = 「跟后端手上那份一样，没什么可推的」**，
  *        本函数会直接跳过（不落状态、不发请求、回 { ok: true, skipped: true }）。
- * @param {object}   options    { url, silent }
+ * @param {object}   options    { url, silent, optionsSig }
+ *        optionsSig = 本次推出去的整份 options 指纹；推送成功后落盘，
+ *        供下次开机做「版本对齐但内容漂移」的判定（同步完整版 §5.133）。
+ *        ⚠️ 自动推送不经过 App.vue 的 pushConfigNow，所以这一步必须放在同步层。
  */
-export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
+export async function syncConfigNow(getPayload, { url, silent = false, optionsSig = '' } = {}) {
   const base = backendBase(url)
   if (!base) {
     syncState.value = 'idle'
@@ -236,6 +269,7 @@ export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
     syncRev.value = Number(data.configRev) || syncRev.value + 1
     // 推送成功 = 本机这份配置已经与后端对齐到这个版本
     markSynced(syncRev.value)
+    if (optionsSig) writePushedOptionsSig(optionsSig)
     pushOverwrote.value = !!data.overwrote
     pushFacesSkipped.value = !!data.facesSkipped
     return { ok: true, data }
@@ -248,7 +282,7 @@ export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
     // 在飞期间的变更：补一发
     if (dirty) {
       dirty = false
-      setTimeout(() => syncConfigNow(getPayload, { url, silent }), 200)
+      setTimeout(() => syncConfigNow(getPayload, { url, silent, optionsSig }), 200)
     }
   }
 }
@@ -256,13 +290,13 @@ export async function syncConfigNow(getPayload, { url, silent = false } = {}) {
 /**
  * 节流同步（配置变化时调；连续改动只发最后一次）。
  * @param {Function} getPayload
- * @param {object}   opts { url, delay, silent }
+ * @param {object}   opts { url, delay, silent, optionsSig }
  */
-export function scheduleConfigSync(getPayload, { url, delay = 900, silent = true } = {}) {
+export function scheduleConfigSync(getPayload, { url, delay = 900, silent = true, optionsSig = '' } = {}) {
   if (timer) clearTimeout(timer)
   timer = setTimeout(() => {
     timer = null
-    syncConfigNow(getPayload, { url, silent })
+    syncConfigNow(getPayload, { url, silent, optionsSig })
   }, Math.max(100, delay))
   if (typeof timer === 'object' && timer && typeof timer.unref === 'function') timer.unref()
 }
