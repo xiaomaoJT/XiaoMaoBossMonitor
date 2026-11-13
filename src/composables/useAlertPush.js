@@ -77,6 +77,12 @@ const WINDOW_MS = 60000
  * 不是被监测的事件（与 sendDirect 的「提醒发去哪」同一口径）。
  */
 const HARD_SILENT_BLOCKED_KINDS = new Set(['face', 'flow', 'pending'])
+/**
+ * §5.140：同一批 kind 也是「只走关键事件急推、不进普通渠道」的事件类。
+ * 推送统计要按渠道给它们补记一次（见 pushDirectToUsers），这里取同一个集合，
+ * 免得两处各写一份 kind 清单、将来加一种关键事件时又漏统计。
+ */
+const DIRECT_EVENT_KINDS = HARD_SILENT_BLOCKED_KINDS
 
 /**
  * 各渠道的配置读取与可用性判断。
@@ -3302,6 +3308,28 @@ export function useAlertPush(options, hooks = {}) {
       pushCriticalDing(kind, payload, silentBlocked),
       pushCriticalWecom(kind, payload, silentBlocked)
     ])
+    /*
+     * §5.140 推送统计口径修正：关键事件急推也要计入「今日推送」。
+     *
+     * 以前这三路（TG 私聊 / 钉钉独立机器人 / 企微独立机器人）完全不调
+     * recordPush，而 handleAlarm 对「库内人脸命中 / 关键走向」恰恰会清空
+     * send / queue、只留这条急推。结果就是「人脸命中 39」但日统计里的
+     * 推送只有汇总 / 补图攒出来的 1/1/2 —— 用户看到的正是这个断层。
+     *
+     * 计数在这里按**渠道**收口，一次急推每端各记一次，绝不按接收人记：
+     * TG 可能 fan-out 到多个 chatId，逐人记会让累计推送 / 成功率随人数膨胀。
+     * 只认事件类 kind（face / flow / pending）；'silence' / 'summary' 是免打扰
+     * 机制自己的宣告，仍由各自原来的入口记，别在这里重复。
+     * 早退（未启用 / 凭据不全 / 没有接收人）返回 ok:false + 空 reason，
+     * 那条压根没发，不计入；只有真发出去或真失败才记。
+     */
+    if (DIRECT_EVENT_KINDS.has(kind)) {
+      const directChannels = ['tg', 'ding', 'wecom']
+      parts.forEach((p, i) => {
+        if (p && p.ok) recordPush(directChannels[i], true)
+        else if (p && p.reason) recordPush(directChannels[i], false, p.reason)
+      })
+    }
     const reasons = parts.map((p) => p.reason).filter(Boolean)
     const sent = parts.reduce((a, p) => a + (p.sent || 0), 0)
     if (reasons.length) notify(`关键事件单独提醒部分失败：${reasons.join('；')}`)
@@ -3340,9 +3368,9 @@ export function useAlertPush(options, hooks = {}) {
         sent += 1
       } catch (e) {
         /*
-         * 刻意**不计入推送统计**（usePushStats）：这条消息是同一事件的
-         * 补充副本，主渠道那边已经计过一次；再计一遍会让"累计推送/成功率"
-         * 随着接收人数量膨胀，那个数字就不再代表报警量了。
+         * §5.140：这里**不按接收人**记推送统计 —— 一条急推可能发给多个 chatId，
+         * 逐人记会让「累计推送 / 成功率」随接收人数量膨胀。三端的结果统一由
+         * pushDirectToUsers 在拿到 parts 后按渠道各记一次（见上文口径说明）。
          */
         fails.push(`${chatId}：${(e && e.message) || '未知错误'}`)
       }
