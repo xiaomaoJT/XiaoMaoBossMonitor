@@ -37,6 +37,9 @@ import {
   readGroupSim
 } from './useFaceLib.js'
 import { getFlowEngine } from './useFlowMatch.js'
+/* §5.153：未录入人脸也计入「人脸记录」。计数本体只有 useDailyStats 一处
+   （statPersonHit 就是「识别人次」那个计数器），这里只负责在识别那一刻喂进去。 */
+import { statPersonHit } from './useDailyStats.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
 import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf } from '../config/defaults.js'
 import { pendingSampleMetrics, toGray } from './faceSampleScore.js'
@@ -220,6 +223,12 @@ export function useAiExtras(options) {
   /** 同一张脸的重复事件冷却：key（faceId 或 unknown）→ 上次触发时间 */
   const faceEventAt = new Map()
   /**
+   * §5.153 未录入人脸的「人脸记录」计数节流（只在没开未录入事件时用）。
+   * 与 faceEventAt 分开一张表：事件冷却键将来可能按轨迹细分，而这里只关心
+   * 「这一路多久记一次未录入的人脸」，混用会互相压制。
+   */
+  const faceSeenAt = new Map()
+  /**
    * 命中确认的计数表：归类名 → {n, at}（默认关时不写任何东西）。
    * 与 faceEventAt 分开两张表：冷却键按样本 id（既有行为不动），
    * 确认键必须按人（同一个人多条样本，按样本 id 计数永远数不满）。
@@ -308,6 +317,7 @@ export function useAiExtras(options) {
     poses.value = []
     counts.value = { current: 0, totalIn: 0, totalOut: 0 }
     faceEventAt.clear()
+    faceSeenAt.clear()
   }
 
   /**
@@ -621,6 +631,20 @@ export function useAiExtras(options) {
             age: attrs && attrs.age,
             attr: attrs && attrs.attr
           })
+        }
+        /*
+         * §5.153 「人脸记录」口径：未录入的人脸也是记录。
+         * 「未录入也报警」默认关着，只靠事件计的话人脸记录会恒等于库内命中，
+         * 统计页「未录入」永远是 0。事件关着时在这里补一次（与后端 analyzer
+         * 的 onFaceSeen 同一口径、同一节流），事件开着时由事件路径计数，
+         * 两条路径互斥，同一张脸不会被数两遍。
+         */
+        if (!fc.eventOnUnknown) {
+          const seenKey = 'seen:' + cam.id
+          if (now - (faceSeenAt.get(seenKey) || 0) >= fc.cooldownSec * 1000) {
+            faceSeenAt.set(seenKey, now)
+            statPersonHit('', now)
+          }
         }
         if (!fc.eventOnUnknown) continue
         // 按摄像头聚合：每个摄像头每 cooldownSec 秒最多产一条陌生人脸事件（降噪）。
