@@ -716,9 +716,10 @@ export function useAiExtras(options) {
   }
 
   /* ==================== 计数 ==================== */
-  /* §5.172 计数两条路径（与后端 analyzer.mjs 同一套）：
+  /* §5.172/§5.173 计数两条路径（与后端 analyzer.mjs 同一套）：
    * 统计采样（countStatOnly）只喂统计、不落库、不推送；
-   * 定期落库按 countIntervalSec + 本地 00:00 对齐槽位，每槽一条，落库 + 统计 + 推送。 */
+   * 定期落库按 countIntervalSec + 本地 00:00 对齐槽位，每槽最多一条，落库 + 统计 + 推送；
+   * 当前人数为 0 时不落库、也不占槽，同槽稍后有人才落。 */
   function maybeCountPush(now, emit, cam) {
     const zc = zoneConf()
     if (!camExtOn(cam, 'zone')) return
@@ -741,11 +742,13 @@ export function useAiExtras(options) {
       })
     }
 
-    // ② 定期落库：本地 00:00 对齐槽位，每槽一条；localStorage 判重，刷新不重置
+    // ② 定期落库：本地 00:00 对齐槽位，每槽最多一条；localStorage 判重，刷新不重置
     if (!zc.countPush) return
     const { slot, dayKey } = countLogSlot(now, zc.countIntervalSec)
     const slotKey = `${dayKey}#${slot}`
     if (slotKey === lastCountLogSlot) return
+    // §5.173：当前 0 人不落库、也不占槽 —— 本槽等到有人再落；统计采样不受影响。
+    if (!(Number(c.current) > 0)) return
     const storeKey = `bmCountSlot:${cam && cam.id || 'default'}`
     let seen = false
     try { seen = localStorage.getItem(storeKey) === slotKey } catch (e) { /* 无痕模式等 */ }

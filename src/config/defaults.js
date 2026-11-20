@@ -45,7 +45,7 @@ export const COUNT_STAT_INTERVAL_MS = 60 * 1000
  * 改间隔后不会重新起算、也不会把当前槽位重复落一条 —— 判重只需记住槽位号。
  *
  * @param {number} now       当前时间戳（ms）
- * @param {number} intervalSec 统计推送间隔（秒），非法值回落到 4 小时
+ * @param {number} intervalSec 统计推送间隔（秒），非法值回落到 4 小时（14400 秒，与 UI 默认一致）
  * @param {number} [tzOffsetMin] 本地时区偏移（分钟，Date.getTimezoneOffset 的**相反数**）；
  *                               传入可让纯函数脱离宿主时区做确定性测试，缺省用本地时区
  * @returns {{slot:number, dayKey:string, startedAt:number}}
@@ -1747,7 +1747,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.9.5'
+  version: '1.9.6'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'

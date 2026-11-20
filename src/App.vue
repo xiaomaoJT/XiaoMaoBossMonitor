@@ -2584,7 +2584,8 @@ function onAlarm(payload) {
   /*
    * §5.172 统计采样（countStatOnly）：只喂统计，不进事件列表 / 不落 IndexedDB /
    * 不响铃 / 不推送。§5.168 时它进列表刷屏；统计在下面的 statEvent 里照记，
-   * 统计页「计数」照常实时。周期性落库那条（countLogSlot）不带此标记，照常全流程。
+   * 统计页「计数」照常实时。周期性落库那条（countLogSlot）不带此标记，照常全流程；
+   * §5.173 起它只在通道当前人数非 0 时产生，0 人不落库、不显示。
    */
   if (record.countStatOnly !== true) appendEvent(record)
   /*
