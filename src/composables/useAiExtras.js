@@ -41,7 +41,7 @@ import { getFlowEngine } from './useFlowMatch.js'
    （statPersonHit 就是「识别人次」那个计数器），这里只负责在识别那一刻喂进去。 */
 import { statPersonHit } from './useDailyStats.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf, COUNT_STAT_INTERVAL_MS, countLogSlot } from '../config/defaults.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf, COUNT_STAT_INTERVAL_MS } from '../config/defaults.js'
 import { pendingSampleMetrics, toGray } from './faceSampleScore.js'
 
 /** COCO 17 关键点下标 */
@@ -234,10 +234,8 @@ export function useAiExtras(options) {
    * 确认键必须按人（同一个人多条样本，按样本 id 计数永远数不满）。
    */
   const faceConfirmAt = new Map()
-  /** §5.172 已落库的槽位 key（dayKey#slot），内存 + localStorage 双保险，刷新页面不重复 */
-  let lastCountLogSlot = ''
-  /** §5.168 统计采样的独立计时器（与落库计时器分开） */
-  let lastCountStatAt = 0
+  /** §5.173 计数事件唯一计时器：60 秒节奏，非 0 人落库、0 人只喂统计 */
+  let lastCountAt = 0
   let zonesKey = ''
 
   function faceConf() {
@@ -716,14 +714,15 @@ export function useAiExtras(options) {
   }
 
   /* ==================== 计数 ==================== */
-  /* §5.172/§5.173 计数两条路径（与后端 analyzer.mjs 同一套）：
-   * 统计采样（countStatOnly）只喂统计、不落库、不推送；
-   * 定期落库按 countIntervalSec + 本地 00:00 对齐槽位，每槽最多一条，落库 + 统计 + 推送；
-   * 当前人数为 0 时不落库、也不占槽，同槽稍后有人才落。 */
+  /* §5.173 计数事件只有一个节奏（与后端 analyzer.mjs 同一套）：
+   * 每 60 秒看当前人数；非 0 人且 countPush 开 → 正常落库 + 统计 + 推送；
+   * 0 人或 countPush 关 → countStatOnly，只喂统计。不看 countIntervalSec / 槽位。 */
   function maybeCountPush(now, emit, cam) {
     const zc = zoneConf()
     if (!camExtOn(cam, 'zone')) return
     if (!zc.countEnabled) return
+    if (lastCountAt && now - lastCountAt < COUNT_STAT_INTERVAL_MS) return
+    lastCountAt = now
 
     const c = counts.value
     const mode = zc.countMode || 'current'
@@ -734,31 +733,12 @@ export function useAiExtras(options) {
           ? `当前 ${c.current} 人 · 累计经过 ${c.totalIn} 人次`
           : `当前画面 ${c.current} 人`
 
-    // ① 统计采样：只认 countEnabled，短间隔，带标记 → onAlarm 只喂统计
-    if (!lastCountStatAt || now - lastCountStatAt >= COUNT_STAT_INTERVAL_MS) {
-      lastCountStatAt = now
-      emit({
-        type: 'count', counts: { ...c }, at: now, text, source: 'count', countStatOnly: true
-      })
-    }
-
-    // ② 定期落库：本地 00:00 对齐槽位，每槽最多一条；localStorage 判重，刷新不重置
-    if (!zc.countPush) return
-    const { slot, dayKey } = countLogSlot(now, zc.countIntervalSec)
-    const slotKey = `${dayKey}#${slot}`
-    if (slotKey === lastCountLogSlot) return
-    // §5.173：当前 0 人不落库、也不占槽 —— 本槽等到有人再落；统计采样不受影响。
-    if (!(Number(c.current) > 0)) return
-    const storeKey = `bmCountSlot:${cam && cam.id || 'default'}`
-    let seen = false
-    try { seen = localStorage.getItem(storeKey) === slotKey } catch (e) { /* 无痕模式等 */ }
-    if (seen) {
-      lastCountLogSlot = slotKey
-      return
-    }
-    lastCountLogSlot = slotKey
-    try { localStorage.setItem(storeKey, slotKey) } catch (e) { /* 忽略 */ }
-    emit({ type: 'count', counts: { ...c }, at: now, text, source: 'count', countLogSlot: slotKey })
+    const nonzero = Number(c.current) > 0
+    const loggable = nonzero && zc.countPush
+    emit({
+      type: 'count', counts: { ...c }, at: now, text, source: 'count',
+      countStatOnly: !loggable
+    })
   }
 
   /* ==================== 补拍窗口的"顺便看一眼" ==================== */
