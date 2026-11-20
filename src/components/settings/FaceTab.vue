@@ -450,17 +450,38 @@
       <div class="opt col">
         <span>
           <strong>
-            待录入人脸（{{ allPendingFaces.length }}）
+            待录入人脸（{{ pendingQualityFilter.length ? `${filteredPendingFaces.length} / ${allPendingFaces.length}` : allPendingFaces.length }}）
             <button class="mini-btn ghost" @click="pendingLibOpen = !pendingLibOpen">
               {{ pendingLibOpen ? '收起' : '管理' }}
             </button>
           </strong>
           <em
-            >按「人脸尺寸 + 清晰度 + 正脸程度」排好序了：优先录「优 / 良」，侧脸和糊脸录进去会拉低整个名字的识别率</em
+            >按「人脸尺寸 + 清晰度 + 正脸程度」排好序了：优先录「优 / 良」，侧脸和糊脸录进去会拉低整个名字的识别率；也可用下方评分筛选只看某一档</em
           >
         </span>
 
-          <div class="face-grid" ref="pendingGridEl" v-if="pendingLibOpen && allPendingFaces.length">
+        <!-- §5.169 评分筛选：差 / 一般 / 良 / 优，可多选；都不选 = 全部（含未评分）。
+             与排序正交：先按这里筛出子集，再按下面的「时间 / 质量」排。 -->
+        <div class="pending-qfilter" v-if="pendingLibOpen && allPendingFaces.length">
+          <span class="pq-label">评分筛选</span>
+          <button
+            v-for="f in SAMPLE_QUALITY_FILTERS"
+            :key="f.key"
+            type="button"
+            class="pq-chip"
+            :class="'q-' + f.tone + (pendingQualityFilter.includes(f.key) ? ' on' : '')"
+            :aria-pressed="pendingQualityFilter.includes(f.key)"
+            @click="togglePendingQuality(f.key)"
+          >{{ f.text }}</button>
+          <button
+            type="button"
+            class="pq-chip pq-clear"
+            v-if="pendingQualityFilter.length"
+            @click="clearPendingQuality"
+          >全部</button>
+        </div>
+
+          <div class="face-grid" ref="pendingGridEl" v-if="pendingLibOpen && filteredPendingFaces.length">
           <div class="face-card pending" v-for="pf in pagedPending" :key="pf.id">
             <img
               :src="pf.thumb"
@@ -501,6 +522,15 @@
               </button>
               <button class="mini-btn ghost" v-if="!enrollingPending[pf.id]" :disabled="enrollingPending[pf.id]" @click="doIgnorePending(pf)">忽略</button>
             </div>
+          </div>
+        </div>
+
+        <!-- 筛选命中 0 条但队列本来有脸：这是「筛没了」，不是「没脸」，别用 pendingEmpty 误导 -->
+        <div class="pending-empty" v-else-if="pendingLibOpen && pendingQualityFilter.length && allPendingFaces.length">
+          <span class="pe-icon" aria-hidden="true">🔍</span>
+          <div class="pe-body">
+            <strong class="pe-title">当前评分筛选下没有待录入人脸</strong>
+            <em class="pe-hint">队列里共 {{ allPendingFaces.length }} 张，但都不在选中的档位里。点「全部」清除筛选即可看回全部。</em>
           </div>
         </div>
 
@@ -999,7 +1029,7 @@ import { faceSilentBlockPush, normalizeTimeText } from '../../config/defaults.js
 
 /* 设置抽屉上下文（父级 SettingsDrawer 用 provide('sd', …) 暴露全部状态 / 函数 / emit / props） */
 const sd = inject('sd')
-const { FACE_DET_SIZES, FaceAssignSelect, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitPage, hitPageCount, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedFaceHits, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingSort, triggerEnrollFile, computed } = sd
+const { FACE_DET_SIZES, FaceAssignSelect, SAMPLE_QUALITY_FILTERS, allPendingFaces, assigningGroup, assigningSample, backendFaceHits, blockLibOpen, blockMergeThreshold, bulkSplitting, clearPendingQuality, commitRenameGroup, deletingFace, deletingSample, doAddPending, doBulkSplitAll, doClearFaces, doClearPrimarySample, doDeleteGroup, doDeleteSample, doEnrollHit, doFixHit, doIgnoreAllHits, doIgnoreAllPending, doIgnoreHit, doIgnorePagePending, doIgnorePending, doMarkStranger, doMergeGroup, doSetPrimaryCard, doSetPrimarySample, doUnmarkStranger, emit, enrollFileEl, enrollMsg, enrollState, enrollingPending, faceAttrText, faceBackendOn, faceGroups, faceLib, faceLibOpen, faceNameOptions, faceRenameKey, faceRenameText, faceTuneOpen, filteredPendingFaces, fixingHit, fmtPendingAt, gpuReady, gpuText, groupAssign, groupBySim, groupThreshold, groupedExtra, hidden, hitAssign, hitEmpty, hitMarginThreshold, hitPage, hitPageCount, hitRefreshNote, hitRefreshing, hitReviewOpen, libGridEl, libPage, libPageCount, mergeAllChecked, mergeSelCount, mergeSelected, mergeThresholdShown, mergingGroup, mixedGroupNameCount, onEnrollFile, onGroupAssign, onSampleAssign, openPendingShot, opts, otherNames, pagedFaceGroups, pagedFaceHits, pagedPending, pendingAssign, pendingEmpty, pendingGridEl, pendingLibOpen, pendingPage, pendingPageCount, pendingQualityFilter, pendingRefreshNote, pendingRefreshing, pendingSort, pfQuality, pfRecommended, pfScoreTip, props, ref, refreshBackendFaceHits, refreshBackendPending, renamingFace, resetFaceTune, sampleAssign, selectedGroup, selectedGroupKey, settingPrimary, simPct, splitNames, startRenameGroup, strangerMarks, toggleGroupBySim, toggleGroupPanel, toggleMergeAll, togglePendingQuality, togglePendingSort, triggerEnrollFile, computed } = sd
 const { cameras, options, hiddenIds, layouts, layoutKey, native, events, openTab, tempSilent } = props
 
 /* ---------------- 人脸静默（options.face.silent） ---------------- */

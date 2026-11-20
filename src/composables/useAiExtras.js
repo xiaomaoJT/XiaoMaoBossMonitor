@@ -41,7 +41,7 @@ import { getFlowEngine } from './useFlowMatch.js'
    （statPersonHit 就是「识别人次」那个计数器），这里只负责在识别那一刻喂进去。 */
 import { statPersonHit } from './useDailyStats.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf } from '../config/defaults.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf, COUNT_STAT_INTERVAL_MS } from '../config/defaults.js'
 import { pendingSampleMetrics, toGray } from './faceSampleScore.js'
 
 /** COCO 17 关键点下标 */
@@ -235,6 +235,8 @@ export function useAiExtras(options) {
    */
   const faceConfirmAt = new Map()
   let lastCountPushAt = 0
+  /** §5.168 统计采样的独立计时器（与推送计时器分开） */
+  let lastCountStatAt = 0
   let zonesKey = ''
 
   function faceConf() {
@@ -713,18 +715,14 @@ export function useAiExtras(options) {
   }
 
   /* ==================== 计数 ==================== */
+  /* §5.168 计数「检测即计入统计」：与后端 analyzer.mjs 同一套两条计时器。
+   * 统计采样（countStatOnly）短间隔落库 + 统计但不推送；
+   * 定期推送（countPush + countIntervalSec）保留原播报语义。 */
   function maybeCountPush(now, emit, cam) {
     const zc = zoneConf()
     if (!camExtOn(cam, 'zone')) return
-    if (!zc.countEnabled || !zc.countPush) return
-    // 第一次不推：否则刚打开页面就会收到一条「当前 0 人」，没有信息量
-    if (!lastCountPushAt) {
-      lastCountPushAt = now
-      return
-    }
-    const interval = Math.max(10, Number(zc.countIntervalSec) || 60) * 1000
-    if (now - lastCountPushAt < interval) return
-    lastCountPushAt = now
+    if (!zc.countEnabled) return
+
     const c = counts.value
     const mode = zc.countMode || 'current'
     const text =
@@ -733,12 +731,26 @@ export function useAiExtras(options) {
         : mode === 'both'
           ? `当前 ${c.current} 人 · 累计经过 ${c.totalIn} 人次`
           : `当前画面 ${c.current} 人`
+
+    // ① 统计采样：只认 countEnabled，短间隔，带标记 → onAlarm 不本地提醒、不推送
+    if (!lastCountStatAt || now - lastCountStatAt >= COUNT_STAT_INTERVAL_MS) {
+      lastCountStatAt = now
+      emit({
+        type: 'count', counts: { ...c }, at: now, text, source: 'count', countStatOnly: true
+      })
+    }
+
+    // ② 定期推送：保持原语义（首次不推 + 长间隔），不带标记 → 照常推送
+    if (!zc.countPush) return
+    if (!lastCountPushAt) {
+      lastCountPushAt = now
+      return
+    }
+    const interval = Math.max(10, Number(zc.countIntervalSec) || 60) * 1000
+    if (now - lastCountPushAt < interval) return
+    lastCountPushAt = now
     emit({
-      type: 'count',
-      counts: { ...c },
-      at: now,
-      text,
-      source: 'count'
+      type: 'count', counts: { ...c }, at: now, text, source: 'count'
     })
   }
 

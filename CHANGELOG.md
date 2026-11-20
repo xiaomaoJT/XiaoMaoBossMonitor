@@ -26,6 +26,27 @@
 
 ### 修复
 
+- **待录入人脸加「评分筛选」（差 / 一般 / 良 / 优，可多选）**：完整版手册 §5.169
+  在大屏「人脸识别 → 待录入人脸」加了按样本质量的筛选，本仓库同步同一套：
+  `src/composables/faceSampleScore.js` 新增 `SAMPLE_QUALITY_FILTERS` 与纯函数
+  `matchQualityFilter`（档位 key 与卡片质量徽标同源，空选=不过滤、未评分不命中任何非空档），
+  `SettingsDrawer.vue`（筛选状态 / localStorage / computed / 分页 / provide）、
+  `settings/FaceTab.vue`（筛选 chips + 专属空态）、`styles/settings.css`（chips 配色）
+  一并接上。筛选与「时间 / 质量」排序正交：先筛出子集再排序。
+- **设置页宽下拉右侧被裁**：完整版手册 §5.170 修「变动档次」这类 `.mini.wide`
+  下拉箭头被抽屉裁掉（左侧说明把按钮挤到 144px），本仓库 `styles/settings.css`
+  同步按 `:has(.field.mini.wide)` 只对该行允许说明收缩、宽下拉容器不缩。
+- **人员计数计入统计（页面内检测）**：完整版手册 §5.168 把 `count` 事件从
+  「定期推送人数」拆出来——开了人员计数就每 60 秒落一条只进统计、不推送的采样
+  （`COUNT_STAT_INTERVAL_MS` / `countStatOnly`），否则刚开计数当天统计「计数」恒为 0。
+  本仓库同步页面内检测这一侧：`defaults.js` 常量、`useAiExtras.js` 的双计时器拆分、
+  `App.vue` 的 `countStatOnly` 本地提醒闸门（采样事件不响铃、不弹卡）。
+  **完整版后端的采样落库与推送统计由未开源引擎负责**，本仓库只同步前端本地检测链路。
+- **人脸静默本地提醒补齐**：完整版手册 §5.155 修复「推送三端安静了、大屏本机
+  却照样响」的另一半根因，本仓库 `App.vue` 的 `onAlarm` 同步把本地提醒（声音 /
+  通知卡片 / 桌面通知 / 标题闪烁）也纳入 `faceSilentBlockPush` 闸门，并把静默文案
+  收敛为 `defaults.js` 的 `FACE_SILENT_NOTE`（`useAlertPush.js` 与本地提醒同用一份）。
+  事件照记、统计照算，只是不吵。
 - **设置页 TG 指令表补 `/misrec`**：完整版后端早已支持「误认排行」，本仓库
   `src/components/SettingsDrawer.vue` 的 `TG_COMMANDS` 却漏了这一条，指令表少一项。
   注意本仓库**不含** Telegram Bot 组件（见 README 第四章），这里补的是设置页那份

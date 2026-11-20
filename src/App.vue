@@ -299,6 +299,9 @@ import {
   normalizeCameraSilent,
   normalizeFlows,
   enforceFlowZonePrerequisites,
+  faceSilentBlockPush,
+  isFaceHit,
+  isFlowEvent,
   syncChannelCameras
 } from './config/defaults'
 import { SECRET_SCOPE } from './config/auth'
@@ -2579,20 +2582,21 @@ function onAlarm(payload) {
   const cam = cameras.value.find((c) => c.id === payload.id) || {}
 
   appendEvent(record)
-  if (options.alarmSound) beep(payload.type)
   /*
-   * ⚠️ 这里原来会 showToast(`${name}：${brief}`) —— 报警时在顶部正中弹一条
-   * 「大厅：监测到画面变动」式的文字提示（item 118 已去掉）。
-   * 原因：它和左上角的报警通知卡片、还有声音、标题闪烁是同一件事讲三遍，
-   * 而顶部正中这条最挡画面（正好压在画面上方），且和事件面板里的文案重复。
-   * 报警的呈现统一交给 NotifyStack（可配四角）+ 声音 + 标题闪烁。
-   * 其它场景的 toast（保存成功、切通道、导出完成…）是"操作反馈"，全部保留。
+   * 人脸静默先于一切本地提醒判定（与推送链路同一份 faceSilentBlockPush）：
+   * 否则会出现「推送三端安静了、本机却照样响」。事件照记、统计照算，只是不吵。
+   * countStatOnly 是计数统计采样（每 60 秒一条），只进事件列表 + 统计，
+   * 若照常提醒就是每 60 秒响一次，把真正的报警淹没。判定与后端同源。
    */
-
-  // 报警通知卡片（带缩略图，10 秒自动消失）
-  pushNotify(record)
-  notifyDesktop(record)
-  flashTitle()
+  const faceSilent =
+    isFaceHit(record) && !isFlowEvent(record) && faceSilentBlockPush(options.face, record.faceName, Date.now())
+  if (!faceSilent && record.countStatOnly !== true) {
+    if (options.alarmSound) beep(payload.type)
+    // 报警通知卡片（带缩略图，10 秒自动消失）
+    pushNotify(record)
+    notifyDesktop(record)
+    flashTitle()
+  }
 
   /*
    * 统计打点（item 111）。

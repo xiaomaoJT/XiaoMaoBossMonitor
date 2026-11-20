@@ -904,6 +904,59 @@
   box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ok-text, #2f9e44) 55%, transparent);
 }
 
+/*
+ * §5.169 待录入「评分筛选」chips（差 / 一般 / 良 / 优，可多选）。
+ * 排版贴着 face-acts 的手感：小圆角、11.5px、未选中 ghost、选中按档位语义上色。
+ * 四档色调与 pf-score 徽标一致（ok=绿 / warn=黄 / bad=红），用户扫一眼就对得上。
+ */
+.sd-scope .pending-qfilter{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.sd-scope .pending-qfilter .pq-label{
+  font-size: 11.5px;
+  color: var(--text-dim-2);
+  white-space: nowrap;
+}
+.sd-scope .pending-qfilter .pq-chip{
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim-2);
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sd-scope .pending-qfilter .pq-chip:hover{
+  border-color: var(--accent);
+  color: var(--text-soft);
+}
+.sd-scope .pending-qfilter .pq-chip.on.q-bad{
+  background: color-mix(in srgb, var(--danger-text, #c92a2a) 22%, transparent);
+  border-color: color-mix(in srgb, var(--danger-text, #c92a2a) 50%, transparent);
+  color: var(--danger-text, #c92a2a);
+}
+.sd-scope .pending-qfilter .pq-chip.on.q-warn{
+  background: color-mix(in srgb, var(--warn-text) 24%, transparent);
+  border-color: color-mix(in srgb, var(--warn-text) 55%, transparent);
+  color: var(--warn-text);
+}
+.sd-scope .pending-qfilter .pq-chip.on.q-ok{
+  background: color-mix(in srgb, var(--ok-text, #2f9e44) 22%, transparent);
+  border-color: color-mix(in srgb, var(--ok-text, #2f9e44) 50%, transparent);
+  color: var(--ok-text, #2f9e44);
+}
+.sd-scope .pending-qfilter .pq-chip.pq-clear.on,
+.sd-scope .pending-qfilter .pq-chip.pq-clear{
+  margin-left: 2px;
+}
+
 /* 归到一组的卡片：描边稍重，提示"这不止一条记录" */
 .sd-scope .face-card.grouped{
   border-color: color-mix(in srgb, var(--accent) 34%, var(--line-soft));
@@ -2347,6 +2400,22 @@
   width: auto;
   min-width: 210px;
   max-width: 100%;
+}
+
+/*
+ * §5.170 修「变动档次」这类 .mini.wide 下拉右侧被裁。
+ * 根因（真 Chrome 量到）：.opt 是 flex + space-between，左边说明 <span> 的内容宽
+ * 把 .sf-wrap 挤到 144px；而按钮 min-width:210px + flex:0 0 auto 不肯缩，
+ * 于是溢出到抽屉 overflow:hidden 之外被切掉下拉箭头。
+ * 只对「含 .mini.wide 的那一行」生效：说明文字允许收缩换行，宽下拉的容器不缩 ——
+ * 两者合起来按钮正好贴住右边界、箭头完整可见。普通 .mini 行不受影响。
+ */
+.sd-scope .opt:has(.field.mini.wide) > span{
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.sd-scope .sf-wrap:has(.field.mini.wide){
+  flex: 0 0 auto;
 }
 
 .sd-scope .unit{

@@ -283,3 +283,31 @@ export function sampleQualityLabel(total) {
 
 /** 「建议先录这些」的阈值：低于它的样本大概率是侧脸/糊脸/太小 */
 export const SAMPLE_SCORE_RECOMMEND = 0.55
+
+/**
+ * 待录入列表的「评分筛选」四档（低 → 高）。
+ * key 与 sampleQualityLabel 完全一致 —— 卡片上写「良」的，按「良」筛就该命中，
+ * 不能在筛选这里再写一套阈值/文案，否则两处迟早对不上。
+ * 「未评分」（key='unknown'）刻意不列为筛选项：那是"没量过几何量"，不是一档质量。
+ */
+export const SAMPLE_QUALITY_FILTERS = [
+  { key: 'poor', text: '差', tone: 'bad' },
+  { key: 'fair', text: '一般', tone: 'warn' },
+  { key: 'good', text: '良', tone: 'ok' },
+  { key: 'great', text: '优', tone: 'ok' }
+]
+
+/**
+ * 一条待录入是否命中评分筛选（纯函数，探针可直接真执行）。
+ *
+ * @param {number} score 样本总分；<0 或非数 = 未评分
+ * @param {string[]} keys 选中的档位 key 数组；**空数组 = 不过滤**（未评分也照常显示）
+ * @returns {boolean}
+ */
+export function matchQualityFilter(score, keys) {
+  const sel = Array.isArray(keys) ? keys : []
+  if (!sel.length) return true
+  const s = Number(score)
+  if (!Number.isFinite(s) || s < 0) return false
+  return sel.indexOf(sampleQualityLabel(s).key) >= 0
+}

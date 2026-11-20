@@ -28,6 +28,13 @@ import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
 import { PENDING_DEDUPE, BLOCK_MERGE, blockMergeThreshold, blockMergeTarget, HIT_MARGIN, hitMarginThreshold } from '../composables/vecMatch.js'
 
 /**
+ * 计数「检测即计入统计」的采样间隔（毫秒）：开了人员计数就按这个间隔落一条
+ * count 事件进统计（不推送）。以前 count 绑在 countPush（默认 4 小时）+ 首次不推，
+ * 刚开计数的当天统计页「计数」恒为 0。useAiExtras.js 引用同一份值。
+ */
+export const COUNT_STAT_INTERVAL_MS = 60 * 1000
+
+/**
  * 通道静默的默认渠道：三端全静默。
  * 用户主动为某一路配静默，本意就是"这一路别吵我"，所以默认三端都静。
  *
@@ -1977,6 +1984,12 @@ export function normalizeFaceSilent(face) {
  * @param {number} [now]    当前时间戳（默认系统时间）
  * @returns {boolean}
  */
+/**
+ * 「人脸静默」命中时写进推送状态（pushError）的标准文案。后端 onState 靠它
+ * 精确比对落 face_silent 标记；文案改了要连消费方一起改。
+ */
+export const FACE_SILENT_NOTE = '人脸静默时段内，该人脸组的命中不推送'
+
 export function faceSilentBlockPush(face, faceName, now = Date.now()) {
   const cfg = face && face.silent
   if (!cfg || cfg.enabled !== true) return false

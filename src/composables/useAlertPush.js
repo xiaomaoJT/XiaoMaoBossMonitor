@@ -43,6 +43,7 @@ import {
   criticalEndSends,
   digestCfgOf,
   digestIntervalLabel,
+  FACE_SILENT_NOTE,
   faceSilentBlockPush,
   isWallAlignedInterval,
   isFaceHit,
@@ -2733,7 +2734,9 @@ export function useAlertPush(options, hooks = {}) {
      * 判定是 defaults.js 里的纯函数，前后端共用一条（后端经 liveView 读同一份配置）。
      */
     if (isFaceHit(record) && !isFlowEvent(record) && faceSilentBlockPush(options.face, record.faceName, now)) {
-      onState(record.key, 'off', '人脸静默时段内，该人脸组的命中不推送')
+      // ⚠️ 文案必须是 defaults.FACE_SILENT_NOTE：后端 onState 靠**精确比对**这条
+      // 文案落 events.face_silent 标记，托盘桌面通知与大屏本地提醒靠标记一起安静。
+      onState(record.key, 'off', FACE_SILENT_NOTE)
       return record
     }
     /*
