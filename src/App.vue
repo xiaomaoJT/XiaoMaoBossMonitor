@@ -2581,12 +2581,17 @@ function onAlarm(payload) {
   const record = buildRecord(payload)
   const cam = cameras.value.find((c) => c.id === payload.id) || {}
 
-  appendEvent(record)
+  /*
+   * §5.172 统计采样（countStatOnly）：只喂统计，不进事件列表 / 不落 IndexedDB /
+   * 不响铃 / 不推送。§5.168 时它进列表刷屏；统计在下面的 statEvent 里照记，
+   * 统计页「计数」照常实时。周期性落库那条（countLogSlot）不带此标记，照常全流程。
+   */
+  if (record.countStatOnly !== true) appendEvent(record)
   /*
    * 人脸静默先于一切本地提醒判定（与推送链路同一份 faceSilentBlockPush）：
    * 否则会出现「推送三端安静了、本机却照样响」。事件照记、统计照算，只是不吵。
-   * countStatOnly 是计数统计采样（每 60 秒一条），只进事件列表 + 统计，
-   * 若照常提醒就是每 60 秒响一次，把真正的报警淹没。判定与后端同源。
+   * countStatOnly 是计数统计采样（每 60 秒一条），只喂统计、不提醒、不推三端，
+   * 否则每 60 秒响一次会把真正的报警淹没。判定与后端同源。
    */
   const faceSilent =
     isFaceHit(record) && !isFlowEvent(record) && faceSilentBlockPush(options.face, record.faceName, Date.now())
@@ -2653,6 +2658,9 @@ function onAlarm(payload) {
      */
     return
   }
+
+  // §5.172 计数统计采样：只喂统计，不推三端（与后端 handleEvent 同一判定）
+  if (record.countStatOnly === true) return
 
   push.handleAlarm(record)
 }

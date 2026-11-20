@@ -28,11 +28,53 @@ import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
 import { PENDING_DEDUPE, BLOCK_MERGE, blockMergeThreshold, blockMergeTarget, HIT_MARGIN, hitMarginThreshold } from '../composables/vecMatch.js'
 
 /**
- * 计数「检测即计入统计」的采样间隔（毫秒）：开了人员计数就按这个间隔落一条
- * count 事件进统计（不推送）。以前 count 绑在 countPush（默认 4 小时）+ 首次不推，
- * 刚开计数的当天统计页「计数」恒为 0。useAiExtras.js 引用同一份值。
+ * 计数「检测即计入统计」的采样间隔（毫秒）。
+ * 只要开了人员计数，就按这个间隔产一条 count 采样，**只喂统计、不落库、不推送**：
+ * 统计页「计数」照常实时更新，但事件库 / 日志-事件不被刷屏。
+ * 以前 count 绑在 countPush（默认 4 小时）+ 首次不推，刚开计数的当天统计页「计数」恒为 0。
+ * useAiExtras.js 引用同一份值。
  */
 export const COUNT_STAT_INTERVAL_MS = 60 * 1000
+
+/**
+ * 计数「按统计推送间隔落库」的槽位号（§5.172）。
+ *
+ * 槽位以**本地 00:00 为锚点**均分一天：间隔 12 小时 → 槽位 0（00:00~12:00）、
+ * 1（12:00~24:00），一天 2 条；间隔 4 小时 → 一天 6 条；10 分钟 → 144 条。
+ * 用绝对时间算（而不是「距上次推送多久」的进程内计时器），因此服务重启 /
+ * 改间隔后不会重新起算、也不会把当前槽位重复落一条 —— 判重只需记住槽位号。
+ *
+ * @param {number} now       当前时间戳（ms）
+ * @param {number} intervalSec 统计推送间隔（秒），非法值回落到 4 小时
+ * @param {number} [tzOffsetMin] 本地时区偏移（分钟，Date.getTimezoneOffset 的**相反数**）；
+ *                               传入可让纯函数脱离宿主时区做确定性测试，缺省用本地时区
+ * @returns {{slot:number, dayKey:string, startedAt:number}}
+ *   slot     当天内的槽位序号（0 起）
+ *   dayKey   本地日期 YYYY-MM-DD，跨天即变（判重 key 要带上它）
+ *   startedAt 该槽位起点的绝对时间戳（ms，UTC epoch 口径）
+ */
+export function countLogSlot(now, intervalSec, tzOffsetMin) {
+  const t = Number(now) || Date.now()
+  let sec = Math.floor(Number(intervalSec))
+  if (!Number.isFinite(sec) || sec < 10 || sec > 86400) sec = 14400
+  const ms = sec * 1000
+  const offMin = Number.isFinite(tzOffsetMin)
+    ? Number(tzOffsetMin)
+    : -new Date(t).getTimezoneOffset()
+  const offMs = offMin * 60 * 1000
+  const local = t + offMs
+  const dayStartLocal = Math.floor(local / 86400000) * 86400000
+  const dayKeyDate = new Date(dayStartLocal)
+  const yyyy = dayKeyDate.getUTCFullYear()
+  const mm = String(dayKeyDate.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(dayKeyDate.getUTCDate()).padStart(2, '0')
+  const slot = Math.max(0, Math.min(Math.floor(86400 / sec) - 1, Math.floor((local - dayStartLocal) / ms)))
+  return {
+    slot,
+    dayKey: `${yyyy}-${mm}-${dd}`,
+    startedAt: dayStartLocal + slot * ms - offMs
+  }
+}
 
 /**
  * 通道静默的默认渠道：三端全静默。
@@ -1705,7 +1747,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.9.4'
+  version: '1.9.5'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
