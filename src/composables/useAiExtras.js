@@ -41,7 +41,7 @@ import { getFlowEngine } from './useFlowMatch.js'
    （statPersonHit 就是「识别人次」那个计数器），这里只负责在识别那一刻喂进去。 */
 import { statPersonHit } from './useDailyStats.js'
 import { pendingDedupeSec, hitMarginThreshold } from './vecMatch.js'
-import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf, COUNT_STAT_INTERVAL_MS } from '../config/defaults.js'
+import { FLOW_FULL_ZONE_NAME, fullFrameZone, isFlowFullZone, hitConfirmConf, hitConfirmStep, faceQualityConf, faceQualityPassed, yawFromKps, faceMaxFaces, faceAttrConf, COUNT_STAT_INTERVAL_MS, countText } from '../config/defaults.js'
 import { pendingSampleMetrics, toGray } from './faceSampleScore.js'
 
 /** COCO 17 关键点下标 */
@@ -217,6 +217,8 @@ export function useAiExtras(options) {
   const faces = ref([])
   const poses = ref([])
   const counts = ref({ current: 0, totalIn: 0, totalOut: 0 })
+  /** §5.174：有真实圈选区域（且没被走入/走出总闸关掉）时 totalIn 才有意义 */
+  const countZoneOn = () => tracker.zones.some((z) => !z.virtual && z.enterExit !== false)
   /** 扩展功能的运行状态，给设置页显示 */
   const status = ref({ face: '', pose: '', tracks: 0 })
 
@@ -726,18 +728,15 @@ export function useAiExtras(options) {
 
     const c = counts.value
     const mode = zc.countMode || 'current'
-    const text =
-      mode === 'total'
-        ? `累计经过 ${c.totalIn} 人次`
-        : mode === 'both'
-          ? `当前 ${c.current} 人 · 累计经过 ${c.totalIn} 人次`
-          : `当前画面 ${c.current} 人`
+    // §5.174：真实区域判定与完整版后端 analyzer 同一套，无区域时只显示当前人数
+    const hasZone = countZoneOn()
+    const text = countText(mode, c, { hasZone })
 
     const nonzero = Number(c.current) > 0
     const loggable = nonzero && zc.countPush
     emit({
-      type: 'count', counts: { ...c }, at: now, text, source: 'count',
-      countStatOnly: !loggable
+      type: 'count', counts: { ...c, zoned: hasZone }, at: now, text, source: 'count',
+      countZoned: hasZone, countStatOnly: !loggable
     })
   }
 
@@ -826,7 +825,7 @@ export function useAiExtras(options) {
     return out
   }
 
-  return { step, reset, probe, tracks, faces, poses, counts, status, tracker }
+  return { step, reset, probe, tracks, faces, poses, counts, status, tracker, countZoneOn }
 }
 
 /**

@@ -412,7 +412,7 @@ import { ensureJessibuca, isJessibucaReady } from '../composables/useJessibuca'
 import { compareFrames, sensitivityToThreshold } from '../composables/useMotion'
 import { aiState, detectPersons, loadModel, loadPersonModel, setGpuPref } from '../composables/useAiDetector'
 import { activeDetects, activeFeatures, camExtOn, motionOn, useAiExtras } from '../composables/useAiExtras'
-import { PUSH_CHANNEL_KEYS, channelUsable } from '../config/defaults.js'
+import { PUSH_CHANNEL_KEYS, channelUsable, countText } from '../config/defaults.js'
 
 const props = defineProps({
   cam: { type: Object, required: true },
@@ -1773,12 +1773,8 @@ function drawOverlay() {
   if (zoneCfg.countEnabled && zoneCfg.showOnScreen !== false && camExtOn(props.cam, 'zone')) {
     const c = extCounts.value
     const mode = zoneCfg.countMode || 'current'
-    const text =
-      mode === 'total'
-        ? `累计 ${c.totalIn} 人次`
-        : mode === 'both'
-          ? `${c.current} 人 · 累计 ${c.totalIn}`
-          : `${c.current} 人`
+    // §5.174：与事件文案同一份口径，未圈真实区域时不显示恒 0 的「累计」
+    const text = countText(mode, c, { hasZone: extras.countZoneOn(), short: true })
     ctx.font = `600 ${Math.round(12 * dpr)}px -apple-system, "PingFang SC", sans-serif`
     const tw = ctx.measureText(text).width
     const bx = w - tw - 18 * dpr

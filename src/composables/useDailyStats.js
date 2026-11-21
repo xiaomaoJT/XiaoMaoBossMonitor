@@ -199,6 +199,12 @@ function emptyDay() {
     alarms: 0,
     /** 按类型的报警次数 */
     byType: {},
+    /**
+     * §5.174 计数按通道拆分：{ count: { [通道名]: 次数 } }。
+     * 只记 count 一类 —— 用户要的是「计数条形按通道分色」，别的类型不拆；
+     * 用通道名做 key，托盘统计的白名单快照就能直接拿去显示，不用再查配置里的 id→name。
+     */
+    byTypeCam: {},
     /** 推送：{ ding:{ok,fail}, wecom:{...}, tg:{...} } */
     push: { ding: { ok: 0, fail: 0 }, wecom: { ok: 0, fail: 0 }, tg: { ok: 0, fail: 0 } },
     /** 出现过的人次（每条人脸/识别事件算一次，**含陌生人**） */
@@ -324,6 +330,7 @@ function prune(days) {
       ...base,
       ...d,
       byType: { ...base.byType, ...(d.byType || {}) },
+      byTypeCam: normTypeCam(d.byTypeCam),
       push: {
         ding: { ...base.push.ding, ...((d.push || {}).ding || {}) },
         wecom: { ...base.push.wecom, ...((d.push || {}).wecom || {}) },
@@ -348,6 +355,22 @@ function prune(days) {
     }
   })
   return out
+}
+
+/**
+ * 计数通道拆分的归一化：只留 count 一类、通道名限长、次数夹成非负整数，
+ * 空桶丢掉。旧存档没有这个字段时回落 {}，页面就退回整条同色。
+ */
+function normTypeCam(src) {
+  const out = {}
+  const cc = src && src.count && typeof src.count === 'object' ? src.count : {}
+  const names = Object.keys(cc).slice(0, 32)
+  for (const raw of names) {
+    const name = String(raw).trim().slice(0, 24)
+    const n = Math.max(0, Math.floor(Number(cc[raw]) || 0))
+    if (name && n) out[name] = n
+  }
+  return { count: out }
 }
 
 function load() {
@@ -399,8 +422,13 @@ function bumpTypeHour(types, type, h) {
   types[type][h] += 1
 }
 
-/** 记一次报警（事件产生时调） */
-export function statAlarm(type, ts = Date.now()) {
+/**
+ * 记一次报警（事件产生时调）
+ * @param {string} type 类型
+ * @param {number} ts 时间
+ * @param {object} [meta] 事件记录；§5.174 只从它取通道名给 count 拆分用
+ */
+export function statAlarm(type, ts = Date.now(), meta) {
   try {
     const d = bucket(ts)
     const h = hourOf(ts)
@@ -409,6 +437,18 @@ export function statAlarm(type, ts = Date.now()) {
     H.alarms[h] += 1
     if (type) {
       d.byType[type] = (d.byType[type] || 0) + 1
+      /*
+       * §5.174：计数按通道累计一份，条形 / 饼图据此分色。只记 count ——
+       * 别的类型不拆，不必为没人看的多维表付存储成本。
+       */
+      if (type === 'count') {
+        const cam = String((meta && (meta.name || meta.id)) || '').trim().slice(0, 24)
+        if (cam) {
+          if (!d.byTypeCam || typeof d.byTypeCam !== 'object') d.byTypeCam = {}
+          if (!d.byTypeCam.count || typeof d.byTypeCam.count !== 'object') d.byTypeCam.count = {}
+          d.byTypeCam.count[cam] = (d.byTypeCam.count[cam] || 0) + 1
+        }
+      }
       bumpTypeHour(H.types, type, h)
       // 区域事件在库里是 enter/exit/loiter 三个细分，归到 zone 一类
       // （细分与 zone 各记一份，日汇总与小时桶保持同一口径）
@@ -579,7 +619,7 @@ export function statEvent(rec) {
     statChannelState(rec.type, t)
     return
   }
-  statAlarm(rec.type, t)
+  statAlarm(rec.type, t, rec)
   // 识别人次（含陌生人）：人脸事件、或任何带人名的记录都算
   if (rec.type === 'face' || rec.faceName) statPersonHit(rec.faceName, t)
   // 命中（只算库内的人）：判据用 defaults.isFaceHit，与推送 / 远端 /hits 同一份
@@ -706,6 +746,11 @@ export function aggregate(keys) {
     total.personHits += d.personHits || 0
     Object.keys(d.byType || {}).forEach((t) => {
       total.byType[t] = (total.byType[t] || 0) + (d.byType[t] || 0)
+    })
+    // §5.174：计数按通道跨天求和（与 byType.count 同源，逐通道之和恒等于总数）
+    const dcc = (d.byTypeCam && d.byTypeCam.count) || {}
+    Object.keys(dcc).forEach((cam) => {
+      total.byTypeCam.count[cam] = (total.byTypeCam.count[cam] || 0) + (Number(dcc[cam]) || 0)
     })
     CHANNELS.forEach(({ id }) => {
       const s = (d.push || {})[id] || {}

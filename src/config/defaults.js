@@ -39,6 +39,33 @@ import { PENDING_DEDUPE, BLOCK_MERGE, blockMergeThreshold, blockMergeTarget, HIT
 export const COUNT_STAT_INTERVAL_MS = 60 * 1000
 
 /**
+ * §5.174 计数文案的唯一拼装口径（完整版后端 analyzer / 本仓库 useAiExtras /
+ * 画面叠加层共用同一份）。
+ *
+ * 「累计经过」来自 Tracker 的真实区域 enter 事件：没圈过真实区域（或通道
+ * 「走入/走出」总闸关着）时它恒为 0，显示出来只会让人以为计数坏了。此时
+ * 只显示当前人数；`mode:'total'` 也回落到当前人数，不让事件只剩一个 0。
+ * `hasZone` 由跟踪器当前 zones 判定 —— 流向用的「画面全区域」是 virtual，
+ * 不计 totalIn，因此不算有效区域。
+ *
+ * @param {string} mode 计数展示模式：current / total / both
+ * @param {{current:number,totalIn:number}} c 计数快照
+ * @param {{hasZone?:boolean, short?:boolean}} [opts]
+ *        hasZone 缺省 true（老调用方保持原样）；short 用于画面叠加层的短文案
+ */
+export function countText(mode, c, opts) {
+  const cur = Math.max(0, Number(c && c.current) || 0)
+  const total = Math.max(0, Number(c && c.totalIn) || 0)
+  const hasZone = !opts || opts.hasZone !== false
+  const short = !!(opts && opts.short)
+  if (mode === 'total' && hasZone) return short ? `累计 ${total} 人次` : `累计经过 ${total} 人次`
+  if (mode === 'both' && hasZone) {
+    return short ? `${cur} 人 · 累计 ${total}` : `当前 ${cur} 人 · 累计经过 ${total} 人次`
+  }
+  return short ? `${cur} 人` : `当前画面 ${cur} 人`
+}
+
+/**
  * 通道静默的默认渠道：三端全静默。
  * 用户主动为某一路配静默，本意就是"这一路别吵我"，所以默认三端都静。
  *
@@ -1709,7 +1736,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.9.6'
+  version: '1.9.7'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'

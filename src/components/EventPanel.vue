@@ -431,7 +431,7 @@
               </div>
               <div class="dt-row" v-if="detail.counts">
                 <dt>人数统计</dt>
-                <dd>当前 {{ detail.counts.current }} 人 · 累计经过 {{ detail.counts.totalIn }} 人次</dd>
+                <dd>{{ countText('both', detail.counts, { hasZone: detail.countZoned !== false && detail.counts.zoned !== false }) }}</dd>
               </div>
               <div class="dt-row">
                 <dt>发生时间</dt>
@@ -615,7 +615,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { alarmDetail } from '../composables/useAlarmText'
-import { isFlowEvent } from '../config/defaults.js'
+import { countText, isFlowEvent } from '../config/defaults.js'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
