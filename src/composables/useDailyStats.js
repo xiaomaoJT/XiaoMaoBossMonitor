@@ -204,7 +204,7 @@ function emptyDay() {
      * 只记 count 一类 —— 用户要的是「计数条形按通道分色」，别的类型不拆；
      * 用通道名做 key，托盘统计的白名单快照就能直接拿去显示，不用再查配置里的 id→name。
      */
-    byTypeCam: {},
+    byTypeCam: { count: {} },
     /** 推送：{ ding:{ok,fail}, wecom:{...}, tg:{...} } */
     push: { ding: { ok: 0, fail: 0 }, wecom: { ok: 0, fail: 0 }, tg: { ok: 0, fail: 0 } },
     /** 出现过的人次（每条人脸/识别事件算一次，**含陌生人**） */
@@ -430,6 +430,15 @@ function bumpTypeHour(types, type, h) {
  */
 export function statAlarm(type, ts = Date.now(), meta) {
   try {
+    /*
+     * §5.177：没划真实区域的通道，它的「计数」只是画面实时人数（totalIn 恒 0，
+     * §5.174 文案已不显示累计），**不算一次计数报警**。这类事件若也记进来，
+     * 三个开了计数的通道会同频每 60s 各采样一次 → byTypeCam.count 条数完全相同，
+     * 分段里就冒出一条本不该存在的通道段。这里在统计唯一入口一次性挡掉：
+     * 采样（countStatOnly）、落库事件（countLogSlot）两条路径都经 statEvent → 本函数，
+     * 统一按 countZoned 判定；老事件没有该字段（undefined）照旧记，向后兼容。
+     */
+    if (type === 'count' && meta && meta.countZoned === false) return
     const d = bucket(ts)
     const h = hourOf(ts)
     const H = hoursOf(d)
