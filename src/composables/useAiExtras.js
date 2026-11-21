@@ -207,6 +207,7 @@ function emitFlowEvent(engine, m, ctx, emit) {
  */
 export { camExtOn, EXT_FEATURES, activeFeatures, featureState, motionOn, activeDetects, DETECT_FEATURES } from '../config/features.js'
 import { camExtOn } from '../config/features.js'
+import { dailyStats } from './useDailyStats.js'
 
 
 export function useAiExtras(options) {
@@ -241,6 +242,8 @@ export function useAiExtras(options) {
   /** §5.176 已落库的槽位 key；localStorage 判重，刷新不重置 */
   let lastCountLogSlot = ''
   let zonesKey = ''
+  /** §5.182：计数器当日键；跨天归零、当天首次从统计存档续上累计 */
+  let countsDayKey = ''
 
   function faceConf() {
     const c = options.face || {}
@@ -309,7 +312,7 @@ export function useAiExtras(options) {
     if (!camExtOn(cam, 'enterExit')) {
       zones = zones.map((z) => ({ ...z, enterExit: false }))
     }
-    const key = JSON.stringify(zones.map((z) => [z.id, z.rect, z.enterExit, z.loiter, z.loiterSec, z.loiterRadius, !!z.virtual]))
+    const key = JSON.stringify(zones.map((z) => [z.id, z.rect, z.enterExit, z.loiter, z.loiterSec, z.loiterRadius, !!z.virtual, z.countEnabled]))
     if (key === zonesKey) return
     zonesKey = key
     tracker.setZones(zones)
@@ -323,6 +326,25 @@ export function useAiExtras(options) {
     counts.value = { current: 0, totalIn: 0, totalOut: 0 }
     faceEventAt.clear()
     faceSeenAt.clear()
+    countsDayKey = ''
+  }
+
+  /**
+   * §5.182：每日 00:00 归零 + 重启从今日存档续上。
+   * 后端模式下统计存档由 /api/stats 同步到 dailyStats，所以这里读的是同一份权威。
+   * 只在跨天或首次进入时碰计数器，运行期绝不重复注入（否则会翻倍）。
+   */
+  function syncDailyCounts(now, cam) {
+    const key = countLogSlot(now, 14400).dayKey
+    if (key === countsDayKey) return
+    countsDayKey = key
+    tracker.clearZoneCounts()
+    try {
+      const day = dailyStats.days && dailyStats.days[key]
+      const all = day && day.byZoneCounts
+      const byZone = all && (all[cam && cam.id] || all[(cam && cam.name) || ''])
+      if (byZone && typeof byZone === 'object') tracker.restoreZoneCounts(byZone)
+    } catch (e) { /* 统计存档坏了不影响检测 */ }
   }
 
   /**
@@ -340,6 +362,7 @@ export function useAiExtras(options) {
 
     /* ---------- 1. 跟踪（零成本，始终跑） ---------- */
     syncZones(cam)
+    syncDailyCounts(now, cam)
     const res = tracker.update(persons || [], now)
     const live = res.tracks.filter((t) => t.hits >= tracker.minHits)
     tracks.value = live
@@ -729,10 +752,12 @@ export function useAiExtras(options) {
 
     const c = counts.value
     const mode = zc.countMode || 'current'
-    // §5.174：真实区域判定与完整版后端 analyzer 同一套，无区域时只显示当前人数
+    // §5.174：真实区域判定与后端 analyzer 同一套，无区域时只显示当前人数
     const hasZone = countZoneOn()
     const text = countText(mode, c, { hasZone })
-    const base = { type: 'count', counts: { ...c, zoned: hasZone }, at: now, text, source: 'count', countZoned: hasZone }
+    // §5.182：counts 内嵌区域级累计快照（zoneId -> {name,totalIn,totalOut}），
+    // 供统计按「通道 × 区域」分段 + 重启从今日存档恢复；统计侧从 counts.byZone 读。
+    const base = { type: 'count', counts: { ...c, zoned: hasZone, byZone: tracker.zoneCountSnapshot() }, at: now, text, source: 'count', countZoned: hasZone }
 
     // ① 统计采样：60 秒节奏，只喂统计
     if (!lastCountStatAt || now - lastCountStatAt >= COUNT_STAT_INTERVAL_MS) {

@@ -64,8 +64,71 @@ export class Tracker {
     this.nextId = 1
     /** @type {Array} 检测区域（由外部按通道配置注入） */
     this.zones = []
-    /** 累计统计：人次 */
+    /*
+     * 累计统计。§5.182：
+     *   - stats 是**全通道汇总**（画面人数 current / 总进 totalIn / 总出 totalOut），
+     *     等于各开启计数的真实区域之和，老代码读它照常工作；
+     *   - zoneStats 是**按区域独立累计**：zoneId -> { totalIn, totalOut }。
+     *     只有真实区域（非虚拟）且 countEnabled !== false 才累计。
+     *     两级分段 + 重启恢复都从这里取，stats 由它求和派生。
+     */
     this.stats = { current: 0, totalIn: 0, totalOut: 0 }
+    /** @type {Object<string,{totalIn:number,totalOut:number}>} */
+    this.zoneStats = {}
+  }
+
+  /** 是否计入某区域的计数（真实区域 + 区域级计数开关默认开） */
+  _countsFor(zone) {
+    return !!(zone && !zone.virtual && zone.countEnabled !== false)
+  }
+
+  /** 由 zoneStats 重算全通道汇总 totalIn / totalOut */
+  _recountStats() {
+    let ti = 0
+    let to = 0
+    for (const zs of Object.values(this.zoneStats)) {
+      ti += zs.totalIn || 0
+      to += zs.totalOut || 0
+    }
+    this.stats.totalIn = ti
+    this.stats.totalOut = to
+  }
+
+  /**
+   * §5.182 恢复注入：把某天各区域的累计人次灌进计数器（重启后从今日存档续上）。
+   * @param {Object<string,{totalIn?:number,totalOut?:number}>} zoneCounts zoneId -> 累计
+   */
+  restoreZoneCounts(zoneCounts) {
+    this.zoneStats = {}
+    if (zoneCounts && typeof zoneCounts === 'object') {
+      for (const [id, raw] of Object.entries(zoneCounts)) {
+        const ti = Math.max(0, Math.floor(Number(raw && raw.totalIn) || 0))
+        const to = Math.max(0, Math.floor(Number(raw && raw.totalOut) || 0))
+        this.zoneStats[id] = { totalIn: ti, totalOut: to }
+      }
+    }
+    this._recountStats()
+  }
+
+  /** 每日 00:00 归零：只清累计，保留轨迹（避免跨天误判为走出） */
+  clearZoneCounts() {
+    this.zoneStats = {}
+    this._recountStats()
+  }
+
+  /** 区域级累计快照，供采样事件携带 / 存档：{ zoneId: { name, totalIn, totalOut } } */
+  zoneCountSnapshot() {
+    const out = {}
+    for (const zone of this.zones) {
+      if (!this._countsFor(zone)) continue
+      const zs = this.zoneStats[zone.id]
+      out[zone.id] = {
+        name: zone.name || '区域',
+        totalIn: (zs && zs.totalIn) || 0,
+        totalOut: (zs && zs.totalOut) || 0
+      }
+    }
+    return out
   }
 
   /** 更新区域配置（设置里改了区域后调用） */
@@ -78,12 +141,19 @@ export class Tracker {
         if (!ids.has(k)) delete tr.zones[k]
       })
     }
+    // §5.182：区域被删时同步清掉它的累计，避免幽灵段；重算汇总
+    let changed = false
+    for (const k of Object.keys(this.zoneStats)) {
+      if (!ids.has(k)) { delete this.zoneStats[k]; changed = true }
+    }
+    if (changed) this._recountStats()
   }
 
   reset() {
     this.tracks = []
     this.nextId = 1
     this.stats = { current: 0, totalIn: 0, totalOut: 0 }
+    this.zoneStats = {}
   }
 
   /** 已确认（连续命中达标）的轨迹 */
@@ -284,7 +354,11 @@ export class Tracker {
           // 虚拟区域（人员流向的「画面全区域」）：只产事件，不计入人员计数
           virtual: !!zone.virtual
         })
-        if (!zone.virtual) this.stats.totalOut += 1
+        if (this._countsFor(zone)) {
+          const zs = this.zoneStats[key] || (this.zoneStats[key] = { totalIn: 0, totalOut: 0 })
+          zs.totalOut += 1
+          this._recountStats()
+        }
       }
     }
   }
@@ -320,7 +394,11 @@ export class Tracker {
             // 虚拟区域（人员流向的「画面全区域」）：只产事件，不计入人员计数
             virtual: !!zone.virtual
           })
-          if (!zone.virtual) this.stats.totalIn += 1
+          if (this._countsFor(zone)) {
+            const zs = this.zoneStats[zone.id] || (this.zoneStats[zone.id] = { totalIn: 0, totalOut: 0 })
+            zs.totalIn += 1
+            this._recountStats()
+          }
         }
       } else if (!inNow && st.inside) {
         /* ---- 离开 ---- */
@@ -341,7 +419,11 @@ export class Tracker {
             people: 1,
             virtual: !!zone.virtual
           })
-          if (!zone.virtual) this.stats.totalOut += 1
+          if (this._countsFor(zone)) {
+            const zs = this.zoneStats[zone.id] || (this.zoneStats[zone.id] = { totalIn: 0, totalOut: 0 })
+            zs.totalOut += 1
+            this._recountStats()
+          }
         }
       }
 

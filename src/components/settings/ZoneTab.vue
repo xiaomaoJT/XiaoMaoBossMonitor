@@ -135,6 +135,14 @@
           >
             徘徊
           </button>
+          <button
+            class="tag"
+            :class="{ on: r.zone.countEnabled !== false }"
+            title="这一区域是否计入「累计经过人次」（可多开，每人经过不同区域各记一次）"
+            @click="zoneUpdate(r.camId, r.zone.id, { countEnabled: r.zone.countEnabled === false })"
+          >
+            计数
+          </button>
           <button class="mini-btn danger" title="删除该区域" @click="zoneRemove(r.camId, r.zone.id)">删除</button>
         </div>
       </div>

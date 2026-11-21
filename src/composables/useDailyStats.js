@@ -77,10 +77,10 @@ import { AGE_BUCKETS, FACE_ATTR_TAGS, ageBucket, faceAttrTags, hasFaceAttrs } fr
 const KEY = 'monitor-wall-daily-stats-v1'
 /**
  * §5.178 计数口径版本：1 = 记 60 秒采样条数，2 = 记累计经过人次快照。
- * 写在存档根上，升级时一次性清掉旧口径计数 —— 否则 max() 会让旧条数
- * 一直压着新快照，用户升级后看到的还是老分段。
+ * 写在存档根上，升级时一次性把旧口径的计数清掉 —— 否则 max() 会让旧条数
+ * 一直压着新快照，用户升级后看到的还是老分段，以为没修好。
  */
-const COUNT_METRIC_VERSION = 2
+const COUNT_METRIC_VERSION = 3
 /** 保留天数（含今天） */
 export const KEEP_DAYS = 7
 /** 每天最多保留多少条命中明细（给统计页「最近命中记录」用；完整明细看事件列表 / /hits） */
@@ -206,11 +206,17 @@ function emptyDay() {
     /** 按类型的报警次数 */
     byType: {},
     /**
-     * §5.174 计数按通道拆分：{ count: { [通道名]: 次数 } }。
-     * 只记 count 一类 —— 用户要的是「计数条形按通道分色」，别的类型不拆；
-     * 用通道名做 key，托盘统计的白名单快照就能直接拿去显示，不用再查配置里的 id→name。
+     * §5.182 所有报警类型都按通道分段：{ [类型]: { [通道名]: 次数 } }。
+     * count 存「累计经过人次」快照，其余类型存该通道当天事件次数；
+     * 用通道名做 key，托盘统计的白名单快照拿去显示，不用再查配置里的 id→name。
      */
     byTypeCam: { count: {} },
+    /**
+     * §5.182 计数按「通道 + 区域」两级分段：
+     * { [通道名]: { [zoneId]: { name, totalIn, totalOut } } }。
+     * 只存开启计数的真实区域当日累计快照；与 byTypeCam.count 通道汇总同源。
+     */
+    byZoneCounts: {},
     /** 推送：{ ding:{ok,fail}, wecom:{...}, tg:{...} } */
     push: { ding: { ok: 0, fail: 0 }, wecom: { ok: 0, fail: 0 }, tg: { ok: 0, fail: 0 } },
     /** 出现过的人次（每条人脸/识别事件算一次，**含陌生人**） */
@@ -337,6 +343,7 @@ function prune(days) {
       ...d,
       byType: { ...base.byType, ...(d.byType || {}) },
       byTypeCam: normTypeCam(d.byTypeCam),
+      byZoneCounts: normZoneCounts(d.byZoneCounts),
       push: {
         ding: { ...base.push.ding, ...((d.push || {}).ding || {}) },
         wecom: { ...base.push.wecom, ...((d.push || {}).wecom || {}) },
@@ -364,19 +371,49 @@ function prune(days) {
 }
 
 /**
- * 计数通道拆分的归一化：只留 count 一类、通道名限长、次数夹成非负整数，
- * 空桶丢掉。旧存档没有这个字段时回落 {}，页面就退回整条同色。
+ * 通道分段的归一化：类型只认 ALARM_TYPES 白名单（区域细分不单列，统一归 zone），
+ * 通道名限长、计数夹成非负整数、空桶丢掉。旧存档只有 count 一类时其余为空，
+ * 页面照旧退回类型单色。
  */
 function normTypeCam(src) {
   const out = {}
-  const cc = src && src.count && typeof src.count === 'object' ? src.count : {}
-  const names = Object.keys(cc).slice(0, 32)
-  for (const raw of names) {
-    const name = String(raw).trim().slice(0, 24)
-    const n = Math.max(0, Math.floor(Number(cc[raw]) || 0))
-    if (name && n) out[name] = n
+  if (!src || typeof src !== 'object') return out
+  for (const t of ALARM_TYPES) {
+    const table = src[t.id] && typeof src[t.id] === 'object' ? src[t.id] : {}
+    const bucket = {}
+    for (const raw of Object.keys(table).slice(0, 32)) {
+      const name = String(raw).trim().slice(0, 24)
+      const n = Math.max(0, Math.floor(Number(table[raw]) || 0))
+      if (name && n) bucket[name] = n
+    }
+    if (Object.keys(bucket).length) out[t.id] = bucket
   }
-  return { count: out }
+  return out
+}
+
+/**
+ * 计数区域快照的归一化：{ 通道: { zoneId: { name, totalIn, totalOut } } }。
+ * 通道 / 区域名限长、zoneId 限长、次数夹成非负整数，且每通道最多 32 个区域 ——
+ * 防止脏子存档把 localStorage 撑爆（与通道白名单同一个理由）。
+ */
+function normZoneCounts(src) {
+  const out = {}
+  if (!src || typeof src !== 'object') return out
+  for (const rawCam of Object.keys(src).slice(0, 32)) {
+    const cam = String(rawCam).trim().slice(0, 24)
+    const table = src[rawCam] && typeof src[rawCam] === 'object' ? src[rawCam] : {}
+    const bucket = {}
+    for (const rawZone of Object.keys(table).slice(0, 32)) {
+      const id = String(rawZone).trim().slice(0, 64)
+      const z = table[rawZone] && typeof table[rawZone] === 'object' ? table[rawZone] : {}
+      const ti = Math.max(0, Math.floor(Number(z.totalIn) || 0))
+      const to = Math.max(0, Math.floor(Number(z.totalOut) || 0))
+      const name = String(z.name || '区域').trim().slice(0, 24)
+      if (id) bucket[id] = { name, totalIn: ti, totalOut: to }
+    }
+    if (cam && Object.keys(bucket).length) out[cam] = bucket
+  }
+  return out
 }
 
 function load() {
@@ -387,13 +424,16 @@ function load() {
     const saved = JSON.parse(raw)
     if (!saved || typeof saved !== 'object' || !saved.days) return emptyState()
     const days = prune(saved.days)
-    if (Number(saved.v) !== COUNT_METRIC_VERSION) {
-      // 旧存档的计数是采样条数，与新的人次快照量纲不同；清掉后由事件库回填
+    const savedV = Number(saved.v)
+    if (!Number.isFinite(savedV) || savedV < 2) {
+      // v1 的 byTypeCam.count / byType.count 是采样条数，与人次快照量纲不同。
+      // 清掉后由事件库 countCamByDay() 按 totalIn 回填，老数据照样能分色。
       for (const d of Object.values(days)) {
         d.byTypeCam = { count: {} }
         d.byType.count = 0
       }
     }
+    // v2 → v3：只新增全类型按通道 + 区域快照维度，不动已有人次值，无需清数据。
     return { days }
   } catch (e) {
     /* 存储坏了就从头统计，不影响功能 */
@@ -446,7 +486,7 @@ export function statAlarm(type, ts = Date.now(), meta) {
   try {
     /*
      * §5.177：没划真实区域的通道，它的「计数」只是画面实时人数（totalIn 恒 0，
-     * §5.174 文案已不显示累计），**不算一次计数报警**。这类事件若也记进来，
+     * 文案里 §5.174 已不显示累计），**不算一次计数报警**。这类事件若也记进来，
      * 三个开了计数的通道会同频每 60s 各采样一次 → byTypeCam.count 条数完全相同，
      * 分段里就冒出一条本不该存在的通道段。这里在统计唯一入口一次性挡掉：
      * 采样（countStatOnly）、落库事件（countLogSlot）两条路径都经 statEvent → 本函数，
@@ -461,26 +501,51 @@ export function statAlarm(type, ts = Date.now(), meta) {
     if (type) {
       d.byType[type] = (d.byType[type] || 0) + 1
       /*
-       * §5.174：计数按通道累计一份，条形 / 饼图据此分色。只记 count ——
-       * 别的类型不拆，不必为没人看的多维表付存储成本。
+       * §5.182 全类型按通道分段：count 记「累计经过人次」快照，其余类型记事件次数。
+       * 后端 record 用 name/id，分析器直接 emit 的事件用 camName/camId —— 两边都认。
        */
-      if (type === 'count') {
-        // 事件 record 用 name/id，分析器直接 emit 的用 camName/camId —— 两边都认
-        const cam = String((meta && (meta.name || meta.camName || meta.id || meta.camId)) || '').trim().slice(0, 24)
-        if (cam) {
-          if (!d.byTypeCam || typeof d.byTypeCam !== 'object') d.byTypeCam = {}
+      const cam = String((meta && (meta.name || meta.camName || meta.id || meta.camId)) || '').trim().slice(0, 24)
+      if (cam) {
+        if (!d.byTypeCam || typeof d.byTypeCam !== 'object') d.byTypeCam = {}
+        if (type === 'count') {
           if (!d.byTypeCam.count || typeof d.byTypeCam.count !== 'object') d.byTypeCam.count = {}
           /*
-           * §5.178：分段数字对齐通道画面上的「累计经过人次」，记 totalIn 快照，
-           * 不是 60 秒采样条数（同频采样会让两个通道条数恒等）。totalIn 单调
-           * 递增，取 max 即最新累计人次，重启归零也不抹小历史。
+           * 分段数字直接对齐通道画面上的「累计经过人次」，记 totalIn 快照而非条数。
+           * totalIn 单调递增，取 max 即该通道最新累计人次；重启归零也不会抹小历史。
            */
           const ti = Math.max(0, Math.floor(Number(meta.counts && meta.counts.totalIn) || 0))
           if (ti > (d.byTypeCam.count[cam] || 0)) d.byTypeCam.count[cam] = ti
+          // 区域级快照：只认 counts.byZone，老事件没有就跳过（页面退回通道单段）
+          const byZone = meta.counts && meta.counts.byZone
+          if (byZone && typeof byZone === 'object') {
+            if (!d.byZoneCounts || typeof d.byZoneCounts !== 'object') d.byZoneCounts = {}
+            if (!d.byZoneCounts[cam] || typeof d.byZoneCounts[cam] !== 'object') d.byZoneCounts[cam] = {}
+            for (const [zoneId, raw] of Object.entries(byZone)) {
+              const id = String(zoneId).trim().slice(0, 64)
+              const z = raw && typeof raw === 'object' ? raw : {}
+              const zti = Math.max(0, Math.floor(Number(z.totalIn) || 0))
+              const zto = Math.max(0, Math.floor(Number(z.totalOut) || 0))
+              const cur = d.byZoneCounts[cam][id] || { name: '区域', totalIn: 0, totalOut: 0 }
+              d.byZoneCounts[cam][id] = {
+                name: String(z.name || cur.name || '区域').trim().slice(0, 24),
+                // 同区域取 max：采样/落库两条路径可能交错，谁新都不许把累计抹小
+                totalIn: Math.max(cur.totalIn, zti),
+                totalOut: Math.max(cur.totalOut, zto)
+              }
+            }
+          }
+          // 类型总数同步改成各通道累计人次之和 —— 分段之和与总数天生对平
+          d.byType.count = Object.keys(d.byTypeCam.count)
+            .reduce((s, k) => s + (Number(d.byTypeCam.count[k]) || 0), 0)
+        } else if (STAT_ALARM_TYPES.some((t) => t.id === type)) {
+          // 其余类型：每通道当天事件次数累加，与 byType[type] 总量同源
+          const table = d.byTypeCam[type] || (d.byTypeCam[type] = {})
+          table[cam] = (Number(table[cam]) || 0) + 1
+        } else if (ZONE_ALIASES.includes(type)) {
+          // 区域细分统一归 zone 分段，与下面 byType.zone 的归并口径一致
+          const table = d.byTypeCam.zone || (d.byTypeCam.zone = {})
+          table[cam] = (Number(table[cam]) || 0) + 1
         }
-        // 类型总数 = 各通道人次之和，分段之和与总数对平
-        d.byType.count = Object.keys((d.byTypeCam && d.byTypeCam.count) || {})
-          .reduce((s, k) => s + (Number(d.byTypeCam.count[k]) || 0), 0)
       }
       bumpTypeHour(H.types, type, h)
       // 区域事件在库里是 enter/exit/loiter 三个细分，归到 zone 一类
@@ -780,12 +845,41 @@ export function aggregate(keys) {
     Object.keys(d.byType || {}).forEach((t) => {
       total.byType[t] = (total.byType[t] || 0) + (d.byType[t] || 0)
     })
-    // §5.178：通道值是「累计经过人次」快照（单调递增），跨天取最大值，不求和
-    const dcc = (d.byTypeCam && d.byTypeCam.count) || {}
-    Object.keys(dcc).forEach((cam) => {
-      const v = Math.max(0, Number(dcc[cam]) || 0)
-      if (v > (total.byTypeCam.count[cam] || 0)) total.byTypeCam.count[cam] = v
-    })
+    /*
+     * §5.178：通道值现在是「累计经过人次」快照（单调递增），跨天合并取**最大值**，
+     * 不能像别的类型那样求和 —— 否则同一批人在今天和明天各被记一次就会翻倍。
+     */
+    const dbtc = (d.byTypeCam && typeof d.byTypeCam === 'object') ? d.byTypeCam : {}
+    for (const t of ALARM_TYPES) {
+      const src = dbtc[t.id] && typeof dbtc[t.id] === 'object' ? dbtc[t.id] : {}
+      const dst = total.byTypeCam[t.id] || (total.byTypeCam[t.id] = {})
+      for (const [name, raw] of Object.entries(src)) {
+        const v = Math.max(0, Math.floor(Number(raw) || 0))
+        if (!name || !v) continue
+        // count 是当日人次快照，跨天取 max；其余类型是事件次数，跨天求和
+        if (t.id === 'count') {
+          if (v > (dst[name] || 0)) dst[name] = v
+        } else {
+          dst[name] = (Number(dst[name]) || 0) + v
+        }
+      }
+    }
+    // 区域快照：同名区域取 max（与 cnt 快照同口径），跨天不累加
+    const dbz = d.byZoneCounts && typeof d.byZoneCounts === 'object' ? d.byZoneCounts : {}
+    for (const [cam, table] of Object.entries(dbz)) {
+      const c = String(cam).trim().slice(0, 24)
+      if (!c || !table || typeof table !== 'object') continue
+      const dstCam = total.byZoneCounts[c] || (total.byZoneCounts[c] = {})
+      for (const [id, raw] of Object.entries(table)) {
+        const z = raw && typeof raw === 'object' ? raw : {}
+        const cur = dstCam[id] || { name: '区域', totalIn: 0, totalOut: 0 }
+        dstCam[id] = {
+          name: String(z.name || cur.name || '区域'),
+          totalIn: Math.max(cur.totalIn, Math.floor(Number(z.totalIn) || 0)),
+          totalOut: Math.max(cur.totalOut, Math.floor(Number(z.totalOut) || 0))
+        }
+      }
+    }
     CHANNELS.forEach(({ id }) => {
       const s = (d.push || {})[id] || {}
       total.push[id].ok += s.ok || 0
