@@ -442,7 +442,8 @@ export function statAlarm(type, ts = Date.now(), meta) {
        * 别的类型不拆，不必为没人看的多维表付存储成本。
        */
       if (type === 'count') {
-        const cam = String((meta && (meta.name || meta.id)) || '').trim().slice(0, 24)
+        // 事件 record 用 name/id，分析器直接 emit 的用 camName/camId —— 两边都认
+        const cam = String((meta && (meta.name || meta.camName || meta.id || meta.camId)) || '').trim().slice(0, 24)
         if (cam) {
           if (!d.byTypeCam || typeof d.byTypeCam !== 'object') d.byTypeCam = {}
           if (!d.byTypeCam.count || typeof d.byTypeCam.count !== 'object') d.byTypeCam.count = {}
@@ -609,7 +610,7 @@ export function statChannelState(state, ts = Date.now()) {
  *   所以真正写这份统计的只有后端一处，判定也只留这一处。
  *
  * @param {object} rec 事件记录（前端 record / 后端 record 同构：至少有
- *                      type / time / faceName / name / id / faceScore）
+ *                      type / time / faceName / name(id 或 camName/camId) / faceScore）
  */
 export function statEvent(rec) {
   if (!rec) return

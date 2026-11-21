@@ -28,15 +28,46 @@ import { FACE_TUNING, PENDING_FULL } from '../composables/useTracker.js'
 import { PENDING_DEDUPE, BLOCK_MERGE, blockMergeThreshold, blockMergeTarget, HIT_MARGIN, hitMarginThreshold } from '../composables/vecMatch.js'
 
 /**
- * 计数事件的唯一节奏（毫秒）：沿用用户最初看到的「一分钟一条」监听频率。
- *
- * §5.173 起不再看 `zone.countIntervalSec`（统计推送间隔），也不做 00:00 分槽 /
- * localStorage 判重。每 60 秒按当前人数分流：
- *   · 非 0 人 → 正常 count 事件（落库 + 统计 + 推送，仍受 countPush 开关约束）；
- *   · 0 人 → countStatOnly 事件，只喂统计，不落库 / 不推送 / 不进日志-事件。
+ * 计数**统计采样**的节奏（毫秒）：每 60 秒一条，带 `countStatOnly`。
+ * 这条只喂统计（统计页 / 图表的分通道数据），不落库、不推送、不进日志-事件。
+ * 事件落库另按 `zone.countIntervalSec`（统计推送间隔）分槽。
  * useAiExtras.js 引用同一份值；引擎侧的完整版还有后端同源实现。
  */
 export const COUNT_STAT_INTERVAL_MS = 60 * 1000
+
+/**
+ * §5.176 计数**落库**槽位：按统计推送间隔以本地 00:00 为锚点均分一天。
+ * 12 小时 → 一天 2 槽，4 小时 → 6 槽，10 分钟 → 144 槽。用绝对时间算，
+ * 刷新页面不会重新起算；判重只需记住槽位号（localStorage）。
+ * 0 人不占槽，当前人数非 0 才落。完整版后端用 kv 做同一套判重。
+ *
+ * @param {number} now 当前时间戳（ms）
+ * @param {number} intervalSec 统计推送间隔（秒），非法值回落 14400（4 小时，UI 默认）
+ * @param {number} [tzOffsetMin] 本地时区偏移（分钟，getTimezoneOffset 的相反数）
+ * @returns {{slot:number, dayKey:string, startedAt:number}}
+ */
+export function countLogSlot(now, intervalSec, tzOffsetMin) {
+  const t = Number(now) || Date.now()
+  let sec = Math.floor(Number(intervalSec))
+  if (!Number.isFinite(sec) || sec < 10 || sec > 86400) sec = 14400
+  const ms = sec * 1000
+  const offMin = Number.isFinite(tzOffsetMin)
+    ? Number(tzOffsetMin)
+    : -new Date(t).getTimezoneOffset()
+  const offMs = offMin * 60 * 1000
+  const local = t + offMs
+  const dayStartLocal = Math.floor(local / 86400000) * 86400000
+  const dayKeyDate = new Date(dayStartLocal)
+  const yyyy = dayKeyDate.getUTCFullYear()
+  const mm = String(dayKeyDate.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(dayKeyDate.getUTCDate()).padStart(2, '0')
+  const slot = Math.max(0, Math.min(Math.floor(86400 / sec) - 1, Math.floor((local - dayStartLocal) / ms)))
+  return {
+    slot,
+    dayKey: `${yyyy}-${mm}-${dd}`,
+    startedAt: dayStartLocal + slot * ms - offMs
+  }
+}
 
 /**
  * §5.174 计数文案的唯一拼装口径（完整版后端 analyzer / 本仓库 useAiExtras /
@@ -1736,7 +1767,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.9.7'
+  version: '1.9.8'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
