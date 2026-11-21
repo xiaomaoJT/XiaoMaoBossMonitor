@@ -75,6 +75,12 @@ import { isFaceHit } from '../config/defaults.js'
 import { AGE_BUCKETS, FACE_ATTR_TAGS, ageBucket, faceAttrTags, hasFaceAttrs } from './faceAttr.js'
 
 const KEY = 'monitor-wall-daily-stats-v1'
+/**
+ * §5.178 计数口径版本：1 = 记 60 秒采样条数，2 = 记累计经过人次快照。
+ * 写在存档根上，升级时一次性清掉旧口径计数 —— 否则 max() 会让旧条数
+ * 一直压着新快照，用户升级后看到的还是老分段。
+ */
+const COUNT_METRIC_VERSION = 2
 /** 保留天数（含今天） */
 export const KEEP_DAYS = 7
 /** 每天最多保留多少条命中明细（给统计页「最近命中记录」用；完整明细看事件列表 / /hits） */
@@ -380,7 +386,15 @@ function load() {
     if (!raw) return emptyState()
     const saved = JSON.parse(raw)
     if (!saved || typeof saved !== 'object' || !saved.days) return emptyState()
-    return { days: prune(saved.days) }
+    const days = prune(saved.days)
+    if (Number(saved.v) !== COUNT_METRIC_VERSION) {
+      // 旧存档的计数是采样条数，与新的人次快照量纲不同；清掉后由事件库回填
+      for (const d of Object.values(days)) {
+        d.byTypeCam = { count: {} }
+        d.byType.count = 0
+      }
+    }
+    return { days }
   } catch (e) {
     /* 存储坏了就从头统计，不影响功能 */
     return emptyState()
@@ -400,7 +414,7 @@ function save() {
     try {
       if (typeof localStorage === 'undefined') return
       dailyStats.days = prune(dailyStats.days)
-      localStorage.setItem(KEY, JSON.stringify({ days: dailyStats.days }))
+      localStorage.setItem(KEY, JSON.stringify({ v: COUNT_METRIC_VERSION, days: dailyStats.days }))
     } catch (e) {
       /* 写不进去就算了，统计不该影响主流程 */
     }
@@ -456,8 +470,17 @@ export function statAlarm(type, ts = Date.now(), meta) {
         if (cam) {
           if (!d.byTypeCam || typeof d.byTypeCam !== 'object') d.byTypeCam = {}
           if (!d.byTypeCam.count || typeof d.byTypeCam.count !== 'object') d.byTypeCam.count = {}
-          d.byTypeCam.count[cam] = (d.byTypeCam.count[cam] || 0) + 1
+          /*
+           * §5.178：分段数字对齐通道画面上的「累计经过人次」，记 totalIn 快照，
+           * 不是 60 秒采样条数（同频采样会让两个通道条数恒等）。totalIn 单调
+           * 递增，取 max 即最新累计人次，重启归零也不抹小历史。
+           */
+          const ti = Math.max(0, Math.floor(Number(meta.counts && meta.counts.totalIn) || 0))
+          if (ti > (d.byTypeCam.count[cam] || 0)) d.byTypeCam.count[cam] = ti
         }
+        // 类型总数 = 各通道人次之和，分段之和与总数对平
+        d.byType.count = Object.keys((d.byTypeCam && d.byTypeCam.count) || {})
+          .reduce((s, k) => s + (Number(d.byTypeCam.count[k]) || 0), 0)
       }
       bumpTypeHour(H.types, type, h)
       // 区域事件在库里是 enter/exit/loiter 三个细分，归到 zone 一类
@@ -757,10 +780,11 @@ export function aggregate(keys) {
     Object.keys(d.byType || {}).forEach((t) => {
       total.byType[t] = (total.byType[t] || 0) + (d.byType[t] || 0)
     })
-    // §5.174：计数按通道跨天求和（与 byType.count 同源，逐通道之和恒等于总数）
+    // §5.178：通道值是「累计经过人次」快照（单调递增），跨天取最大值，不求和
     const dcc = (d.byTypeCam && d.byTypeCam.count) || {}
     Object.keys(dcc).forEach((cam) => {
-      total.byTypeCam.count[cam] = (total.byTypeCam.count[cam] || 0) + (Number(dcc[cam]) || 0)
+      const v = Math.max(0, Number(dcc[cam]) || 0)
+      if (v > (total.byTypeCam.count[cam] || 0)) total.byTypeCam.count[cam] = v
     })
     CHANNELS.forEach(({ id }) => {
       const s = (d.push || {})[id] || {}
@@ -829,6 +853,9 @@ export function aggregate(keys) {
     })
   })
   total.recentHits = total.recentHits.sort((a, b) => (Number(b.t) || 0) - (Number(a.t) || 0)).slice(0, HIT_LOG_MAX)
+  // §5.178：跨天取 max 之后重算计数类型总数 = 各通道累计人次之和
+  total.byType.count = Object.keys(total.byTypeCam.count)
+    .reduce((s, k) => s + (Number(total.byTypeCam.count[k]) || 0), 0)
   total.days = keys.length
   return total
 }
