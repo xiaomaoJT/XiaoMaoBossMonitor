@@ -111,6 +111,15 @@ const ALARM_TYPES = [
  */
 const ZONE_ALIASES = ['enter', 'exit', 'loiter']
 
+/**
+ * §5.184 需要按子维度分段的四种类型。count 不在这里 —— 它按「通道 + 区域」
+ * 存人次快照（byZoneCounts），量纲与这里的事件次数不同，混在一张表里迟早对不上。
+ * 白名单同时被主进程用来收口 IPC 数据，别在别处再手写一份。
+ */
+export const STAT_SUB_TYPES = ['face', 'zone', 'flow', 'pose']
+/** 单一类型下最多保留多少个子维度键（防止脏子存档把 localStorage 撑爆） */
+const SUB_KEYS_MAX = 32
+
 /** 小时桶里允许出现的类型键：6 个已知类型 + 区域事件的 3 个细分（有上界，不会被子存档撑大） */
 const HOUR_TYPE_KEYS = [...ALARM_TYPES.map((t) => t.id), ...ZONE_ALIASES]
 
@@ -217,6 +226,15 @@ function emptyDay() {
      * 只存开启计数的真实区域当日累计快照；与 byTypeCam.count 通道汇总同源。
      */
     byZoneCounts: {},
+    /**
+     * §5.184 四种类型按各自子维度拆事件次数：
+     *   face = { 在库人脸, 未录入人脸 }
+     *   zone = { 通道·区域名 }（划分且正在监听的区域）
+     *   flow = { 走向规则名 }
+     *   pose = { 姿态类型 }
+     * 老事件没有这些字段时留空，统计图退回按通道分段（§5.182 的旧口径）。
+     */
+    byTypeSub: {},
     /** 推送：{ ding:{ok,fail}, wecom:{...}, tg:{...} } */
     push: { ding: { ok: 0, fail: 0 }, wecom: { ok: 0, fail: 0 }, tg: { ok: 0, fail: 0 } },
     /** 出现过的人次（每条人脸/识别事件算一次，**含陌生人**） */
@@ -344,6 +362,7 @@ function prune(days) {
       byType: { ...base.byType, ...(d.byType || {}) },
       byTypeCam: normTypeCam(d.byTypeCam),
       byZoneCounts: normZoneCounts(d.byZoneCounts),
+      byTypeSub: normTypeSub(d.byTypeSub),
       push: {
         ding: { ...base.push.ding, ...((d.push || {}).ding || {}) },
         wecom: { ...base.push.wecom, ...((d.push || {}).wecom || {}) },
@@ -414,6 +433,35 @@ function normZoneCounts(src) {
     if (cam && Object.keys(bucket).length) out[cam] = bucket
   }
   return out
+}
+
+/**
+ * §5.184 子维度表的归一化：只留四种已知类型、键名限长、次数夹成非负整数。
+ * 与 normTypeCam 同款有界策略 —— 脏子存档不能靠一个超长名字撑爆 localStorage。
+ */
+function normTypeSub(src) {
+  const out = {}
+  if (!src || typeof src !== 'object') return out
+  for (const t of STAT_SUB_TYPES) {
+    const table = src[t] && typeof src[t] === 'object' ? src[t] : {}
+    const bucket = {}
+    for (const raw of Object.keys(table).slice(0, SUB_KEYS_MAX)) {
+      const name = String(raw).trim().slice(0, 24)
+      const n = Math.max(0, Math.floor(Number(table[raw]) || 0))
+      if (name && n) bucket[name] = n
+    }
+    if (Object.keys(bucket).length) out[t] = bucket
+  }
+  return out
+}
+
+/** §5.184 子维度计数：一次事件 +1，键名限长；只写已知类型，别处不许另写一份 */
+function bumpSub(d, type, key) {
+  const name = String(key == null ? '' : key).trim().slice(0, 24)
+  if (!name || !STAT_SUB_TYPES.includes(type)) return
+  if (!d.byTypeSub || typeof d.byTypeSub !== 'object') d.byTypeSub = {}
+  const table = d.byTypeSub[type] || (d.byTypeSub[type] = {})
+  table[name] = (Number(table[name]) || 0) + 1
 }
 
 function load() {
@@ -505,6 +553,25 @@ export function statAlarm(type, ts = Date.now(), meta) {
        * 后端 record 用 name/id，分析器直接 emit 的事件用 camName/camId —— 两边都认。
        */
       const cam = String((meta && (meta.name || meta.camName || meta.id || meta.camId)) || '').trim().slice(0, 24)
+      /*
+       * §5.184 四种类型按各自子维度再拆一份事件次数（与通道分段并列、互不代替）：
+       * 区域取「通道·区域名」—— 只认事件里带着 zoneName 的，也就是真划了且在监听
+       * 的区域；人脸分在库 / 未录入；走向取规则名；姿态取姿态类型。count 不在这儿，
+       * 它走 byZoneCounts 的人次快照口径。
+       */
+      if (type === 'face') {
+        bumpSub(d, 'face', meta && meta.known === true ? '在库人脸' : '未录入人脸')
+      } else if (type === 'flow') {
+        const flow = meta && meta.flowName
+          ? meta.flowName
+          : `${(meta && (meta.fromZoneName || meta.fromZone)) || '?'}→${(meta && (meta.toZoneName || meta.toZone)) || '?'}`
+        bumpSub(d, 'flow', flow)
+      } else if (type === 'pose') {
+        bumpSub(d, 'pose', meta && (meta.actionText || meta.action))
+      } else if (ZONE_ALIASES.includes(type) || type === 'zone') {
+        const zone = String((meta && (meta.zoneName || meta.zone)) || '').trim()
+        bumpSub(d, 'zone', cam && zone ? `${cam}·${zone}` : (zone || cam))
+      }
       if (cam) {
         if (!d.byTypeCam || typeof d.byTypeCam !== 'object') d.byTypeCam = {}
         if (type === 'count') {
@@ -537,7 +604,7 @@ export function statAlarm(type, ts = Date.now(), meta) {
           // 类型总数同步改成各通道累计人次之和 —— 分段之和与总数天生对平
           d.byType.count = Object.keys(d.byTypeCam.count)
             .reduce((s, k) => s + (Number(d.byTypeCam.count[k]) || 0), 0)
-        } else if (STAT_ALARM_TYPES.some((t) => t.id === type)) {
+        } else if (ALARM_TYPES.some((t) => t.id === type)) {
           // 其余类型：每通道当天事件次数累加，与 byType[type] 总量同源
           const table = d.byTypeCam[type] || (d.byTypeCam[type] = {})
           table[cam] = (Number(table[cam]) || 0) + 1
@@ -878,6 +945,21 @@ export function aggregate(keys) {
           totalIn: Math.max(cur.totalIn, Math.floor(Number(z.totalIn) || 0)),
           totalOut: Math.max(cur.totalOut, Math.floor(Number(z.totalOut) || 0))
         }
+      }
+    }
+    /*
+     * §5.184 子维度全是事件次数：跨天直接相加（与 byType 同源）。
+     * 键名白名单 + 上限，避免跨天聚合时把脏数据放大到 IPC 快照里。
+     */
+    const dsub = d.byTypeSub && typeof d.byTypeSub === 'object' ? d.byTypeSub : {}
+    for (const t of STAT_SUB_TYPES) {
+      const src = dsub[t] && typeof dsub[t] === 'object' ? dsub[t] : {}
+      const dst = total.byTypeSub[t] || (total.byTypeSub[t] = {})
+      for (const [name, raw] of Object.entries(src)) {
+        const key = String(name).trim().slice(0, 24)
+        const v = Math.max(0, Math.floor(Number(raw) || 0))
+        if (!key || !v) continue
+        dst[key] = (Number(dst[key]) || 0) + v
       }
     }
     CHANNELS.forEach(({ id }) => {
