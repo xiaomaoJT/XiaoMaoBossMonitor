@@ -71,10 +71,14 @@ export class Tracker {
      *   - zoneStats 是**按区域独立累计**：zoneId -> { totalIn, totalOut }。
      *     只有真实区域（非虚拟）且 countEnabled !== false 才累计。
      *     两级分段 + 重启恢复都从这里取，stats 由它求和派生。
+     * §5.189：zoneQuality 是**另一套量纲**，回答「区内去重人数 / 峰值同时人数 /
+     * 平均停留」，不碰 totalIn，避免与「累计经过人次」混成一条统计。
      */
     this.stats = { current: 0, totalIn: 0, totalOut: 0 }
     /** @type {Object<string,{totalIn:number,totalOut:number}>} */
     this.zoneStats = {}
+    /** @type {Object<string,{keys:Set<string>,peak:number,dwellSum:number,dwellSamples:number}>} */
+    this.zoneQuality = {}
   }
 
   /** 是否计入某区域的计数（真实区域 + 区域级计数开关默认开） */
@@ -95,10 +99,12 @@ export class Tracker {
   }
 
   /**
-   * §5.182 恢复注入：把某天各区域的累计人次灌进计数器（重启后从今日存档续上）。
+   * §5.182 / §5.189 恢复注入：把某天各区域的累计人次与驻留快照灌进计数器
+   * （重启后从今日存档续上）。zoneQuality 是新增的可选第二参，老调用方不受影响。
    * @param {Object<string,{totalIn?:number,totalOut?:number}>} zoneCounts zoneId -> 累计
+   * @param {Object<string,object>} [zoneQuality] zoneId -> 驻留快照
    */
-  restoreZoneCounts(zoneCounts) {
+  restoreZoneCounts(zoneCounts, zoneQuality) {
     this.zoneStats = {}
     if (zoneCounts && typeof zoneCounts === 'object') {
       for (const [id, raw] of Object.entries(zoneCounts)) {
@@ -108,12 +114,68 @@ export class Tracker {
       }
     }
     this._recountStats()
+    this.restoreZoneQuality(zoneQuality)
   }
 
-  /** 每日 00:00 归零：只清累计，保留轨迹（避免跨天误判为走出） */
+  /** §5.189 恢复区域驻留快照：keys 用来续上当日去重，unique 兼容只有聚合值的老档 */
+  restoreZoneQuality(zoneQuality) {
+    this.zoneQuality = {}
+    if (!zoneQuality || typeof zoneQuality !== 'object') return
+    for (const [id, raw] of Object.entries(zoneQuality)) {
+      const z = raw && typeof raw === 'object' ? raw : {}
+      const keys = Array.isArray(z.keys) ? z.keys.map((k) => String(k).slice(0, 32)).filter(Boolean).slice(0, 512) : []
+      const uniq = Math.max(0, Math.floor(Number(z.unique) || 0))
+      this.zoneQuality[String(id).slice(0, 64)] = {
+        keys: new Set(keys),
+        unique: Math.max(uniq, keys.length),
+        peak: Math.max(0, Math.floor(Number(z.peak) || 0)),
+        dwellSum: Math.max(0, Math.floor(Number(z.dwellSum) || 0)),
+        dwellSamples: Math.max(0, Math.floor(Number(z.dwellSamples) || 0))
+      }
+    }
+  }
+
+  /** 每日 00:00 归零：累计与驻留都清，轨迹保留（避免跨天误判为走出） */
   clearZoneCounts() {
     this.zoneStats = {}
+    this.zoneQuality = {}
     this._recountStats()
+  }
+
+  /** §5.189 区域驻留桶（真实且开启计数的区域才建） */
+  _zoneQualityFor(zoneId) {
+    let zq = this.zoneQuality[zoneId]
+    if (!zq) {
+      zq = { keys: new Set(), unique: 0, peak: 0, dwellSum: 0, dwellSamples: 0 }
+      this.zoneQuality[zoneId] = zq
+    }
+    return zq
+  }
+
+  /** §5.189 去重键：优先人脸库 id（跨轨迹稳定），陌生人退回本通道 trackId */
+  _zoneTrackKey(tr) {
+    const faceId = Math.max(0, Math.floor(Number(tr && tr.face && tr.face.id) || 0))
+    if (faceId > 0) return `f${faceId}`
+    return `t${Math.max(0, Math.floor(Number(tr && tr.id) || 0))}`
+  }
+
+  /** §5.189 踏入区域：记去重身份 + 此刻区内人数峰值 */
+  _qualityEnter(zone, tr) {
+    if (!this._countsFor(zone)) return
+    const zq = this._zoneQualityFor(zone.id)
+    zq.keys.add(this._zoneTrackKey(tr))
+    zq.unique = zq.keys.size
+    zq.peak = Math.max(zq.peak, this._insideCount(zone.id))
+  }
+
+  /** §5.189 离开区域：累计真实停留（含短于 minDwellMs、不产 exit 事件的贴边抖动） */
+  _qualityLeave(zone, dwellMs) {
+    if (!this._countsFor(zone)) return
+    const ms = Number(dwellMs)
+    if (!Number.isFinite(ms) || ms <= 0) return
+    const zq = this._zoneQualityFor(zone.id)
+    zq.dwellSum += ms
+    zq.dwellSamples += 1
   }
 
   /** 区域级累计快照，供采样事件携带 / 存档：{ zoneId: { name, totalIn, totalOut } } */
@@ -131,6 +193,25 @@ export class Tracker {
     return out
   }
 
+  /** §5.189 区域驻留快照：Set 不直接过 IPC，keys 只留前 512 个供重启续去重 */
+  zoneQualitySnapshot() {
+    const out = {}
+    for (const zone of this.zones) {
+      if (!this._countsFor(zone)) continue
+      const zq = this.zoneQuality[zone.id]
+      const keys = zq ? Array.from(zq.keys).slice(0, 512) : []
+      out[zone.id] = {
+        name: zone.name || '区域',
+        unique: zq ? Math.max(zq.unique, keys.length) : 0,
+        peak: (zq && zq.peak) || 0,
+        dwellSum: (zq && zq.dwellSum) || 0,
+        dwellSamples: (zq && zq.dwellSamples) || 0,
+        keys
+      }
+    }
+    return out
+  }
+
   /** 更新区域配置（设置里改了区域后调用） */
   setZones(zones) {
     this.zones = Array.isArray(zones) ? zones : []
@@ -141,10 +222,13 @@ export class Tracker {
         if (!ids.has(k)) delete tr.zones[k]
       })
     }
-    // §5.182：区域被删时同步清掉它的累计，避免幽灵段；重算汇总
+    // §5.182 / §5.189：区域被删时同步清掉累计与驻留，避免幽灵段；重算汇总
     let changed = false
     for (const k of Object.keys(this.zoneStats)) {
       if (!ids.has(k)) { delete this.zoneStats[k]; changed = true }
+    }
+    for (const k of Object.keys(this.zoneQuality)) {
+      if (!ids.has(k)) delete this.zoneQuality[k]
     }
     if (changed) this._recountStats()
   }
@@ -154,6 +238,7 @@ export class Tracker {
     this.nextId = 1
     this.stats = { current: 0, totalIn: 0, totalOut: 0 }
     this.zoneStats = {}
+    this.zoneQuality = {}
   }
 
   /** 已确认（连续命中达标）的轨迹 */
@@ -339,6 +424,9 @@ export class Tracker {
       if (!st.inside) continue
       st.inside = false
       const zone = this.zones.find((z) => z.id === key)
+      const dwellMs = st.since ? t - st.since : 0
+      // §5.189 短停留也计入真实驻留，但它不该产生 exit 事件 / totalOut
+      this._qualityLeave(zone, dwellMs)
       if (zone && zone.enterExit !== false) {
         events.push({
           kind: 'exit',
@@ -347,7 +435,7 @@ export class Tracker {
           trackId: tr.id,
           at: t,
           box: { ...tr.box },
-          dwellMs: st.since ? t - st.since : 0,
+          dwellMs,
           gone: true,
           // 走出的是「这一个人」；区域里还剩几个不影响这条事件的主体
           people: 1,
@@ -380,6 +468,8 @@ export class Tracker {
         st.inside = true
         st.since = t
         st.loitered = false
+        // §5.189 独立于 enter 事件 / totalIn：只要真实计数区域就记驻留质量
+        this._qualityEnter(zone, tr)
         if (zone.enterExit !== false) {
           events.push({
             kind: 'enter',
@@ -404,6 +494,8 @@ export class Tracker {
         /* ---- 离开 ---- */
         st.inside = false
         const dwellMs = st.since ? t - st.since : 0
+        // §5.189 真实停留先记账，再按事件门槛决定是否产 exit
+        this._qualityLeave(zone, dwellMs)
         // 只是贴着边界抖动了一下（停留很短）就不算一次离开
         const minMs = Math.max(0, Number(zone.minDwellMs) || 600)
         if (zone.enterExit !== false && dwellMs >= minMs) {

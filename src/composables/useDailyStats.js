@@ -76,11 +76,12 @@ import { AGE_BUCKETS, FACE_ATTR_TAGS, ageBucket, faceAttrTags, hasFaceAttrs } fr
 
 const KEY = 'monitor-wall-daily-stats-v1'
 /**
- * §5.178 计数口径版本：1 = 记 60 秒采样条数，2 = 记累计经过人次快照。
- * 写在存档根上，升级时一次性把旧口径的计数清掉 —— 否则 max() 会让旧条数
- * 一直压着新快照，用户升级后看到的还是老分段，以为没修好。
+ * 计数口径版本：1 = 记 60 秒采样条数，2 = 记累计经过人次快照，
+ * 3 = 全类型按通道 + 区域快照，4 = 新增区域驻留质量（去重 / 峰值 / 停留）。
+ * 写在存档根上；v1→v2 那次需要清掉旧条数，否则 max() 会永久压着新快照。
+ * v3→v4 是纯加字段，prune() 补空即可，旧天保留原事件数口径。
  */
-const COUNT_METRIC_VERSION = 3
+const COUNT_METRIC_VERSION = 4
 /** 保留天数（含今天） */
 export const KEEP_DAYS = 7
 /** 每天最多保留多少条命中明细（给统计页「最近命中记录」用；完整明细看事件列表 / /hits） */
@@ -119,6 +120,8 @@ const ZONE_ALIASES = ['enter', 'exit', 'loiter']
 export const STAT_SUB_TYPES = ['face', 'zone', 'flow', 'pose']
 /** 单一类型下最多保留多少个子维度键（防止脏子存档把 localStorage 撑爆） */
 const SUB_KEYS_MAX = 32
+/** §5.189 每区域最多留多少个去重身份键；超出后 unique 仍按聚合值保留 */
+const UNIQ_KEYS_MAX = 512
 
 /** 小时桶里允许出现的类型键：6 个已知类型 + 区域事件的 3 个细分（有上界，不会被子存档撑大） */
 const HOUR_TYPE_KEYS = [...ALARM_TYPES.map((t) => t.id), ...ZONE_ALIASES]
@@ -226,6 +229,14 @@ function emptyDay() {
      * 只存开启计数的真实区域当日累计快照；与 byTypeCam.count 通道汇总同源。
      */
     byZoneCounts: {},
+    /**
+     * §5.189 区域驻留质量（与 byZoneCounts 的人次量纲分开存）：
+     * { [通道名]: { [zoneId]: { name, unique, peak, dwellSum, dwellSamples, keys } } }。
+     * unique 是区内去重人数，peak 是峰值同时人数，平均停留 = dwellSum / dwellSamples；
+     * keys 只留有限个身份键，供重启后继续去重（faces 用库内 id，陌生人用 trackId）。
+     * 老存档没有这一维时留空，展示层退回旧事件数口径并标注。
+     */
+    byZoneQuality: {},
     /**
      * §5.184 四种类型按各自子维度拆事件次数：
      *   face = { 在库人脸, 未录入人脸 }
@@ -362,6 +373,7 @@ function prune(days) {
       byType: { ...base.byType, ...(d.byType || {}) },
       byTypeCam: normTypeCam(d.byTypeCam),
       byZoneCounts: normZoneCounts(d.byZoneCounts),
+      byZoneQuality: normZoneQuality(d.byZoneQuality),
       byTypeSub: normTypeSub(d.byTypeSub),
       push: {
         ding: { ...base.push.ding, ...((d.push || {}).ding || {}) },
@@ -429,6 +441,48 @@ function normZoneCounts(src) {
       const to = Math.max(0, Math.floor(Number(z.totalOut) || 0))
       const name = String(z.name || '区域').trim().slice(0, 24)
       if (id) bucket[id] = { name, totalIn: ti, totalOut: to }
+    }
+    if (cam && Object.keys(bucket).length) out[cam] = bucket
+  }
+  return out
+}
+
+/**
+ * §5.189 区域驻留快照归一化：有界、非负、keys 去重限长。
+ * 与 normZoneCounts 分开存 —— 那边会整段重建 zone 对象，塞进去会被静默吃掉。
+ */
+function normZoneQuality(src) {
+  const out = {}
+  if (!src || typeof src !== 'object') return out
+  for (const rawCam of Object.keys(src).slice(0, 32)) {
+    const cam = String(rawCam).trim().slice(0, 24)
+    const table = src[rawCam] && typeof src[rawCam] === 'object' ? src[rawCam] : {}
+    const bucket = {}
+    for (const rawZone of Object.keys(table).slice(0, 32)) {
+      const id = String(rawZone).trim().slice(0, 64)
+      const z = table[rawZone] && typeof table[rawZone] === 'object' ? table[rawZone] : {}
+      const keys = []
+      const seen = new Set()
+      if (Array.isArray(z.keys)) {
+        for (const rawKey of z.keys.slice(0, UNIQ_KEYS_MAX)) {
+          const k = String(rawKey).trim().slice(0, 32)
+          if (k && !seen.has(k)) { seen.add(k); keys.push(k) }
+        }
+      }
+      const uniq = Math.max(0, Math.floor(Number(z.unique) || 0))
+      const peak = Math.max(0, Math.floor(Number(z.peak) || 0))
+      const dwellSum = Math.max(0, Math.floor(Number(z.dwellSum) || 0))
+      const dwellSamples = Math.max(0, Math.floor(Number(z.dwellSamples) || 0))
+      if (id && (uniq || peak || dwellSum || keys.length)) {
+        bucket[id] = {
+          name: String(z.name || '区域').trim().slice(0, 24),
+          unique: Math.max(uniq, keys.length),
+          peak,
+          dwellSum,
+          dwellSamples,
+          keys
+        }
+      }
     }
     if (cam && Object.keys(bucket).length) out[cam] = bucket
   }
@@ -598,6 +652,37 @@ export function statAlarm(type, ts = Date.now(), meta) {
                 // 同区域取 max：采样/落库两条路径可能交错，谁新都不许把累计抹小
                 totalIn: Math.max(cur.totalIn, zti),
                 totalOut: Math.max(cur.totalOut, zto)
+              }
+            }
+          }
+          /*
+           * §5.189 驻留质量与 totalIn 分开写。60 秒采样是同一区域的当日累计快照，
+           * 同名取 max（谁新都不许把当日峰值 / 去重抹小）；keys 取并集供重启续去重。
+           * 老事件没有 byZoneQuality 时整段跳过，展示层据此走 legacy 口径。
+           */
+          const byQuality = meta.counts && meta.counts.byZoneQuality
+          if (byQuality && typeof byQuality === 'object') {
+            if (!d.byZoneQuality || typeof d.byZoneQuality !== 'object') d.byZoneQuality = {}
+            if (!d.byZoneQuality[cam] || typeof d.byZoneQuality[cam] !== 'object') d.byZoneQuality[cam] = {}
+            for (const [zoneId, raw] of Object.entries(byQuality)) {
+              const id = String(zoneId).trim().slice(0, 64)
+              const z = raw && typeof raw === 'object' ? raw : {}
+              const cur = d.byZoneQuality[cam][id] || { name: '区域', unique: 0, peak: 0, dwellSum: 0, dwellSamples: 0, keys: [] }
+              const seen = new Set(Array.isArray(cur.keys) ? cur.keys : [])
+              if (Array.isArray(z.keys)) {
+                for (const k of z.keys.slice(0, UNIQ_KEYS_MAX)) {
+                  const key = String(k).trim().slice(0, 32)
+                  if (key) seen.add(key)
+                }
+              }
+              const keys = Array.from(seen).slice(0, UNIQ_KEYS_MAX)
+              d.byZoneQuality[cam][id] = {
+                name: String(z.name || cur.name || '区域').trim().slice(0, 24),
+                unique: Math.max(cur.unique || 0, Math.floor(Number(z.unique) || 0), keys.length),
+                peak: Math.max(cur.peak || 0, Math.floor(Number(z.peak) || 0)),
+                dwellSum: Math.max(cur.dwellSum || 0, Math.floor(Number(z.dwellSum) || 0)),
+                dwellSamples: Math.max(cur.dwellSamples || 0, Math.floor(Number(z.dwellSamples) || 0)),
+                keys
               }
             }
           }
@@ -944,6 +1029,37 @@ export function aggregate(keys) {
           name: String(z.name || cur.name || '区域'),
           totalIn: Math.max(cur.totalIn, Math.floor(Number(z.totalIn) || 0)),
           totalOut: Math.max(cur.totalOut, Math.floor(Number(z.totalOut) || 0))
+        }
+      }
+    }
+    /*
+     * §5.189 区域驻留质量跨天合并：keys 并集决定区间去重（同一身份两天都来
+     * 只算 1），峰值取 max，停留时长 / 样本数相加算区间平均；没有 keys 的老快照
+     * 退回 daily unique 的 max，绝不拿事件数冒充人数。
+     */
+    const dbq = d.byZoneQuality && typeof d.byZoneQuality === 'object' ? d.byZoneQuality : {}
+    for (const [cam, table] of Object.entries(dbq)) {
+      const c = String(cam).trim().slice(0, 24)
+      if (!c || !table || typeof table !== 'object') continue
+      const dstCam = total.byZoneQuality[c] || (total.byZoneQuality[c] = {})
+      for (const [id, raw] of Object.entries(table)) {
+        const z = raw && typeof raw === 'object' ? raw : {}
+        const cur = dstCam[id] || { name: '区域', unique: 0, peak: 0, dwellSum: 0, dwellSamples: 0, keys: [] }
+        const seen = new Set(Array.isArray(cur.keys) ? cur.keys : [])
+        if (Array.isArray(z.keys)) {
+          for (const k of z.keys.slice(0, UNIQ_KEYS_MAX)) {
+            const key = String(k).trim().slice(0, 32)
+            if (key) seen.add(key)
+          }
+        }
+        const keys = Array.from(seen).slice(0, UNIQ_KEYS_MAX)
+        dstCam[id] = {
+          name: String(z.name || cur.name || '区域').trim().slice(0, 24),
+          unique: Math.max(cur.unique || 0, Math.floor(Number(z.unique) || 0), keys.length),
+          peak: Math.max(cur.peak || 0, Math.floor(Number(z.peak) || 0)),
+          dwellSum: (cur.dwellSum || 0) + Math.max(0, Math.floor(Number(z.dwellSum) || 0)),
+          dwellSamples: (cur.dwellSamples || 0) + Math.max(0, Math.floor(Number(z.dwellSamples) || 0)),
+          keys
         }
       }
     }
