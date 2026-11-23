@@ -73,15 +73,26 @@ import { isFaceHit } from '../config/defaults.js'
  * 统计里没算他一顶」这种对不上的账。
  */
 import { AGE_BUCKETS, FACE_ATTR_TAGS, ageBucket, faceAttrTags, hasFaceAttrs } from './faceAttr.js'
+/* §5.195 时序指标的归一化 / 合并 / 分位都收在纯函数模块里，前后端同一套口径 */
+import {
+  channelSlaOf,
+  DWELL_BUCKET_COUNT,
+  dwellPercentile,
+  mergeZoneTimeline,
+  mergeZoneTimelineSnapshot,
+  normStateEvents,
+  normZoneTimeline
+} from './seriesStats.js'
 
 const KEY = 'monitor-wall-daily-stats-v1'
 /**
  * 计数口径版本：1 = 记 60 秒采样条数，2 = 记累计经过人次快照，
- * 3 = 全类型按通道 + 区域快照，4 = 新增区域驻留质量（去重 / 峰值 / 停留）。
+ * 3 = 全类型按通道 + 区域快照，4 = 新增区域驻留质量（去重 / 峰值 / 停留），
+ * 5 = 新增分钟峰值线 / 停留直方图 / 通道状态翻转事件。
  * 写在存档根上；v1→v2 那次需要清掉旧条数，否则 max() 会永久压着新快照。
- * v3→v4 是纯加字段，prune() 补空即可，旧天保留原事件数口径。
+ * v3→v4、v4→v5 都是纯加字段，prune() 补空即可，旧天保留原事件数口径。
  */
-const COUNT_METRIC_VERSION = 4
+const COUNT_METRIC_VERSION = 5
 /** 保留天数（含今天） */
 export const KEEP_DAYS = 7
 /** 每天最多保留多少条命中明细（给统计页「最近命中记录」用；完整明细看事件列表 / /hits） */
@@ -131,6 +142,27 @@ const HOUR_TYPE_KEYS = [...ALARM_TYPES.map((t) => t.id), ...ZONE_ALIASES]
  * 不做自由键，避免脏指令把日存档撑大（与 faceAttrs.tags 同款纪律）。
  */
 const SUPPRESS_REASONS = ['silent', 'throttle', 'unchecked', 'merge', 'faceSilent', 'digest', 'hardSilent', 'critical']
+
+/**
+ * §5.194 推送失败原因的固定分桶。自由文本只用于归类，绝不作为键落盘 ——
+ * 同一个网络错误可能带不同 URL / 错误码，原样存会把日存档撑爆。
+ */
+const PUSH_FAIL_REASONS = ['network', 'timeout', 'auth', 'throttle', 'format', 'other']
+const PUSH_FAIL_LABEL = {
+  network: '网络', timeout: '超时', auth: '鉴权', throttle: '限流', format: '格式', other: '其他'
+}
+
+/** 把推送异常原文归到固定分桶（只做小写包含匹配，O(1)、不抛错） */
+export function pushFailReasonKey(reason) {
+  const s = String(reason || '').toLowerCase()
+  if (!s) return 'other'
+  if (/timeout|timed out|超时|etimedout/.test(s)) return 'timeout'
+  if (/401|403|unauthorized|forbidden|token|鉴权|密钥/.test(s)) return 'auth'
+  if (/429|rate.?limit|too many requests|限流/.test(s)) return 'throttle'
+  if (/parse entities|bad request|400|invalid|格式/.test(s)) return 'format'
+  if (/fetch failed|econnreset|enotfound|eai_again|econnrefused|socket|network|网络/.test(s)) return 'network'
+  return 'other'
+}
 
 /** 热力图的指标维度（值取自 `hours[metric]`） */
 const HOUR_METRICS = [
@@ -244,6 +276,12 @@ function emptyDay() {
      */
     byZoneQuality: {},
     /**
+     * §5.195 区域分钟线：{ [通道]: { [zoneId]: { name, minutes:{'m':峰值}, dwellBuckets:[9] } } }。
+     * minutes 的键是本地 0~1439 分钟，值是当日该分钟观测到的区内同时人数峰值；
+     * dwellBuckets 是停留时长直方图，p50/p95 由它插值算出，不存全样本。
+     */
+    byZoneTimeline: {},
+    /**
      * §5.184 四种类型按各自子维度拆事件次数：
      *   face = { 在库人脸, 未录入人脸 }
      *   zone = { 通道·区域名 }（划分且正在监听的区域）
@@ -273,10 +311,12 @@ function emptyDay() {
     correctedHits: 0,
     /**
      * §5.191 应发未发的通知条数（静默 / 限流 / 未勾选 / 合并 / 人脸组静默 / 摘要 / 硬静默）。
-     * 与 push.ok/fail 并列，不改 old 成功率口径；suppressedBy 只记固定原因键。
+     * §5.194 起它进入整体成功率分母（渠道成功率仍只算真发出去的）。
      */
     suppressed: 0,
     suppressedBy: {},
+    /** §5.194 推送失败原因分桶 { network:n, ... }，固定键 + 非负整数 */
+    pushFailBy: {},
     /** 人员榜：{ [名字]: { n: 命中次数, t: 最近一次命中时刻 } } */
     hitsByName: {},
     /** 最近命中明细（时间**倒序**，最多 HIT_LOG_MAX 条）：{ n:名字, t:时刻, c:通道, s:相似度 } */
@@ -292,6 +332,11 @@ function emptyDay() {
     /** 通道断线 / 恢复次数 */
     offline: 0,
     online: 0,
+    /**
+     * §5.195 通道状态翻转事件 { cam, state, at }（有界 200 条/天）。
+     * 只存边沿，不每分钟轮询；区间在线率由相邻两次翻转的时长补出来。
+     */
+    channelStateEvents: [],
     /** 小时桶（热力图用），见文件头说明 */
     hours: { alarms: zeros24(), push: zeros24(), hits: zeros24(), known: zeros24(), types: {} }
   }
@@ -382,6 +427,17 @@ function normSuppressBy(src) {
   return out
 }
 
+/** §5.191 / §5.194 通用固定键计数字典归一化（抑制原因、推送失败原因共用） */
+function normReasonCounts(src, reasons) {
+  const out = {}
+  if (!src || typeof src !== 'object') return out
+  for (const reason of reasons) {
+    const n = Math.max(0, Math.floor(Number(src[reason]) || 0))
+    if (n) out[reason] = n
+  }
+  return out
+}
+
 /**
  * 只保留最近 KEEP_DAYS 天，顺手保证结构完整。
  *
@@ -404,6 +460,7 @@ function prune(days) {
       byTypeCam: normTypeCam(d.byTypeCam),
       byZoneCounts: normZoneCounts(d.byZoneCounts),
       byZoneQuality: normZoneQuality(d.byZoneQuality),
+      byZoneTimeline: normZoneTimeline(d.byZoneTimeline),
       byTypeSub: normTypeSub(d.byTypeSub),
       push: {
         ding: { ...base.push.ding, ...((d.push || {}).ding || {}) },
@@ -418,6 +475,8 @@ function prune(days) {
       correctedHits: Math.max(0, Math.floor(Number(d.correctedHits) || 0)),
       suppressed: Math.max(0, Math.floor(Number(d.suppressed) || 0)),
       suppressedBy: normSuppressBy(d.suppressedBy),
+      pushFailBy: normReasonCounts(d.pushFailBy, PUSH_FAIL_REASONS),
+      channelStateEvents: normStateEvents(d.channelStateEvents),
       hitsByName: normHitsByName(d.hitsByName),
       recentHits: normRecentHits(d.recentHits),
       // 属性分布：白名单键 + 稀疏，`...d` 带进来的那份会被这里整段覆盖成规整版
@@ -721,6 +780,18 @@ export function statAlarm(type, ts = Date.now(), meta) {
               }
             }
           }
+          /*
+           * §5.195 分钟峰值线 / 停留直方图：60 秒采样送来的也是**当日累计快照**，
+           * 与 byZoneQuality 同理取 max，绝不按采样次数累加。
+           */
+          const byTimeline = meta.counts && meta.counts.byZoneTimeline
+          if (byTimeline && typeof byTimeline === 'object') {
+            if (!d.byZoneTimeline || typeof d.byZoneTimeline !== 'object') d.byZoneTimeline = {}
+            const wrap = d.byZoneTimeline[cam] && typeof d.byZoneTimeline[cam] === 'object'
+              ? { [cam]: d.byZoneTimeline[cam] } : {}
+            mergeZoneTimelineSnapshot(wrap, { [cam]: byTimeline })
+            d.byZoneTimeline[cam] = wrap[cam]
+          }
           // 类型总数同步改成各通道累计人次之和 —— 分段之和与总数天生对平
           d.byType.count = Object.keys(d.byTypeCam.count)
             .reduce((s, k) => s + (Number(d.byTypeCam.count[k]) || 0), 0)
@@ -854,14 +925,23 @@ export function statFaceAttrs(rec, ts = Date.now()) {
   }
 }
 
-/** 记一次推送结果（小时桶只关心"这个小时发了几条"，成功失败在日汇总里分开看） */export function statPush(channelId, ok, ts = Date.now()) {
+/**
+ * 记一次推送结果（小时桶只关心"这个小时发了几条"，成功失败在日汇总里分开看）。
+ * §5.194：失败时顺手把 error 原文归到固定分桶；成功时 error 被忽略。
+ */
+export function statPush(channelId, ok, ts = Date.now(), error = '') {
   try {
     if (!channelId) return
     const d = bucket(ts)
     const H = hoursOf(d)
     if (!d.push[channelId]) d.push[channelId] = { ok: 0, fail: 0 }
-    if (ok) d.push[channelId].ok += 1
-    else d.push[channelId].fail += 1
+    if (ok) {
+      d.push[channelId].ok += 1
+    } else {
+      d.push[channelId].fail += 1
+      const key = pushFailReasonKey(error)
+      d.pushFailBy[key] = (d.pushFailBy[key] || 0) + 1
+    }
     H.push[hourOf(ts)] += 1
     save()
   } catch (e) {
@@ -869,12 +949,21 @@ export function statFaceAttrs(rec, ts = Date.now()) {
   }
 }
 
-/** 记一次通道断线 / 恢复 */
-export function statChannelState(state, ts = Date.now()) {
+/** 记一次通道断线 / 恢复（§5.195 同时留一条带通道名的翻转边沿给 SLA） */
+export function statChannelState(state, ts = Date.now(), cam = '') {
   try {
     const d = bucket(ts)
     if (state === 'offline') d.offline += 1
     else if (state === 'online') d.online += 1
+    const name = String(cam || '').trim().slice(0, 24)
+    if (name && (state === 'offline' || state === 'online')) {
+      const ev = { cam: name, state, at: Math.max(0, Math.floor(Number(ts) || 0)) }
+      const arr = Array.isArray(d.channelStateEvents) ? d.channelStateEvents : (d.channelStateEvents = [])
+      const prev = arr[arr.length - 1]
+      // 同一通道同一状态连着报两次不算新边沿（watchdog 重启时会遇到）
+      if (!prev || prev.cam !== name || prev.state !== state) arr.push(ev)
+      if (arr.length > 200) d.channelStateEvents = arr.slice(-200)
+    }
     save()
   } catch (e) {
     /* 忽略 */
@@ -939,7 +1028,7 @@ export function statEvent(rec) {
   const t = Number(rec.time) || Date.now()
   // 掉线 / 恢复单列一类，不计入"报警"（否则报警数会被断线刷高）
   if (rec.type === 'offline' || rec.type === 'online') {
-    statChannelState(rec.type, t)
+    statChannelState(rec.type, t, rec.camName || rec.camId || rec.cam || rec.name)
     return
   }
   statAlarm(rec.type, t, rec)
@@ -1075,6 +1164,10 @@ export function aggregate(keys) {
       const n = Number((d.suppressedBy || {})[reason]) || 0
       if (n) total.suppressedBy[reason] = (total.suppressedBy[reason] || 0) + n
     }
+    for (const reason of PUSH_FAIL_REASONS) {
+      const n = Number((d.pushFailBy || {})[reason]) || 0
+      if (n) total.pushFailBy[reason] = (total.pushFailBy[reason] || 0) + n
+    }
     Object.keys(d.byType || {}).forEach((t) => {
       total.byType[t] = (total.byType[t] || 0) + (d.byType[t] || 0)
     })
@@ -1143,6 +1236,14 @@ export function aggregate(keys) {
           keys
         }
       }
+    }
+    /*
+     * §5.195 分钟线跨天同名取 max（同一分钟不同天的峰值各有意义，取大不累加），
+     * 停留直方图跨天按位相加（不同天的停留是不同样本）。
+     */
+    mergeZoneTimeline(total.byZoneTimeline, d.byZoneTimeline)
+    if (Array.isArray(d.channelStateEvents)) {
+      for (const ev of normStateEvents(d.channelStateEvents)) total.channelStateEvents.push(ev)
     }
     /*
      * §5.184 子维度全是事件次数：跨天直接相加（与 byType 同源）。
@@ -1226,6 +1327,22 @@ export function aggregate(keys) {
     })
   })
   total.recentHits = total.recentHits.sort((a, b) => (Number(b.t) || 0) - (Number(a.t) || 0)).slice(0, HIT_LOG_MAX)
+  /*
+   * §5.195 区间级派生指标：把各区域直方图并起来算 p50/p95；通道 SLA 由
+   * 状态翻转边沿串成区间算在线占比。两者都是纯读 total 上的字段，
+   * 不额外遍历 dailyStats.days，也不新增任何轮询。
+   */
+  const hist = Array(DWELL_BUCKET_COUNT).fill(0)
+  for (const table of Object.values(total.byZoneTimeline || {})) {
+    for (const z of Object.values(table || {})) {
+      const buckets = Array.isArray(z && z.dwellBuckets) ? z.dwellBuckets : []
+      for (let i = 0; i < DWELL_BUCKET_COUNT; i += 1) hist[i] += Number(buckets[i]) || 0
+    }
+  }
+  total.zoneDwellP50 = dwellPercentile(hist, 0.5)
+  total.zoneDwellP95 = dwellPercentile(hist, 0.95)
+  total.channelStateEvents = normStateEvents(total.channelStateEvents).slice(-1000)
+  total.channelSla = channelSlaOf(total.channelStateEvents, Date.now())
   // §5.178：跨天取 max 之后重算计数类型总数 = 各通道累计人次之和
   total.byType.count = Object.keys(total.byTypeCam.count)
     .reduce((s, k) => s + (Number(total.byTypeCam.count[k]) || 0), 0)
@@ -1314,10 +1431,51 @@ export function peakHour(arr) {
   return best
 }
 
-/** 某渠道的推送成功率（0~1，无数据返回 -1 表示"暂无数据"） */
+/**
+ * 推送成功率（0~1，无数据返回 -1 表示"暂无数据"）。
+ * §5.194 起应发未发进入分母：只要入参带 suppressed 就一并算进去。
+ * 渠道级 pushStat 没有 suppressed 字段，所以渠道口径仍是「成功 /（成功+失败）」，
+ * 表达"真发出去的那部分有多少送达"，不会被没发出的通知稀释。
+ */
 export function successRate(pushStat) {
   const ok = (pushStat && pushStat.ok) || 0
   const fail = (pushStat && pushStat.fail) || 0
-  if (!ok && !fail) return -1
-  return ok / (ok + fail)
+  const sup = (pushStat && pushStat.suppressed) || 0
+  if (!ok && !fail && !sup) return -1
+  return ok / (ok + fail + sup)
 }
+
+/** 整体成功率：三端 push 汇总 + 应发未发，分母 = 成功 + 失败 + 应发未发 */
+export function overallPushRate(agg) {
+  let ok = 0
+  let fail = 0
+  CHANNELS.forEach(({ id }) => {
+    const s = ((agg && agg.push) || {})[id] || {}
+    ok += Number(s.ok) || 0
+    fail += Number(s.fail) || 0
+  })
+  const sup = Number(agg && agg.suppressed) || 0
+  if (!ok && !fail && !sup) return -1
+  return ok / (ok + fail + sup)
+}
+
+/** 推送失败原因 Top-N（固定分桶，按次数降序，并列按白名单顺序） */
+export function pushFailTop(map, n = 3) {
+  return PUSH_FAIL_REASONS
+    .map((key) => ({ key, label: PUSH_FAIL_LABEL[key] || key, n: Math.max(0, Math.floor(Number((map || {})[key]) || 0)) }))
+    .filter((x) => x.n > 0)
+    .sort((a, b) => b.n - a.n)
+    .slice(0, Math.max(1, Math.floor(Number(n) || 3)))
+}
+
+/** 应发未发原因 Top-N（与 pushFailTop 同款，固定八类白名单） */
+export function suppressTop(map, n = 3) {
+  const label = { silent: '静默', throttle: '限流', unchecked: '未勾选', merge: '合并', faceSilent: '人脸静默', digest: '摘要', hardSilent: '硬静默', critical: '关键' }
+  return SUPPRESS_REASONS
+    .map((key) => ({ key, label: label[key] || key, n: Math.max(0, Math.floor(Number((map || {})[key]) || 0)) }))
+    .filter((x) => x.n > 0)
+    .sort((a, b) => b.n - a.n)
+    .slice(0, Math.max(1, Math.floor(Number(n) || 3)))
+}
+
+export { PUSH_FAIL_REASONS as STAT_PUSH_FAIL_REASONS }

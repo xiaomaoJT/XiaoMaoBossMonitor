@@ -114,7 +114,7 @@ export function recordPush(channelId, ok, error = '') {
      * 这样「关于系统」的累计数和「统计」页的按天数天然一致，
      * 不需要在两个地方各记一遍、也不会漏。
      */
-    statPush(channelId, ok, now)
+    statPush(channelId, ok, now, error)
 
     if (ok) {
       pushStats.ok += 1

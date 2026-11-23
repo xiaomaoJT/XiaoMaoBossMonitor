@@ -115,6 +115,31 @@
         <p class="tip-line">{{ segmentNote }}</p>
       </section>
 
+      <!-- ============ 时序与可用性（峰值线 / 停留分位 / 断线 SLA） ============ -->
+      <section class="card">
+        <h4>时序与可用性<em>区内人数 · 停留 · 在线率</em></h4>
+        <div class="series-grid">
+          <div class="series-cell">
+            <span class="series-k">区内同时人数峰值（按小时）</span>
+            <SparkLine v-if="peakMinute.n > 0" :values="hourPeakValues" color="var(--type-zone)" label="区内人数峰值" />
+            <p class="series-v" v-if="peakMinute.n > 0">
+              最高 {{ peakMinute.label }} · {{ peakMinute.n }} 人
+            </p>
+            <p class="no-data" v-else>这段时间还没有区内驻留样本。</p>
+          </div>
+          <div class="series-cell">
+            <span class="series-k">停留时长</span>
+            <p class="series-v">p50 {{ fmtMs(total.zoneDwellP50) }} · p95 {{ fmtMs(total.zoneDwellP95) }}</p>
+            <span class="series-k">通道在线 SLA</span>
+            <p class="series-v">{{ slaText }}</p>
+          </div>
+        </div>
+        <p class="tip-line">
+          分钟峰值取各区域当分钟区内同时人数的最大值；p50 / p95 由停留直方图插值，不存全量样本。
+          SLA = 在线区间时长 /（在线 + 断线区间时长），只统计真实发生的通道状态翻转，未观测的时段不猜。
+        </p>
+      </section>
+
       <!-- ============ 时段热力图（日期/类型 × 24 小时） ============ -->
       <section class="card">
         <h4>时段热力图<em>{{ heatMetricLabel }}</em></h4>
@@ -155,11 +180,12 @@
 
       <!-- ============ 三端推送（成功率刻度） ============ -->
       <section class="card">
-        <h4>三端推送<em>成功 / 失败 / 成功率</em></h4>
+        <h4>三端推送<em>整体 {{ pushOverallText }} · 含应发未发</em></h4>
         <PushStack :rows="channelRows" />
         <p class="tip-line">
-          成功率按「实际发出的推送」计算（成功 + 失败）。静默时段、限流、未勾选这些压根没发出去的，不计入。
-          本周期应发未发 {{ total.suppressed }} 条，单独计数、不进成功率分母。
+          整体成功率 = 成功 /（成功 + 失败 + 应发未发）；上方三端成功率只算真正发出去的推送，
+          用来看「哪一端在掉」。本周期应发未发 {{ total.suppressed }} 条{{ suppressText }}。
+          <template v-if="pushFailText">实际发送的失败原因：{{ pushFailText }}。</template>
         </p>
       </section>
 
@@ -271,7 +297,10 @@ import {
   hitPeopleOf,
   hourRows,
   hourTypeRows,
+  overallPushRate,
   peakHour,
+  pushFailTop,
+  suppressTop,
   recentDayKeys,
   resetDailyStats,
   statsOf
@@ -450,7 +479,66 @@ const segmentRows = computed(() => {
   return all.slice(0, SEGMENT_TOP).concat([{ id: '__rest', label: `其余 ${all.length - SEGMENT_TOP} 项`, n: rest, color: 'var(--accent)' }])
 })
 
+/* ==================== 时序与可用性（§5.195） ==================== */
+/** 所有通道 / 区域在同一分钟上的峰值取 max，得到「这一时刻画面里最多几人」 */
+const peakMinutes = computed(() => {
+  const m = {}
+  for (const table of Object.values(total.value.byZoneTimeline || {})) {
+    for (const z of Object.values(table || {})) {
+      for (const [min, raw] of Object.entries((z && z.minutes) || {})) {
+        const key = Number(min)
+        const n = Math.max(0, Number(raw) || 0)
+        if (key >= 0 && key < 1440 && n > (m[key] || 0)) m[key] = n
+      }
+    }
+  }
+  return m
+})
+const hourPeakValues = computed(() =>
+  Array.from({ length: 24 }, (_, h) => {
+    let best = 0
+    for (let m = h * 60; m < h * 60 + 60; m += 1) best = Math.max(best, peakMinutes.value[m] || 0)
+    return best
+  })
+)
+const peakMinute = computed(() => {
+  let minute = -1
+  let n = 0
+  for (const [m, v] of Object.entries(peakMinutes.value)) {
+    if (v > n) { n = v; minute = Number(m) }
+  }
+  return {
+    n,
+    label: minute < 0 ? '—' : `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`
+  }
+})
+const fmtMs = (ms) => {
+  const v = Math.max(0, Math.round(Number(ms) || 0))
+  if (v < 1000) return `${v}ms`
+  if (v < 60000) return `${(v / 1000).toFixed(v < 10000 ? 1 : 0)}s`
+  if (v < 3600000) return `${Math.round(v / 60000)}min`
+  return `${(v / 3600000).toFixed(1)}h`
+}
+const slaText = computed(() => {
+  const s = total.value.channelSla || {}
+  if (s.rate === undefined || s.rate < 0) return '暂无完整状态区间'
+  const obs = (Number(s.upMs) || 0) + (Number(s.downMs) || 0)
+  return `${(s.rate * 100).toFixed(1)}%（观测 ${fmtMs(obs)} · 断线 ${fmtMs(s.downMs)} · 翻转 ${s.transitions || 0} 次）`
+})
+
 /* ==================== 三端推送 ==================== */
+/** §5.194 整体口径含应发未发；渠道行仍只算实际发出（PushStack 自己算） */
+const pushOverallText = computed(() => {
+  const rate = overallPushRate(total.value)
+  return rate < 0 ? '—' : `${Math.round(rate * 100)}%`
+})
+const pushFailText = computed(() =>
+  pushFailTop(total.value.pushFailBy, 3).map((r) => `${r.label} ${r.n}`).join(' · ')
+)
+const suppressText = computed(() => {
+  const rows = suppressTop(total.value.suppressedBy, 3)
+  return rows.length ? `（主要：${rows.map((r) => `${r.label} ${r.n}`).join(' · ')}）` : ''
+})
 const pushTotal = computed(() => {
   const sum = { ok: 0, fail: 0 }
   STAT_CHANNELS.forEach(({ id }) => {
@@ -684,6 +772,9 @@ function exportStats() {
       命中纠正: d.correctedHits || 0,
       命中判误报: d.falseHits || 0,
       应发未发: d.suppressed || 0,
+      // §5.194 固定原因分桶，CSV 带摘要便于外部对账（不计入 faceHits / 成功率老字段）
+      应发未发原因: suppressTop(d.suppressedBy, 8).map((r) => `${r.label}${r.n}`).join(' '),
+      推送失败原因: pushFailTop(d.pushFailBy, 6).map((r) => `${r.label}${r.n}`).join(' '),
       命中人数: Object.keys(d.hitsByName || {}).length,
       // 「张三×3 李四×1」这样的摘要：CSV 是拿去做分析的，逐人一行反而不好透视
       命中人员: hitRankText(d),
@@ -884,6 +975,36 @@ void dailyStats
   font-size: 11.5px;
   color: var(--text-dim-2);
   text-align: center;
+}
+
+/* §5.195 时序与可用性 */
+.series-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 12px;
+  align-items: stretch;
+}
+.series-cell {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  min-width: 0;
+}
+.series-k {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-dim-2);
+  line-height: 1.5;
+}
+.series-v {
+  margin: 4px 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tip-line {

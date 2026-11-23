@@ -343,9 +343,12 @@ export function useAiExtras(options) {
       const day = dailyStats.days && dailyStats.days[key]
       const all = day && day.byZoneCounts
       const allQuality = day && day.byZoneQuality
-      const byZone = all && (all[cam && cam.id] || all[(cam && cam.name) || ''])
-      const byQuality = allQuality && (allQuality[cam && cam.id] || allQuality[(cam && cam.name) || ''])
-      if (byZone && typeof byZone === 'object') tracker.restoreZoneCounts(byZone, byQuality)
+      const allTimeline = day && day.byZoneTimeline
+      const keyOf = (table) => table && (table[cam && cam.id] || table[(cam && cam.name) || ''])
+      const byZone = keyOf(all)
+      const byQuality = keyOf(allQuality)
+      const byTimeline = keyOf(allTimeline)
+      if (byZone || byQuality || byTimeline) tracker.restoreZoneCounts(byZone, byQuality, byTimeline)
     } catch (e) { /* 统计存档坏了不影响检测 */ }
   }
 
@@ -760,7 +763,7 @@ export function useAiExtras(options) {
     // §5.182：counts 内嵌区域级累计快照（zoneId -> {name,totalIn,totalOut}），
     // 供统计按「通道 × 区域」分段 + 重启从今日存档恢复；统计侧从 counts.byZone 读。
     // §5.189：并列带出驻留质量（去重 / 峰值 / 停留），与 totalIn 分开落地。
-    const base = { type: 'count', counts: { ...c, zoned: hasZone, byZone: tracker.zoneCountSnapshot(), byZoneQuality: tracker.zoneQualitySnapshot() }, at: now, text, source: 'count', countZoned: hasZone }
+    const base = { type: 'count', counts: { ...c, zoned: hasZone, byZone: tracker.zoneCountSnapshot(), byZoneQuality: tracker.zoneQualitySnapshot(), byZoneTimeline: tracker.zoneTimelineSnapshot() }, at: now, text, source: 'count', countZoned: hasZone }
 
     // ① 统计采样：60 秒节奏，只喂统计
     if (!lastCountStatAt || now - lastCountStatAt >= COUNT_STAT_INTERVAL_MS) {

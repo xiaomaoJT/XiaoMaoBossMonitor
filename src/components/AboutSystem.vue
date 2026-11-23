@@ -62,7 +62,8 @@
         首次推送 {{ pushStats.firstAt ? ago(pushStats.firstAt) : '暂无' }} ·
         最近推送 {{ pushStats.lastAt ? ago(pushStats.lastAt) : '暂无' }}
         <br />
-        只统计真正发出去的（静默时段、未勾选、限流拦截的不计入）。
+        这里的累计成功率只统计真正发出去的（静默时段、未勾选、限流拦截的不计入）。
+        含应发未发的整体口径看「统计」页；失败原因按天分布也在那里。
       </p>
     </section>
 

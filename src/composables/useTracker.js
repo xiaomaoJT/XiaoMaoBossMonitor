@@ -79,6 +79,21 @@ export class Tracker {
     this.zoneStats = {}
     /** @type {Object<string,{keys:Set<string>,peak:number,dwellSum:number,dwellSamples:number}>} */
     this.zoneQuality = {}
+    /**
+     * §5.195 分钟峰值线 + 停留直方图：zoneId -> { minutes:{'m':峰值}, dwellBuckets:[9] }。
+     * 与 zoneQuality 同为「区内人数」量纲，但这里按本地分钟存时间线，
+     * 只记边沿时刻（踏入取此刻区内人数、离开记一次停留），不是每帧轮询。
+     */
+    this.zoneTimeline = {}
+  }
+
+  /** 停留时长落哪个桶（与 seriesStats.DWELL_EDGES_MS 同口径，内嵌避免探针切片缺依赖） */
+  _dwellBucket(ms) {
+    const edges = [1000, 3000, 10000, 30000, 60000, 180000, 600000, 1800000]
+    const v = Number(ms)
+    if (!Number.isFinite(v) || v <= 0) return 0
+    for (let i = 0; i < edges.length; i += 1) if (v < edges[i]) return i
+    return 8
   }
 
   /** 是否计入某区域的计数（真实区域 + 区域级计数开关默认开） */
@@ -104,7 +119,7 @@ export class Tracker {
    * @param {Object<string,{totalIn?:number,totalOut?:number}>} zoneCounts zoneId -> 累计
    * @param {Object<string,object>} [zoneQuality] zoneId -> 驻留快照
    */
-  restoreZoneCounts(zoneCounts, zoneQuality) {
+  restoreZoneCounts(zoneCounts, zoneQuality, zoneTimeline) {
     this.zoneStats = {}
     if (zoneCounts && typeof zoneCounts === 'object') {
       for (const [id, raw] of Object.entries(zoneCounts)) {
@@ -115,6 +130,7 @@ export class Tracker {
     }
     this._recountStats()
     this.restoreZoneQuality(zoneQuality)
+    this.restoreZoneTimeline(zoneTimeline)
   }
 
   /** §5.189 恢复区域驻留快照：keys 用来续上当日去重，unique 兼容只有聚合值的老档 */
@@ -135,10 +151,33 @@ export class Tracker {
     }
   }
 
+  /** §5.195 恢复当日分钟线 / 停留直方图（老档没有就留空，不碰别的快照） */
+  restoreZoneTimeline(zoneTimeline) {
+    this.zoneTimeline = {}
+    if (!zoneTimeline || typeof zoneTimeline !== 'object') return
+    for (const [id, raw] of Object.entries(zoneTimeline)) {
+      const z = raw && typeof raw === 'object' ? raw : {}
+      const minutes = {}
+      const src = z.minutes && typeof z.minutes === 'object' ? z.minutes : {}
+      for (const [m, v] of Object.entries(src)) {
+        const min = Math.floor(Number(m))
+        const peak = Math.max(0, Math.floor(Number(v) || 0))
+        if (min >= 0 && min < 1440 && peak > 0) minutes[String(min)] = peak
+      }
+      const hist = Array.isArray(z.dwellBuckets) ? z.dwellBuckets : []
+      this.zoneTimeline[String(id).slice(0, 64)] = {
+        name: String(z.name || '区域').slice(0, 24),
+        minutes,
+        dwellBuckets: Array.from({ length: 9 }, (_, i) => Math.max(0, Math.floor(Number(hist[i]) || 0)))
+      }
+    }
+  }
+
   /** 每日 00:00 归零：累计与驻留都清，轨迹保留（避免跨天误判为走出） */
   clearZoneCounts() {
     this.zoneStats = {}
     this.zoneQuality = {}
+    this.zoneTimeline = {}
     this._recountStats()
   }
 
@@ -159,23 +198,44 @@ export class Tracker {
     return `t${Math.max(0, Math.floor(Number(tr && tr.id) || 0))}`
   }
 
-  /** §5.189 踏入区域：记去重身份 + 此刻区内人数峰值 */
-  _qualityEnter(zone, tr) {
+  /** §5.195 分钟线桶（真实且开启计数的区域才建） */
+  _zoneTimelineFor(zoneId) {
+    let zt = this.zoneTimeline[zoneId]
+    if (!zt) {
+      zt = { name: '区域', minutes: {}, dwellBuckets: Array(9).fill(0) }
+      this.zoneTimeline[zoneId] = zt
+    }
+    return zt
+  }
+
+  /** §5.189 / §5.195 踏入区域：记去重身份 + 此刻区内人数峰值（含该分钟的时间线） */
+  _qualityEnter(zone, tr, at = Date.now()) {
     if (!this._countsFor(zone)) return
     const zq = this._zoneQualityFor(zone.id)
     zq.keys.add(this._zoneTrackKey(tr))
     zq.unique = zq.keys.size
-    zq.peak = Math.max(zq.peak, this._insideCount(zone.id))
+    const inside = this._insideCount(zone.id)
+    zq.peak = Math.max(zq.peak, inside)
+    const zt = this._zoneTimelineFor(zone.id)
+    zt.name = zone.name || zt.name
+    const d = new Date(Math.max(0, Number(at) || 0))
+    const minute = d.getHours() * 60 + d.getMinutes()
+    const m = String(minute)
+    if (inside > (zt.minutes[m] || 0)) zt.minutes[m] = inside
   }
 
-  /** §5.189 离开区域：累计真实停留（含短于 minDwellMs、不产 exit 事件的贴边抖动） */
-  _qualityLeave(zone, dwellMs) {
+  /** §5.189 / §5.195 离开区域：累计真实停留 + 落入分钟时间线的分桶（短停留也记） */
+  _qualityLeave(zone, dwellMs, at = Date.now()) {
     if (!this._countsFor(zone)) return
     const ms = Number(dwellMs)
     if (!Number.isFinite(ms) || ms <= 0) return
     const zq = this._zoneQualityFor(zone.id)
     zq.dwellSum += ms
     zq.dwellSamples += 1
+    const zt = this._zoneTimelineFor(zone.id)
+    zt.dwellBuckets[this._dwellBucket(ms)] += 1
+    // at 仅用于将来扩展；分桶不需要时刻，保留参数让调用方语义一致
+    void at
   }
 
   /** 区域级累计快照，供采样事件携带 / 存档：{ zoneId: { name, totalIn, totalOut } } */
@@ -212,6 +272,31 @@ export class Tracker {
     return out
   }
 
+  /** §5.195 分钟线快照：60 秒采样随 countStatOnly 一起落日存档，供 p50/p95 与峰值时间线用 */
+  zoneTimelineSnapshot() {
+    const out = {}
+    for (const zone of this.zones) {
+      if (!this._countsFor(zone)) continue
+      const zt = this.zoneTimeline[zone.id]
+      if (!zt) continue
+      // 有界：最多 360 个分钟键，超了丢峰值最小的（可视化只看高峰）
+      const entries = Object.entries(zt.minutes)
+        .map(([m, v]) => [Number(m), Math.max(0, Math.floor(Number(v) || 0))])
+        .filter(([m, v]) => m >= 0 && m < 1440 && v > 0)
+        .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+        .slice(0, 360)
+        .sort((a, b) => a[0] - b[0])
+      const minutes = {}
+      for (const [m, v] of entries) minutes[String(m)] = v
+      out[zone.id] = {
+        name: zone.name || zt.name || '区域',
+        minutes,
+        dwellBuckets: zt.dwellBuckets.slice(0, 9)
+      }
+    }
+    return out
+  }
+
   /** 更新区域配置（设置里改了区域后调用） */
   setZones(zones) {
     this.zones = Array.isArray(zones) ? zones : []
@@ -230,6 +315,9 @@ export class Tracker {
     for (const k of Object.keys(this.zoneQuality)) {
       if (!ids.has(k)) delete this.zoneQuality[k]
     }
+    for (const k of Object.keys(this.zoneTimeline)) {
+      if (!ids.has(k)) delete this.zoneTimeline[k]
+    }
     if (changed) this._recountStats()
   }
 
@@ -239,6 +327,7 @@ export class Tracker {
     this.stats = { current: 0, totalIn: 0, totalOut: 0 }
     this.zoneStats = {}
     this.zoneQuality = {}
+    this.zoneTimeline = {}
   }
 
   /** 已确认（连续命中达标）的轨迹 */
@@ -426,7 +515,7 @@ export class Tracker {
       const zone = this.zones.find((z) => z.id === key)
       const dwellMs = st.since ? t - st.since : 0
       // §5.189 短停留也计入真实驻留，但它不该产生 exit 事件 / totalOut
-      this._qualityLeave(zone, dwellMs)
+      this._qualityLeave(zone, dwellMs, t)
       if (zone && zone.enterExit !== false) {
         events.push({
           kind: 'exit',
@@ -469,7 +558,7 @@ export class Tracker {
         st.since = t
         st.loitered = false
         // §5.189 独立于 enter 事件 / totalIn：只要真实计数区域就记驻留质量
-        this._qualityEnter(zone, tr)
+        this._qualityEnter(zone, tr, t)
         if (zone.enterExit !== false) {
           events.push({
             kind: 'enter',
@@ -495,7 +584,7 @@ export class Tracker {
         st.inside = false
         const dwellMs = st.since ? t - st.since : 0
         // §5.189 真实停留先记账，再按事件门槛决定是否产 exit
-        this._qualityLeave(zone, dwellMs)
+        this._qualityLeave(zone, dwellMs, t)
         // 只是贴着边界抖动了一下（停留很短）就不算一次离开
         const minMs = Math.max(0, Number(zone.minDwellMs) || 600)
         if (zone.enterExit !== false && dwellMs >= minMs) {
