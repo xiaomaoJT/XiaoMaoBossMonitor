@@ -130,7 +130,17 @@ function makeChannelDefs(options) {
 }
 
 export function useAlertPush(options, hooks = {}) {
-  const { onState = () => {}, notify = () => {} } = hooks
+  const { onState = () => {}, notify = () => {}, onSuppressed = () => {} } = hooks
+
+  /*
+   * §5.191 通知抑制上报。只是**可选钩子**，默认空实现 —— 不传钩子的调用方
+   * （前端 / 后端 / 探针）行为一个字节都不变。统计层在钩子那侧决定记不记，
+   * 这里不做任何判定，也不 import 统计模块，保持判定层与统计层解耦。
+   */
+  const reportSuppressed = (reason, n = 1, at = Date.now()) => {
+    const count = Math.max(0, Math.floor(Number(n) || 0))
+    if (count) onSuppressed(reason, count, at)
+  }
 
   /** 每次创建实例时按当前 options 生成（read 是闭包，取的时候仍读实时配置） */
   const CHANNEL_DEFS = makeChannelDefs(options)
@@ -2737,6 +2747,7 @@ export function useAlertPush(options, hooks = {}) {
       // ⚠️ 文案必须是 defaults.FACE_SILENT_NOTE：后端 onState 靠**精确比对**这条
       // 文案落 events.face_silent 标记，托盘桌面通知与大屏本地提醒靠标记一起安静。
       onState(record.key, 'off', FACE_SILENT_NOTE)
+      reportSuppressed('faceSilent', 1, now)
       return record
     }
     /*
@@ -2826,6 +2837,7 @@ export function useAlertPush(options, hooks = {}) {
       }
       scheduleSilentFlush()
       buffered = true
+      reportSuppressed('hardSilent', 1, now)
     } else if (faceHitRoute || isFlowCritical(record)) {
       /*
        * 非硬静默（普通临时静默 / 定时免打扰时段）期间的关键事件。
@@ -2843,6 +2855,7 @@ export function useAlertPush(options, hooks = {}) {
        */
       const suppressIds = [...byGlobal, ...byCam]
       if (suppressIds.length) {
+        reportSuppressed('silent', suppressIds.length, now)
         if (byGlobal.length) {
           if (!silentSeen.has(record.key)) {
             silentSeen.add(record.key)
@@ -2865,6 +2878,7 @@ export function useAlertPush(options, hooks = {}) {
     } else if (!faceHitRoute && !isFlowCritical(record)) {
       const suppressIds = [...byGlobal, ...byCam]
       if (suppressIds.length) {
+        reportSuppressed('silent', suppressIds.length, now)
         send = send.filter((id) => !suppressIds.includes(id))
         queue = queue.filter((id) => !suppressIds.includes(id))
         /*
@@ -2936,6 +2950,9 @@ export function useAlertPush(options, hooks = {}) {
           // 仅对**非在库人脸 / 非走向关键**事件从实时 send/queue 里摘（避免与日常汇总双发）；
           // 在库人脸 / 走向关键仍按关键事件单独提醒，日常汇总只做"记录"，不重复抑制其实时。
           if (!faceHitRoute && !isFlowCritical(record)) {
+            const digSup = send.filter((id) => dchans.includes(id)).length +
+              queue.filter((id) => dchans.includes(id)).length
+            reportSuppressed('digest', digSup, now)
             send = send.filter((id) => !dchans.includes(id))
             queue = queue.filter((id) => !dchans.includes(id))
           }
@@ -3062,6 +3079,8 @@ export function useAlertPush(options, hooks = {}) {
     if (send.length) await deliver([record], false, send)
 
     if (queue.length) {
+      // 合并排队也算"此刻没有实时发出"，到点汇总时才补上；统计记一条，不重复记发送
+      reportSuppressed('merge', queue.length, now)
       queue.forEach((d) => {
         const st = chState[d.id]
         st.pending.push(record)
@@ -3077,6 +3096,9 @@ export function useAlertPush(options, hooks = {}) {
         .filter((d) => !d.ok && !d.off)
         .map((d) => `${CHANNEL_DEFS.find((x) => x.id === d.id).name}：${d.reason}`)
       const offs = decisions.filter((d) => d.off)
+      // §5.191 限流与未勾选都归到"应发未发"；不碰 push.ok/fail 与老成功率口径
+      if (reasons.length) reportSuppressed('throttle', reasons.length, now)
+      if (offs.length === decisions.length) reportSuppressed('unchecked', offs.length, now)
       if (reasons.length) onState(record.key, 'off', reasons.join('；'))
       else if (offs.length === decisions.length) onState(record.key, 'off', '三个渠道都没有推送该通道（未启用 / 凭据不全 / 该通道未勾选）')
     }

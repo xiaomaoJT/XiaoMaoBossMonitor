@@ -320,7 +320,7 @@ import {
   skipSyncFlow,
   stepSyncFlow
 } from './composables/useSyncProgress.js'
-import { dayKey, dailyStats, setStatsRemote, statEvent, syncStatsFromRemote } from './composables/useDailyStats'
+import { dayKey, dailyStats, setStatsRemote, statEvent, statSuppressed, syncStatsFromRemote } from './composables/useDailyStats'
 import {
   buildPatrolMessage,
   buildStatusAlertMessage,
@@ -2418,7 +2418,9 @@ const push = useAlertPush(options, {
    * 「这一条属于哪一路、那一路有没有在通道静默」。写成 options.cameras 会多存一份
    * 镜像，且一旦不同步就是"配了通道静默却不生效"。
    */
-  getCameras: () => cameras.value
+  getCameras: () => cameras.value,
+  // §5.191：纯前端模式下也应发未发计入本机统计；后端模式由服务端记，不重复
+  onSuppressed: (reason, n, at) => { if (!backendActive.value) statSuppressed(reason, at, n) }
 })
 
 /*

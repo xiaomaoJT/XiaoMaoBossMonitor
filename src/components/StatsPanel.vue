@@ -96,6 +96,25 @@
         <p class="no-data" v-else>该周期没有报警记录。</p>
       </section>
 
+      <!-- ============ 细分构成（通道 / 区域 / 子维度，数据来自 total，不重复聚合） ============ -->
+      <section class="card">
+        <h4>细分构成<em>{{ segmentDimLabel }}</em></h4>
+        <div class="seg heat-seg">
+          <button
+            v-for="d in SEGMENT_DIMS"
+            :key="d.key"
+            class="seg-btn"
+            :class="{ on: segmentDim === d.key }"
+            @click="segmentDim = d.key"
+          >
+            {{ d.label }}
+          </button>
+        </div>
+        <DistBars v-if="segmentRows.length" :rows="segmentRows" unit="次" />
+        <p class="no-data" v-else>该周期没有细分记录。</p>
+        <p class="tip-line">{{ segmentNote }}</p>
+      </section>
+
       <!-- ============ 时段热力图（日期/类型 × 24 小时） ============ -->
       <section class="card">
         <h4>时段热力图<em>{{ heatMetricLabel }}</em></h4>
@@ -140,6 +159,7 @@
         <PushStack :rows="channelRows" />
         <p class="tip-line">
           成功率按「实际发出的推送」计算（成功 + 失败）。静默时段、限流、未勾选这些压根没发出去的，不计入。
+          本周期应发未发 {{ total.suppressed }} 条，单独计数、不进成功率分母。
         </p>
       </section>
 
@@ -245,6 +265,7 @@ import {
   STAT_ALARM_TYPES,
   STAT_CHANNELS,
   STAT_HOUR_METRICS,
+  STAT_SUB_TYPES,
   aggregate,
   dailyStats,
   hitPeopleOf,
@@ -279,6 +300,7 @@ const TYPE_COLOR = {
   zone: 'var(--type-zone)',
   pose: 'var(--type-pose)',
   motion: 'var(--type-motion)',
+  flow: 'var(--type-flow)',
   count: 'var(--type-count)'
 }
 
@@ -351,7 +373,7 @@ const knownValues = computed(() => rangeKeys.value.map((k) => statsOf(k).faceHit
 
 /* ==================== 类型分布 ==================== */
 /**
- * 六种类型**都列**（含 0）：零行也占一格，列表长度稳定，切周期时不会跳动。
+ * 七种类型**都列**（含 0）：零行也占一格，列表长度稳定，切周期时不会跳动。
  * 按次数降序，并列时保持声明顺序（Array.sort 是稳定排序）。
  */
 const typeItems = computed(() =>
@@ -363,6 +385,70 @@ const typeItems = computed(() =>
   })).sort((a, b) => b.n - a.n)
 )
 const typeTotal = computed(() => typeItems.value.reduce((a, r) => a + r.n, 0))
+
+/* ==================== 细分构成：通道 / 区域 / 子维度 ==================== */
+/**
+ * §5.191 把 useDailyStats.aggregate() 已经算好的分段数据直接映射成 DistBars 的行。
+ * 性能：只有一个 computed、只读 total.value —— 不重新遍历 dailyStats.days，
+ * 不新增轮询；Vue 惰性求值，没激活的那一档根本不算。Top-N 收口防止千行 DOM。
+ */
+const SEGMENT_DIMS = [
+  { key: 'cam', label: '按通道' },
+  { key: 'zone', label: '按区域' },
+  { key: 'sub', label: '按子维度' }
+]
+const SEGMENT_TOP = 12
+const segmentDim = ref('cam')
+const segmentDimLabel = computed(() => {
+  const d = SEGMENT_DIMS.find((x) => x.key === segmentDim.value)
+  return d ? d.label : SEGMENT_DIMS[0].label
+})
+const segmentNote = computed(() => {
+  if (segmentDim.value === 'zone') return '区域行优先显示区内去重人数；历史存档没有轨迹快照时退回累计人次快照。'
+  if (segmentDim.value === 'cam') return '计数通道行是累计经过人次快照（跨天取最大），其余类型通道行是事件次数。'
+  return '只在人脸 / 区域 / 走向 / 姿态四类上有子维度；事件次数跨天求和。'
+})
+const segmentRows = computed(() => {
+  const t = total.value
+  const all = []
+  if (segmentDim.value === 'cam') {
+    for (const type of STAT_ALARM_TYPES) {
+      const table = (t.byTypeCam || {})[type.id] || {}
+      for (const [name, raw] of Object.entries(table)) {
+        const n = Math.max(0, Math.floor(Number(raw) || 0))
+        if (!n || !name) continue
+        all.push({ id: `${type.id}:${name}`, label: `${type.label}·${name}`, n, color: TYPE_COLOR[type.id] || 'var(--accent)' })
+      }
+    }
+  } else if (segmentDim.value === 'zone') {
+    const counts = t.byZoneCounts || {}
+    const quality = t.byZoneQuality || {}
+    for (const [cam, zones] of Object.entries(counts)) {
+      for (const [zid, z] of Object.entries(zones || {})) {
+        const q = (quality[cam] || {})[zid]
+        const unique = Number(q && q.unique) || 0
+        const n = unique || Math.max(0, Number(z && z.totalIn) || 0)
+        if (!n) continue
+        const name = String((z && z.name) || '区域').slice(0, 12)
+        all.push({ id: `zone:${cam}:${zid}`, label: `${String(cam).slice(0, 12)}·${name}`, n, color: TYPE_COLOR.zone })
+      }
+    }
+  } else {
+    for (const typeId of STAT_SUB_TYPES) {
+      const table = (t.byTypeSub || {})[typeId] || {}
+      const type = STAT_ALARM_TYPES.find((x) => x.id === typeId)
+      for (const [name, raw] of Object.entries(table)) {
+        const n = Math.max(0, Math.floor(Number(raw) || 0))
+        if (!n || !name) continue
+        all.push({ id: `sub:${typeId}:${name}`, label: `${type ? type.label : typeId}·${String(name).slice(0, 12)}`, n, color: TYPE_COLOR[typeId] || 'var(--accent)' })
+      }
+    }
+  }
+  all.sort((a, b) => b.n - a.n)
+  if (all.length <= SEGMENT_TOP) return all
+  const rest = all.slice(SEGMENT_TOP).reduce((s, r) => s + r.n, 0)
+  return all.slice(0, SEGMENT_TOP).concat([{ id: '__rest', label: `其余 ${all.length - SEGMENT_TOP} 项`, n: rest, color: 'var(--accent)' }])
+})
 
 /* ==================== 三端推送 ==================== */
 const pushTotal = computed(() => {
@@ -589,10 +675,15 @@ function exportStats() {
       区域: d.byType.zone || 0,
       姿态: d.byType.pose || 0,
       移动: d.byType.motion || 0,
+      走向: d.byType.flow || 0,
       计数: d.byType.count || 0,
       识别人次: d.personHits || 0,
       唯一人数: (d.people || []).length,
       人脸命中: d.faceHits || 0,
+      // §5.191 事后纠正与应发未发：独立正向计数，不回减命中、不改成功率
+      命中纠正: d.correctedHits || 0,
+      命中判误报: d.falseHits || 0,
+      应发未发: d.suppressed || 0,
       命中人数: Object.keys(d.hitsByName || {}).length,
       // 「张三×3 李四×1」这样的摘要：CSV 是拿去做分析的，逐人一行反而不好透视
       命中人员: hitRankText(d),

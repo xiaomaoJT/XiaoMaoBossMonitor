@@ -126,6 +126,12 @@ const UNIQ_KEYS_MAX = 512
 /** 小时桶里允许出现的类型键：6 个已知类型 + 区域事件的 3 个细分（有上界，不会被子存档撑大） */
 const HOUR_TYPE_KEYS = [...ALARM_TYPES.map((t) => t.id), ...ZONE_ALIASES]
 
+/**
+ * §5.191 通知抑制的原因白名单。键数固定，写入只是 O(1) 自增；
+ * 不做自由键，避免脏指令把日存档撑大（与 faceAttrs.tags 同款纪律）。
+ */
+const SUPPRESS_REASONS = ['silent', 'throttle', 'unchecked', 'merge', 'faceSilent', 'digest', 'hardSilent', 'critical']
+
 /** 热力图的指标维度（值取自 `hours[metric]`） */
 const HOUR_METRICS = [
   { id: 'alarms', label: '报警' },
@@ -258,6 +264,19 @@ function emptyDay() {
      * 后者回答"摄像头看见过多少人"。
      */
     faceHits: 0,
+    /**
+     * §5.191 人脸命中的事后纠正（**独立正向计数，不回减 faceHits**）。
+     * falseHits = 被 /hitblock 判为误报的样本；correctedHits = 被 /hitfix 补录纠正的样本。
+     * 已同步到前端的历史日桶无法回滚，回减只会让两端对不上，所以只记"发生了多少次纠正"。
+     */
+    falseHits: 0,
+    correctedHits: 0,
+    /**
+     * §5.191 应发未发的通知条数（静默 / 限流 / 未勾选 / 合并 / 人脸组静默 / 摘要 / 硬静默）。
+     * 与 push.ok/fail 并列，不改 old 成功率口径；suppressedBy 只记固定原因键。
+     */
+    suppressed: 0,
+    suppressedBy: {},
     /** 人员榜：{ [名字]: { n: 命中次数, t: 最近一次命中时刻 } } */
     hitsByName: {},
     /** 最近命中明细（时间**倒序**，最多 HIT_LOG_MAX 条）：{ n:名字, t:时刻, c:通道, s:相似度 } */
@@ -352,6 +371,17 @@ function normAttrs(src) {
   return base
 }
 
+/** §5.191 抑制原因归一化：固定白名单 + 非负整数 + 空桶不写（体积有上界） */
+function normSuppressBy(src) {
+  const out = {}
+  if (!src || typeof src !== 'object') return out
+  for (const reason of SUPPRESS_REASONS) {
+    const n = Math.max(0, Math.floor(Number(src[reason]) || 0))
+    if (n) out[reason] = n
+  }
+  return out
+}
+
 /**
  * 只保留最近 KEEP_DAYS 天，顺手保证结构完整。
  *
@@ -383,6 +413,11 @@ function prune(days) {
       people: Array.isArray(d.people) ? d.people.slice(0, 200) : [],
       // 命中：次数是标量，直接夹成非负整数；两张表各自规整（见上面两个函数）
       faceHits: Math.max(0, Math.floor(Number(d.faceHits) || 0)),
+      // §5.191 纠正与抑制：老存档缺字段由 ...base 补 0，脏值在这里夹住
+      falseHits: Math.max(0, Math.floor(Number(d.falseHits) || 0)),
+      correctedHits: Math.max(0, Math.floor(Number(d.correctedHits) || 0)),
+      suppressed: Math.max(0, Math.floor(Number(d.suppressed) || 0)),
+      suppressedBy: normSuppressBy(d.suppressedBy),
       hitsByName: normHitsByName(d.hitsByName),
       recentHits: normRecentHits(d.recentHits),
       // 属性分布：白名单键 + 稀疏，`...d` 带进来的那份会被这里整段覆盖成规整版
@@ -847,6 +882,44 @@ export function statChannelState(state, ts = Date.now()) {
 }
 
 /**
+ * §5.191 记一次人脸命中的事后纠正。只做正向计数，**绝不回减 faceHits** ——
+ * 已同步到前端的日桶无法回滚，减了只会让两端对不上。
+ */
+export function statFalseHit(ts = Date.now(), n = 1) {
+  try {
+    bucket(ts).falseHits += Math.max(0, Math.floor(Number(n) || 0))
+    save()
+  } catch (e) {
+    /* 统计失败绝不影响修正指令 */
+  }
+}
+export function statCorrectedHit(ts = Date.now(), n = 1) {
+  try {
+    bucket(ts).correctedHits += Math.max(0, Math.floor(Number(n) || 0))
+    save()
+  } catch (e) {
+    /* 同上 */
+  }
+}
+
+/**
+ * §5.191 记一条应发未发的通知。原因走白名单，避免自由键撑大存档；
+ * 不碰 push.ok/fail，老成功率口径保持原样。
+ */
+export function statSuppressed(reason, ts = Date.now(), n = 1) {
+  try {
+    const key = SUPPRESS_REASONS.includes(reason) ? reason : 'unchecked'
+    const add = Math.max(0, Math.floor(Number(n) || 0))
+    const d = bucket(ts)
+    d.suppressed += add
+    d.suppressedBy[key] = (d.suppressedBy[key] || 0) + add
+    save()
+  } catch (e) {
+    /* 同上 */
+  }
+}
+
+/**
  * 一条事件该记哪些统计 —— **唯一判定**。
  * ----------------------------------------------------------------------------
  * 前端 App.vue 的 onAlarm（本机检测 / 后端轮询事件都走它）与后端
@@ -994,6 +1067,14 @@ export function aggregate(keys) {
     total.offline += d.offline || 0
     total.online += d.online || 0
     total.personHits += d.personHits || 0
+    // §5.191 纠正与抑制都是"发生次数"，与 faceHits 同类跨天求和（不取 max）
+    total.falseHits += d.falseHits || 0
+    total.correctedHits += d.correctedHits || 0
+    total.suppressed += d.suppressed || 0
+    for (const reason of SUPPRESS_REASONS) {
+      const n = Number((d.suppressedBy || {})[reason]) || 0
+      if (n) total.suppressedBy[reason] = (total.suppressedBy[reason] || 0) + n
+    }
     Object.keys(d.byType || {}).forEach((t) => {
       total.byType[t] = (total.byType[t] || 0) + (d.byType[t] || 0)
     })
