@@ -3192,7 +3192,9 @@ const COUNT_INTERVAL_PRESETS = [
   { value: 600, label: '10 分钟' },
   { value: 1800, label: '30 分钟' },
   { value: 3600, label: '1 小时' },
-  { value: 14400, label: '4 小时（默认）' },
+  { value: 14400, label: '4 小时' },
+  { value: 21600, label: '6 小时（默认）' },
+  { value: 28800, label: '8 小时' },
   { value: 43200, label: '12 小时' },
   { value: 86400, label: '24 小时' }
 ]
@@ -3205,9 +3207,9 @@ function formatInterval(sec) {
 }
 
 const countIntervalPicked = computed({
-  get: () => Number(opts.zone && opts.zone.countIntervalSec) || 14400,
+  get: () => Number(opts.zone && opts.zone.countIntervalSec) || 21600,
   set: (v) => {
-    opts.zone.countIntervalSec = Number(v) || 14400
+    opts.zone.countIntervalSec = Number(v) || 21600
   }
 })
 

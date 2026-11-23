@@ -629,14 +629,14 @@ function migrateDingShotMode(opts) {
  * 一次性迁移：人员计数推送间隔的老默认是 60 秒。
  * 它本质是「定时播报」而不是报警 —— 画面里 0 个人也会照推，
  * 60 秒一条意味着一夜几百条「人员计数 · 大门外」，真报警全被淹没。
- * 统一升级为 4 小时；用户自己改过的其它值（≠60）原样保留。
+ * 统一升级为 6 小时；用户自己改过的其它值（≠60）原样保留。
  */
 function migrateCountInterval(opts) {
   const FLAG = 'monitor-wall-count-interval-v1'
   try {
     if (localStorage.getItem(FLAG)) return
     if (opts && opts.zone && Number(opts.zone.countIntervalSec) === 60) {
-      opts.zone.countIntervalSec = 14400
+      opts.zone.countIntervalSec = 21600
       writeStorage()
     }
     localStorage.setItem(FLAG, '1')

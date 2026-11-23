@@ -72,14 +72,15 @@ export function normalizeEvents(evt) {
 
 /**
  * 区域事件的老记录兜底文案（record.text 为空的那些）。
- * 新记录在产生时就把「有 N 人 + 通道名 + 区域名」写进 text，这里的口径必须一致，
+ * 新记录在产生时就把「通道名 + 区域名 + 区内人数」写进 text，这里口径必须一致，
  * 否则同一天的列表里会出现两种句式（托盘一眼就能看出别扭）。
+ * §5.188：N 是区内现有轨迹数，不是本次跨入的人数，放进括号免得和计数人次混淆。
  */
 function zoneBrief(r, verb) {
   const n = Math.max(1, Number(r.people) || 1)
   const zone = r.zoneName || '区域'
   const where = r.camName ? `${r.camName}「${zone}」` : `「${zone}」`
-  return verb === '徘徊' ? `有 ${n} 人在 ${where}徘徊` : `有 ${n} 人${verb} ${where}`
+  return verb === '徘徊' ? `有 ${n} 人在 ${where}徘徊` : `有人${verb} ${where}（区内现有 ${n} 人）`
 }
 
 /**

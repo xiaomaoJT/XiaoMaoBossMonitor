@@ -874,16 +874,17 @@ export function useAiExtras(options) {
 /**
  * 区域事件文案（与 server/analyzer.mjs 的 zoneText 逐字一致）
  *
- * `有 2 人走入 电梯「1」`：人数 + 通道名 + 区域名。人数由 useTracker 产生事件时
- * 算好（该区域此刻人数，单人恒为 1），这里只负责拼句子。
+ * `有人走入 电梯「1」（区内现有 2 人）`：一个人跨入边沿 = 一条事件 + 计数人次 +1；
+ * N 是**此刻区内轨迹数**（单人事件恒为 1），不是「本次一下进来了 N 人」。
+ * §5.188 起把 N 放到括号里，免得和「累计经过人次」被读成两笔不同的账。
  */
 function zoneText(evt, camName) {
   const sec = Math.round((evt.dwellMs || 0) / 1000)
   const n = Math.max(1, Number(evt.people) || 1)
   const zone = evt.zoneName || '区域'
   const where = camName ? `${camName}「${zone}」` : `「${zone}」`
-  if (evt.kind === 'enter') return `有 ${n} 人走入 ${where}`
-  if (evt.kind === 'exit') return `有 ${n} 人走出 ${where}（停留 ${sec} 秒）`
+  if (evt.kind === 'enter') return `有人走入 ${where}（区内现有 ${n} 人）`
+  if (evt.kind === 'exit') return `有人走出 ${where}（区内现有 ${n} 人 · 停留 ${sec} 秒）`
   return `有 ${n} 人在 ${where}徘徊（已停留 ${sec} 秒）`
 }
 

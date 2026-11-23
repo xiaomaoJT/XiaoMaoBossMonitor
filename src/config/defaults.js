@@ -37,19 +37,19 @@ export const COUNT_STAT_INTERVAL_MS = 60 * 1000
 
 /**
  * §5.176 计数**落库**槽位：按统计推送间隔以本地 00:00 为锚点均分一天。
- * 12 小时 → 一天 2 槽，4 小时 → 6 槽，10 分钟 → 144 槽。用绝对时间算，
+ * 6 小时 → 一天 4 槽，8 小时 → 3 槽，10 分钟 → 144 槽。用绝对时间算，
  * 刷新页面不会重新起算；判重只需记住槽位号（localStorage）。
  * 0 人不占槽，当前人数非 0 才落。完整版后端用 kv 做同一套判重。
  *
  * @param {number} now 当前时间戳（ms）
- * @param {number} intervalSec 统计推送间隔（秒），非法值回落 14400（4 小时，UI 默认）
+ * @param {number} intervalSec 统计推送间隔（秒），非法值回落 21600（6 小时，UI 默认）
  * @param {number} [tzOffsetMin] 本地时区偏移（分钟，getTimezoneOffset 的相反数）
  * @returns {{slot:number, dayKey:string, startedAt:number}}
  */
 export function countLogSlot(now, intervalSec, tzOffsetMin) {
   const t = Number(now) || Date.now()
   let sec = Math.floor(Number(intervalSec))
-  if (!Number.isFinite(sec) || sec < 10 || sec > 86400) sec = 14400
+  if (!Number.isFinite(sec) || sec < 10 || sec > 86400) sec = 21600
   const ms = sec * 1000
   const offMin = Number.isFinite(tzOffsetMin)
     ? Number(tzOffsetMin)
@@ -809,15 +809,15 @@ const BASE_OPTIONS = {
      */
     countPush: true,
     /**
-     * 计数推送间隔（秒）。默认 **4 小时**。
+     * 计数推送间隔（秒）。默认 **6 小时**（21600）。
      *
-     * 为什么从 60 秒改成 14400：这是一条**定时播报**而不是"报警" ——
+     * 为什么从 60 秒改成按小时播报：这是一条**定时播报**而不是"报警" ——
      * 画面里 0 个人它也会照推（历史行为），60 秒一条意味着一夜之间几百条
      * 「人员计数 · 大门外」推送，用户根本没法把真正的报警从里面捞出来。
-     * 4 小时一次把它还原成"定时汇报"的本意；想更密可以在设置里改
+     * 6 小时一次把它还原成"定时汇报"的本意；设置里有 6 / 8 小时等档位
      * （10 分钟 ~ 24 小时可选）。已装的老配置会在启动时一次性迁移（见 App.vue）。
      */
-    countIntervalSec: 14400,
+    countIntervalSec: 21600,
     /** 在画面上显示当前人数 */
     showOnScreen: true
   },
@@ -1767,7 +1767,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.9.12'
+  version: '1.9.13'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
