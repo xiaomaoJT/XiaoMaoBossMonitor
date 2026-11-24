@@ -2070,6 +2070,18 @@ defineExpose({
   object-fit: contain;
 }
 
+/*
+ * §5.200 单一 loading：Jessibuca 自带的 .jessibuca-loading（绿色小环，z-index:20）
+ * 会和自绘的 .state .spinner（灰色大环）同时转，看起来像两层 loading 叠在一起。
+ * 播放器那层 loadingText 为空、只有装饰环、没有任何文字信息；统一隐藏后，
+ * 连接/重连态由自绘 .state（文字 + 立即重连按钮）承接，播放器内部自愈则靠
+ * .recover-tag 角落提示（见 pause/loadingTimeout 分支），不会丢失反馈。
+ * 播放器用 inline style 写 display:flex，所以这里必须 !important 才能覆盖。
+ */
+.video-box :deep(.jessibuca-loading) {
+  display: none !important;
+}
+
 .overlay {
   position: absolute;
   inset: 0;

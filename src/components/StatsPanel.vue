@@ -110,7 +110,8 @@
             {{ d.label }}
           </button>
         </div>
-        <DistBars v-if="segmentRows.length" :rows="segmentRows" unit="次" />
+        <!-- §5.200 「类型·通道名」标签较长，单独加宽标签列，避免全被截成省略号 -->
+        <DistBars v-if="segmentRows.length" :rows="segmentRows" unit="次" label-width="112px" />
         <p class="no-data" v-else>该周期没有细分记录。</p>
         <p class="tip-line">{{ segmentNote }}</p>
       </section>

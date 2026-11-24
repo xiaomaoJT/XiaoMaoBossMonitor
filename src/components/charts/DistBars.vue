@@ -1,5 +1,5 @@
 <template>
-  <div class="db">
+  <div class="db" :style="labelWidth ? { '--db-label-w': labelWidth } : null">
     <!-- 统一刻度：六条横条共用同一个 max，上面配一把尺子。
          没有这把尺子的横条只能比"谁长谁短"，读不出"差多少" -->
     <div class="db-row db-ruler" aria-hidden="true">
@@ -47,7 +47,13 @@ import { computed, ref } from 'vue'
 const props = defineProps({
   /** [{ id, label, n, color }] */
   rows: { type: Array, default: () => [] },
-  unit: { type: String, default: '次' }
+  unit: { type: String, default: '次' },
+  /**
+   * §5.200 标签列宽度。默认 38px 够短标签用；细分构成这类「类型·通道名」
+   * 长标签会全被截成省略号，调用方传一个更宽的值（如 108px）即可，
+   * 不影响其它分布卡片。
+   */
+  labelWidth: { type: String, default: '' }
 })
 
 const max = computed(() => Math.max(0, ...props.rows.map((r) => Number(r.n) || 0)))
@@ -92,7 +98,7 @@ function onTap(id) {
 /* 四列网格：标签 / 条 / 数字 / 百分比。尺子用同一套模板，所以天然对齐 */
 .db-row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px 34px;
+  grid-template-columns: var(--db-label-w, 38px) minmax(0, 1fr) 38px 34px;
   align-items: center;
   gap: 6px;
 }
