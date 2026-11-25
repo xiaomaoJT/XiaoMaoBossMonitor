@@ -71,8 +71,8 @@ npm run serve          # 起本地静态服务并打开浏览器（含钉钉/企
     <th width="50%">统计面板 · KPI / 趋势 / 分布</th>
   </tr>
   <tr>
-    <td valign="top">![客户端事件中心：今日/历史/未读分类与类型筛选（截图已脱敏）](docs/images/ui-events.png)</td>
-    <td valign="top">![客户端统计面板：KPI、趋势、环形、分布与推送成功率（截图已脱敏）](docs/images/ui-stats.png)</td>
+    <td valign="top"><img src="docs/images/ui-events.png" alt="客户端事件中心：今日/历史/未读分类与类型筛选（截图已脱敏）" width="100%"></td>
+    <td valign="top"><img src="docs/images/ui-stats.png" alt="客户端统计面板：KPI、趋势、环形、分布与推送成功率（截图已脱敏）" width="100%"></td>
   </tr>
 </table>
 
@@ -184,8 +184,8 @@ npm run serve          # 起本地静态服务并打开浏览器（含钉钉/企
     <th width="50%">完整版 · 日志 → 事件</th>
   </tr>
   <tr>
-    <td valign="top">![完整版托盘控制台概览（截图已脱敏）](docs/images/tray-overview.png)</td>
-    <td valign="top">![完整版托盘控制台日志-事件：类型筛选与抓拍详情（截图已脱敏）](docs/images/tray-log-events.png)</td>
+    <td valign="top"><img src="docs/images/tray-overview.png" alt="完整版托盘控制台概览（截图已脱敏）" width="100%"></td>
+    <td valign="top"><img src="docs/images/tray-log-events.png" alt="完整版托盘控制台日志-事件：类型筛选与抓拍详情（截图已脱敏）" width="100%"></td>
   </tr>
 </table>
 
