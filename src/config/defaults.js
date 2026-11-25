@@ -79,6 +79,11 @@ export function countLogSlot(now, intervalSec, tzOffsetMin) {
  * `hasZone` 由跟踪器当前 zones 判定 —— 流向用的「画面全区域」是 virtual，
  * 不计 totalIn，因此不算有效区域。
  *
+ * §5.201：跨过本地 00:00 后累计人次从 0 起算，但已经在区域内的人当天没有
+ * 新的跨入边沿，于是会出现「当前 1 人 · 累计经过 0 人次」这种自相矛盾的
+ * 文案。展示时把当日累计的下界钉到当前人数（跨零点驻留的人也算进来）；
+ * 底层 totalIn 仍是真实的跨入边沿计数，统计存档语义不动。
+ *
  * @param {string} mode 计数展示模式：current / total / both
  * @param {{current:number,totalIn:number}} c 计数快照
  * @param {{hasZone?:boolean, short?:boolean}} [opts]
@@ -86,9 +91,12 @@ export function countLogSlot(now, intervalSec, tzOffsetMin) {
  */
 export function countText(mode, c, opts) {
   const cur = Math.max(0, Number(c && c.current) || 0)
-  const total = Math.max(0, Number(c && c.totalIn) || 0)
+  const realTotal = Math.max(0, Number(c && c.totalIn) || 0)
   const hasZone = !opts || opts.hasZone !== false
   const short = !!(opts && opts.short)
+  // 只改展示，不改落库：跨零点仍在区内的人不可能有今天的跨入边沿，
+  // 但「当前 1 人累计 0 人次」看着就是坏的，故下界取当前人数。
+  const total = hasZone ? Math.max(realTotal, cur) : realTotal
   if (mode === 'total' && hasZone) return short ? `累计 ${total} 人次` : `累计经过 ${total} 人次`
   if (mode === 'both' && hasZone) {
     return short ? `${cur} 人 · 累计 ${total}` : `当前 ${cur} 人 · 累计经过 ${total} 人次`
@@ -1767,7 +1775,7 @@ export const BRAND = {
    *    三处不一致时 `npm ci` 会告警、桌面端「关于」与包内版本会对不上。
    *    规则见根目录 CHANGELOG.md（语义化版本：加功能 +0.1.0，修 bug +0.0.1）。
    */
-  version: '1.9.17'
+  version: '1.9.18'
 }
 
 export const STORAGE_KEY = 'monitor-wall-config-v1'
