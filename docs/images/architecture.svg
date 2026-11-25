@@ -1,116 +1,119 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="system-ui, 'PingFang SC', 'Microsoft YaHei', sans-serif">
-  <rect width="1100" height="720" fill="#f8fafc"/>
-  <text x="40" y="42" font-size="20" font-weight="700" fill="#0f172a">BossMonitor 架构与仓库边界 · 开源客户端 v1.8.0</text>
-  <text x="40" y="64" font-size="12" fill="#94a3b8">示意图 · 非真实截图。实线框 = 本仓库已开源；虚线框 = 独立组件，不在本仓库、也不在任何历史提交里</text>
-
-  <!-- 图例 -->
-  <g transform="translate(830,30)">
-    <rect x="0" y="0" width="14" height="10" rx="2" fill="#ffffff" stroke="#3b82f6"/>
-    <text x="20" y="9" font-size="11" fill="#1d4ed8">已开源</text>
-    <rect x="96" y="0" width="14" height="10" rx="2" fill="#fef2f2" stroke="#f87171" stroke-dasharray="4 3"/>
-    <text x="116" y="9" font-size="11" fill="#b91c1c">未开源</text>
-  </g>
-
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 780" font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif">
   <defs>
-    <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#3b82f6"/>
+    <linearGradient id="gOpen" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#065f46"/><stop offset="1" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="gPillG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#059669"/><stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <pattern id="hatch" width="14" height="14" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="14" height="14" fill="#fff1f2"/>
+      <line x1="0" y1="0" x2="0" y2="14" stroke="#fecdd3" stroke-width="3" opacity="0.45"/>
+    </pattern>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
     </marker>
     <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#f87171"/>
+      <path d="M0,0 L10,5 L0,10 z" fill="#fb7185"/>
     </marker>
   </defs>
 
-  <!-- 摄像头 -->
-  <rect x="40" y="100" width="180" height="92" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
-  <text x="56" y="128" font-size="13.5" font-weight="600" fill="#0f172a">摄像头信号源</text>
-  <text x="56" y="150" font-size="11.5" fill="#64748b">ws-flv（H.264 / H.265）</text>
-  <text x="56" y="170" font-size="11.5" fill="#64748b">N 路 · 每路一路流</text>
-  <text x="56" y="187" font-size="10" fill="#94a3b8">RTSP 需转封装；地址自备</text>
+  <rect width="1200" height="780" fill="#f6f8fc"/>
+  <text x="48" y="50" font-size="23" font-weight="800" fill="#0f172a">BossMonitor 架构与仓库边界</text>
+  <rect x="952" y="26" width="200" height="32" rx="16" fill="url(#gPillG)"/>
+  <text x="1052" y="47" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">v1.9.18 · Apache-2.0</text>
+  <text x="48" y="76" font-size="12.5" fill="#64748b">绿色实线框 = 本仓库已开源 · 红色虚线框 = 独立组件，不在本仓库、也不在任何历史提交里</text>
 
-  <!-- 展示端（本仓库） -->
-  <rect x="40" y="232" width="380" height="340" rx="12" fill="#ffffff" stroke="#3b82f6" stroke-width="1.6"/>
-  <path d="M40 244 a12 12 0 0 1 12 -12 h356 a12 12 0 0 1 12 12 v24 h-380 z" fill="#eff6ff"/>
-  <text x="58" y="258" font-size="13" font-weight="700" fill="#1d4ed8">展示端 × 6 · 本仓库（clone 即跑）</text>
+  <!-- ═══ 摄像头 ═══ -->
+  <rect x="48" y="150" width="204" height="150" rx="14" fill="#ffffff" stroke="#d9e2ee"/>
+  <path d="M48 164 a14 14 0 0 1 14 -14 h176 a14 14 0 0 1 14 14 v22 h-204 z" fill="#f1f5f9"/>
+  <text x="64" y="178" font-size="13.5" font-weight="700" fill="#0f172a">摄像头信号源</text>
+  <text x="64" y="214" font-size="11" fill="#334155">ws-flv · H.264 / H.265</text>
+  <text x="64" y="236" font-size="11" fill="#334155">RTSP · N 路每路一流</text>
+  <text x="64" y="258" font-size="10.5" fill="#94a3b8">流地址自备</text>
 
-  <text x="58" y="292" font-size="11" fill="#475569">浏览器 / macOS / Windows / iOS / Apple Watch / 小程序</text>
+  <!-- ═══ 本仓库开源客户端（hero 绿） ═══ -->
+  <rect x="300" y="104" width="424" height="420" rx="14" fill="#ffffff" stroke="#6ee7b7" stroke-width="1.8"/>
+  <path d="M300 118 a14 14 0 0 1 14 -14 h396 a14 14 0 0 1 14 14 v32 h-424 z" fill="url(#gOpen)"/>
+  <text x="318" y="140" font-size="15" font-weight="800" fill="#ffffff">开源客户端 · 本仓库（浏览器内）</text>
+  <text x="706" y="140" font-size="10.5" fill="#d1fae5" text-anchor="end">clone 即得 ✓</text>
 
-  <rect x="58" y="304" width="344" height="46" rx="7" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="72" y="323" font-size="11.5" font-weight="600" fill="#334155">大屏画面 · Jessibuca WASM 软解</text>
-  <text x="72" y="339" font-size="10.8" fill="#64748b">多路网格 / 三种布局 / 遮罩 / 单路放大</text>
+  <g font-size="11.3" fill="#334155">
+    <text x="322" y="188">✓ <tspan font-weight="700" fill="#0f172a">多路播放</tspan>：ws-flv / HLS 秒开 · 帧步进 · 性能面板</text>
+    <text x="322" y="220">✓ <tspan font-weight="700" fill="#0f172a">页面内检测</tspan>：onnxruntime-web 人形 / 人脸 / 姿态</text>
+    <text x="322" y="252">✓ <tspan font-weight="700" fill="#0f172a">区域画框 · 静默</tspan> · 隐私遮罩 · 水印 · 盲视</text>
+    <text x="322" y="284">✓ <tspan font-weight="700" fill="#0f172a">事件中心</tspan>：今日 / 历史 / 未读 + 类型筛选</text>
+    <text x="322" y="316">✓ <tspan font-weight="700" fill="#0f172a">统计面板</tspan>：KPI / 趋势 / 环形 / 分布 / 推送成功率</text>
+    <text x="322" y="348">✓ <tspan font-weight="700" fill="#0f172a">三渠道推送</tspan>：钉钉 / 企微 / TG，前端直发</text>
+    <text x="322" y="380">✓ <tspan font-weight="700" fill="#0f172a">登录门禁</tspan> · 配置导入导出 · 深浅主题 · 大屏</text>
+  </g>
 
-  <rect x="58" y="358" width="344" height="54" rx="7" fill="#ecfdf5" stroke="#a7f3d0"/>
-  <text x="72" y="377" font-size="11.5" font-weight="600" fill="#047857">页面内推理 · ONNX Runtime Web</text>
-  <text x="72" y="393" font-size="10.8" fill="#475569">人形 · 人脸 · 姿态 · 区域 · 流向 · 计数</text>
-  <text x="72" y="406" font-size="10.2" fill="#b45309">需自备 7 个 ONNX 模型，否则不产生事件</text>
+  <rect x="318" y="404" width="388" height="96" rx="9" fill="#ecfdf5" stroke="#a7f3d0"/>
+  <text x="332" y="428" font-size="11.5" font-weight="700" fill="#047857">这一整块独立可跑</text>
+  <text x="332" y="450" font-size="10.5" fill="#475569">看画面、改配置、跑页面内检测（自备模型）、发推送</text>
+  <text x="332" y="470" font-size="10.5" fill="#475569">关掉页面即停止 · 不做服务端落盘</text>
+  <text x="318" y="518" font-size="10.5" fill="#94a3b8">0 依赖自绘 SVG · 同一份 dist 六端复用 · 纯函数判定与完整版同源</text>
 
-  <rect x="58" y="420" width="344" height="46" rx="7" fill="#fffbeb" stroke="#fde68a"/>
-  <text x="72" y="439" font-size="11.5" font-weight="600" fill="#b45309">推送调度 · useAlertPush</text>
-  <text x="72" y="455" font-size="10.8" fill="#475569">三渠道 · 限流 · 合并 · 免打扰 · 模板</text>
+  <!-- ═══ 未开源独立组件（红虚线 + 斜纹） ═══ -->
+  <rect x="772" y="104" width="380" height="420" rx="14" fill="url(#hatch)" stroke="#fb7185" stroke-width="1.6" stroke-dasharray="8 5"/>
+  <path d="M772 118 a14 14 0 0 1 14 -14 h352 a14 14 0 0 1 14 14 v32 h-380 z" fill="#fee2e2"/>
+  <text x="790" y="140" font-size="15" font-weight="800" fill="#b91c1c">独立组件 · 未开源（完整版才有）</text>
 
-  <rect x="58" y="474" width="344" height="54" rx="7" fill="#f5f3ff" stroke="#ddd6fe"/>
-  <text x="72" y="493" font-size="11.5" font-weight="600" fill="#6d28d9">本地存储 · IndexedDB</text>
-  <text x="72" y="509" font-size="10.8" fill="#475569">事件 / 人脸库 / 统计 · 登录门禁与配置导入导出</text>
-  <text x="72" y="522" font-size="10.2" fill="#94a3b8">关掉页面即停止，不做服务端落盘</text>
+  <g font-size="11.2" fill="#7f1d1d">
+    <text x="792" y="188">✗ <tspan font-weight="700" fill="#4c0519">7×24 常驻引擎</tspan>：ffmpeg → 推理 → SQLite 落库</text>
+    <text x="792" y="216">✗ <tspan font-weight="700" fill="#4c0519">桌面托盘外壳</tspan> + 七页控制台 + 口令闸门</text>
+    <text x="792" y="244">✗ <tspan font-weight="700" fill="#4c0519">观察模式</tspan>：观察机接入 / 提权 / 观察历史</text>
+    <text x="792" y="272">✗ <tspan font-weight="700" fill="#4c0519">自愈与值守</tspan>：自愈重启 · 哨兵 · 硬重启 · TG 遥控</text>
+    <text x="792" y="300">✗ <tspan font-weight="700" fill="#4c0519">命中修正 / 陌生人反例库</tspan> · 值守查岗</text>
+    <text x="792" y="328">✗ <tspan font-weight="700" fill="#4c0519">后端模式</tspan>：配置双向同步 / 事件增量</text>
+    <text x="792" y="356">✗ <tspan font-weight="700" fill="#4c0519">关键事件独立机器人</tspan> / 托管大屏给他人</text>
+  </g>
 
-  <text x="58" y="554" font-size="10.5" fill="#64748b">这一整块独立可跑：看画面、改配置、发推送</text>
+  <rect x="790" y="380" width="344" height="88" rx="9" fill="#ffffff" stroke="#fecaca"/>
+  <text x="804" y="404" font-size="11.5" font-weight="700" fill="#b91c1c">缺它最直观的两件事</text>
+  <text x="804" y="426" font-size="10.5" fill="#78716c">关掉页面就停；手机不能遥控电脑端</text>
+  <text x="804" y="446" font-size="10.5" fill="#78716c">多台设备各一份配置，互不相通</text>
+  <text x="792" y="492" font-size="10.5" fill="#a1a1aa">以上逐条对应「clone 本仓库体验不到」的能力</text>
 
-  <!-- 常驻引擎（未开源） -->
-  <rect x="460" y="232" width="320" height="340" rx="12" fill="#fef7f7" stroke="#f87171" stroke-width="1.6" stroke-dasharray="7 5"/>
-  <path d="M460 244 a12 12 0 0 1 12 -12 h296 a12 12 0 0 1 12 12 v24 h-320 z" fill="#fee2e2"/>
-  <text x="478" y="258" font-size="12.8" font-weight="700" fill="#b91c1c">独立组件 · 未开源（完整版才有）</text>
-  <text x="478" y="286" font-size="10.5" fill="#b91c1c">以下逐条对应「clone 本仓库体验不到」的能力：</text>
+  <!-- ═══ 推送渠道 ═══ -->
+  <rect x="48" y="360" width="204" height="164" rx="14" fill="#ffffff" stroke="#d9e2ee"/>
+  <path d="M48 374 a14 14 0 0 1 14 -14 h176 a14 14 0 0 1 14 14 v22 h-204 z" fill="#ccfbf1"/>
+  <text x="64" y="394" font-size="13.5" font-weight="700" fill="#115e59">推送渠道 → 手机</text>
+  <text x="64" y="430" font-size="11" fill="#334155">钉钉（加签）· 企业微信</text>
+  <text x="64" y="452" font-size="11" fill="#334155">Telegram Bot</text>
+  <text x="64" y="478" font-size="10.5" fill="#94a3b8">本仓库由前端直发</text>
+  <text x="64" y="498" font-size="10.5" fill="#94a3b8">完整版引擎也可直推</text>
 
-  <text x="478" y="312" font-size="10.6" fill="#7f1d1d">× 7×24 常驻引擎（ffmpeg → 推理 → SQLite 落库）</text>
-  <text x="478" y="336" font-size="10.6" fill="#7f1d1d">× 桌面托盘外壳 + 五页控制台 + 口令闸门</text>
-  <text x="478" y="360" font-size="10.6" fill="#7f1d1d">× 观察模式 / 观察机可见 / 观察历史</text>
-  <text x="478" y="384" font-size="10.6" fill="#7f1d1d">× 托盘事件保留上限 / 类型过滤 / 数量徽标</text>
-  <text x="478" y="408" font-size="10.6" fill="#7f1d1d">× 自愈重启 · 状态哨兵 · 定时巡检 · 硬重启</text>
-  <text x="478" y="432" font-size="10.6" fill="#7f1d1d">× Telegram 远程指令 · 命中修正 / 反例库</text>
-  <text x="478" y="456" font-size="10.6" fill="#7f1d1d">× 后端模式（配置双向同步 / 事件增量 / 导出）</text>
-  <text x="478" y="480" font-size="10.6" fill="#7f1d1d">× 关键事件独立机器人 / 托管大屏给他人</text>
+  <!-- 连线 -->
+  <line x1="252" y1="225" x2="294" y2="225" stroke="#64748b" stroke-width="1.6" marker-end="url(#ar)"/>
+  <text x="256" y="214" font-size="10.5" fill="#64748b">拉流</text>
 
-  <rect x="478" y="498" width="284" height="56" rx="7" fill="#ffffff" stroke="#fecaca"/>
-  <text x="491" y="517" font-size="10.8" font-weight="600" fill="#b91c1c">缺它最直观的两件事</text>
-  <text x="491" y="534" font-size="10.4" fill="#78716c">关掉页面就停；手机不能遥控</text>
-  <text x="491" y="548" font-size="10.4" fill="#78716c">多台设备各一份配置，不互通</text>
+  <path d="M380 524 V544 H150 V530" fill="none" stroke="#0d9488" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="200" y="538" font-size="10.5" fill="#0d9488">前端直发（本仓库已有）</text>
 
-  <!-- 推送渠道 -->
-  <rect x="810" y="232" width="250" height="150" rx="10" fill="#ffffff" stroke="#cbd5e1"/>
-  <text x="826" y="260" font-size="13" font-weight="600" fill="#0f172a">推送渠道</text>
-  <text x="826" y="286" font-size="11.2" fill="#334155">钉钉（加签）· 企业微信</text>
-  <text x="826" y="308" font-size="11.2" fill="#334155">Telegram Bot</text>
-  <text x="826" y="334" font-size="10.5" fill="#0d9488">→ 推送到你的手机</text>
-  <text x="826" y="356" font-size="10.2" fill="#94a3b8">钉钉 / 企微经本地代理发出</text>
+  <line x1="724" y1="210" x2="766" y2="210" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+  <text x="726" y="198" font-size="10" fill="#b91c1c">HTTP 同步</text>
+  <line x1="766" y1="252" x2="728" y2="252" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+  <text x="726" y="274" font-size="10" fill="#b91c1c">事件增量</text>
 
-  <!-- 想体验怎么办 -->
-  <rect x="810" y="400" width="250" height="172" rx="10" fill="#f8fafc" stroke="#cbd5e1"/>
-  <text x="826" y="426" font-size="12" font-weight="700" fill="#0f172a">想体验未开源能力？</text>
-  <text x="826" y="452" font-size="10.4" fill="#475569">① 自备 7 个 ONNX 模型</text>
-  <text x="838" y="468" font-size="10.2" fill="#64748b">→ 页面内检测可出告警（关页仍停）</text>
-  <text x="826" y="492" font-size="10.4" fill="#475569">② 自行实现常驻引擎</text>
-  <text x="838" y="508" font-size="10.2" fill="#64748b">→ 按 /api 契约对接后端模式</text>
-  <text x="826" y="532" font-size="10.4" fill="#475569">③ 托盘 / 观察 / 自愈 / TG 遥控</text>
-  <text x="838" y="548" font-size="10.2" fill="#64748b">→ 属完整版，本仓库不会提供</text>
+  <!-- ═══ 想体验怎么办 ═══ -->
+  <rect x="300" y="576" width="852" height="124" rx="14" fill="#ffffff" stroke="#d9e2ee"/>
+  <text x="320" y="606" font-size="13.5" font-weight="800" fill="#0f172a">想体验未开源能力？</text>
+  <text x="320" y="636" font-size="11" fill="#334155">① 自备 7 个 ONNX 模型</text>
+  <text x="320" y="658" font-size="10.2" fill="#94a3b8">→ 页面内检测可出告警（关页仍停）</text>
+  <text x="620" y="636" font-size="11" fill="#334155">② 自行实现常驻引擎</text>
+  <text x="620" y="658" font-size="10.2" fill="#94a3b8">→ 按 /api 契约对接后端模式</text>
+  <text x="920" y="636" font-size="11" fill="#334155">③ 托盘 / 观察 / 自愈 / TG 遥控</text>
+  <text x="920" y="658" font-size="10.2" fill="#94a3b8">→ 属完整版，本仓库不会提供</text>
 
-  <!-- 连线：全部走框外空白带，不穿过任何一方框 -->
-  <path d="M130 192 L130 232" fill="none" stroke="#3b82f6" stroke-width="1.6" marker-end="url(#arb)"/>
-  <text x="138" y="214" font-size="10" fill="#1d4ed8">拉流</text>
+  <!-- 边界一句话 -->
+  <rect x="48" y="576" width="204" height="124" rx="14" fill="#f8fafc" stroke="#d9e2ee"/>
+  <text x="64" y="604" font-size="11.5" font-weight="700" fill="#0f172a">本仓库单独部署即可</text>
+  <text x="64" y="628" font-size="10.2" fill="#64748b">看画面、改配置、页面内</text>
+  <text x="64" y="646" font-size="10.2" fill="#64748b">检测（自备模型）、发推送；</text>
+  <text x="64" y="664" font-size="10.2" fill="#64748b">与独立引擎间可选 HTTP 同步</text>
 
-  <path d="M220 146 L620 146 L620 232" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arr)"/>
-  <text x="430" y="140" font-size="10" fill="#b91c1c">仅独立组件主动拉流</text>
-
-  <path d="M420 300 L460 300" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arr)"/>
-  <path d="M460 322 L420 322" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arr)"/>
-
-  <!-- 前端直发走上方空白带（y=212），不横穿未开源清单 -->
-  <path d="M420 246 L420 212 L830 212 L830 232" fill="none" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arb)"/>
-  <text x="560" y="206" font-size="9.5" fill="#1d4ed8">前端直接发（本仓库已有）</text>
-
-  <!-- 引擎侧直推走两框之间的窄缝 -->
-  <path d="M780 520 L796 520 L796 350 L810 350" fill="none" stroke="#f87171" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#arr)"/>
-
-  <text x="40" y="612" font-size="11" fill="#64748b">本仓库单独部署即可：看画面、改配置、跑页面内检测（需自备模型）、发三渠道推送、看事件与统计；与独立引擎之间可选 HTTP 双向同步。</text>
-  <text x="40" y="634" font-size="11" fill="#b91c1c">虚线部分不在本仓库、也不在任何历史提交里 —— 需要「关掉页面还在盯」时才用得上，没有它照样能跑。</text>
-  <text x="40" y="656" font-size="11" fill="#94a3b8">前端与引擎若都就位，能力开关 / 流向匹配 / 静默判定 / 推送调度共用同一批纯函数源码，行为天然一致。</text>
-  <text x="40" y="684" font-size="10.5" fill="#94a3b8">※ 结构示意图，非真实系统截图；版本 v1.8.0，Apache-2.0。</text>
+  <!-- 页脚 -->
+  <text x="48" y="732" font-size="11" fill="#b91c1c">需要「关掉页面还在盯」时才用得上右侧虚线部分 —— 没有它，本仓库照样能跑。</text>
+  <text x="48" y="756" font-size="10.5" fill="#94a3b8">※ 结构示意图，非真实截图；前端与引擎都就位时，能力开关 / 流向匹配 / 静默判定共用同一批纯函数源码。</text>
 </svg>
